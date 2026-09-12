@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         preview_container.setFixedHeight(68)
         preview_row = QHBoxLayout(preview_container)
         preview_row.setContentsMargins(0, 0, 0, 0)
+        preview_row.setSpacing(10)
         self.thumbnail_label = QLabel(preview_container)
         self.thumbnail_label.setFixedSize(120, 68)
         self.thumbnail_label.setScaledContents(True)
