@@ -435,6 +435,11 @@ class MainWindow(QMainWindow):
         self.format_worker: FormatListWorker | None = None
         self.last_output_dir: str | None = None
 
+        self._info_fetch_timer = QTimer(self)
+        self._info_fetch_timer.setSingleShot(True)
+        self._info_fetch_timer.setInterval(700)
+        self._info_fetch_timer.timeout.connect(lambda: self.fetch_formats(auto=True))
+
         self.settings = QSettings("ytdlp-gui", "YTDownloaderGUI")
         default_out_dir = get_downloads_folder()
         saved_out_dir = self.settings.value("last_output_dir", default_out_dir, type=str)
@@ -463,6 +468,17 @@ class MainWindow(QMainWindow):
         out_row.addWidget(self.browse_btn)
         layout.addLayout(out_row)
 
+        info_row = QHBoxLayout()
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setFixedSize(160, 90)
+        self.thumbnail_label.setScaledContents(True)
+        self.thumbnail_label.setStyleSheet("background-color: rgba(128, 128, 128, 40);")
+        info_row.addWidget(self.thumbnail_label)
+        self.title_label = QLabel("")
+        self.title_label.setWordWrap(True)
+        info_row.addWidget(self.title_label, stretch=1)
+        layout.addLayout(info_row)
+
         self.simple_format_container = QWidget()
         simple_layout = QVBoxLayout(self.simple_format_container)
         simple_layout.setContentsMargins(0, 0, 0, 0)
@@ -486,25 +502,6 @@ class MainWindow(QMainWindow):
         self.detail_container = QWidget()
         detail_layout = QVBoxLayout(self.detail_container)
         detail_layout.setContentsMargins(0, 0, 0, 0)
-
-        fetch_row = QHBoxLayout()
-        self.fetch_formats_btn = QPushButton("フォーマット取得")
-        self.fetch_formats_btn.setEnabled(False)
-        self.fetch_formats_btn.clicked.connect(self.fetch_formats)
-        fetch_row.addWidget(self.fetch_formats_btn)
-        fetch_row.addStretch(1)
-        detail_layout.addLayout(fetch_row)
-
-        info_row = QHBoxLayout()
-        self.thumbnail_label = QLabel()
-        self.thumbnail_label.setFixedSize(160, 90)
-        self.thumbnail_label.setScaledContents(True)
-        self.thumbnail_label.setStyleSheet("background-color: rgba(128, 128, 128, 40);")
-        info_row.addWidget(self.thumbnail_label)
-        self.title_label = QLabel("")
-        self.title_label.setWordWrap(True)
-        info_row.addWidget(self.title_label, stretch=1)
-        detail_layout.addLayout(info_row)
 
         self.format_item_delegate = FormatItemDelegate()
         format_combo_min_width = sum(FORMAT_COLUMN_WIDTHS) + 40
@@ -612,7 +609,6 @@ class MainWindow(QMainWindow):
             self.format_combo,
             self.detail_checkbox,
             self.detail_label,
-            self.fetch_formats_btn,
             self.video_format_combo,
             self.audio_format_combo,
             self.mp3_checkbox,
@@ -622,17 +618,27 @@ class MainWindow(QMainWindow):
         self.auto_paste_from_clipboard()
 
     def on_url_changed(self, text: str):
-        self.fetch_formats_btn.setEnabled(bool(text.strip()) and self.detail_checkbox.isChecked())
+        self._info_fetch_timer.stop()
+        stripped = text.strip()
+        if stripped.startswith("http://") or stripped.startswith("https://"):
+            self._info_fetch_timer.start()
+        else:
+            self.title_label.setText("")
+            self.thumbnail_label.clear()
 
     def on_detail_toggled(self, checked: bool):
         self.simple_format_container.setVisible(not checked)
         self.detail_container.setVisible(checked)
         self.format_combo.setEnabled(not checked)
-        self.fetch_formats_btn.setEnabled(checked and bool(self.url_edit.text().strip()))
         has_items = self.video_format_combo.count() > 0
         self.video_format_combo.setEnabled(checked and has_items)
         self.audio_format_combo.setEnabled(checked and has_items)
         self.on_detail_selection_changed()
+
+        url = self.url_edit.text().strip()
+        is_fetching = self.format_worker is not None and self.format_worker.isRunning()
+        if checked and url and not has_items and not is_fetching:
+            self.fetch_formats(auto=False)
 
     def paste_from_clipboard(self):
         text = QApplication.clipboard().text().strip()
@@ -644,27 +650,34 @@ class MainWindow(QMainWindow):
         if text.startswith("http://") or text.startswith("https://"):
             self.url_edit.setText(text)
 
-    def fetch_formats(self):
+    def fetch_formats(self, auto: bool = False):
         url = self.url_edit.text().strip()
         if not url:
             return
 
-        self.fetch_formats_btn.setEnabled(False)
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
         self.video_format_combo.setEnabled(False)
         self.audio_format_combo.setEnabled(False)
         self.title_label.setText("")
         self.thumbnail_label.clear()
-        self.status_label.setText("フォーマット一覧を取得中...")
+        self.status_label.setText("動画情報を取得中...")
         self.spinner.start()
 
-        self.format_worker = FormatListWorker(url)
-        self.format_worker.finished_ok.connect(self.on_formats_fetched)
-        self.format_worker.finished_error.connect(self.on_formats_error)
-        self.format_worker.start()
+        worker = FormatListWorker(url)
+        self.format_worker = worker
+        worker.finished_ok.connect(
+            lambda formats, title, thumb, w=worker: self.on_formats_fetched(formats, title, thumb, w, auto)
+        )
+        worker.finished_error.connect(
+            lambda message, w=worker: self.on_formats_error(message, w, auto)
+        )
+        worker.start()
 
-    def on_formats_fetched(self, formats: list, title: str, thumbnail_bytes: bytes):
+    def on_formats_fetched(self, formats: list, title: str, thumbnail_bytes: bytes, worker, auto: bool = False):
+        if worker is not self.format_worker:
+            return
+
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
 
@@ -692,9 +705,8 @@ class MainWindow(QMainWindow):
             row = combo.count() - 1
             combo.setItemData(row, format_columns(fmt), FORMAT_COLUMN_ROLE)
 
-        self.video_format_combo.setEnabled(True)
-        self.audio_format_combo.setEnabled(True)
-        self.fetch_formats_btn.setEnabled(True)
+        self.video_format_combo.setEnabled(self.detail_checkbox.isChecked())
+        self.audio_format_combo.setEnabled(self.detail_checkbox.isChecked())
         self.on_detail_selection_changed()
 
         self.title_label.setText(title)
@@ -706,11 +718,16 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"動画{video_count}件・音声{audio_count}件のフォーマットを取得しました")
         self.spinner.stop()
 
-    def on_formats_error(self, message: str):
+    def on_formats_error(self, message: str, worker=None, auto: bool = False):
+        if worker is not None and worker is not self.format_worker:
+            return
+
         self.spinner.stop()
-        self.fetch_formats_btn.setEnabled(True)
-        self.status_label.setText("フォーマット取得に失敗しました")
-        QMessageBox.critical(self, "フォーマット取得エラー", message)
+        if auto:
+            self.status_label.setText("待機中")
+        else:
+            self.status_label.setText("フォーマット取得に失敗しました")
+            QMessageBox.critical(self, "フォーマット取得エラー", message)
 
     def on_detail_selection_changed(self, *_):
         if not self.detail_checkbox.isChecked():
