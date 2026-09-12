@@ -51,6 +51,12 @@ FORMAT_OPTIONS = {
     "音声のみ (最高音質)": "audio_best",
 }
 
+# 解像度を最優先しつつ、同じ解像度の中では最も互換性の高いコーデック(h264/aac)を選ぶ
+BEST_QUALITY_COMPATIBLE_SORT = ["res", "codec:avc:m4a"]
+
+# 音声ビットレートを最優先しつつ、同じビットレートの中では最も互換性の高いコーデック(aac/m4a)を選ぶ
+BEST_AUDIO_COMPATIBLE_SORT = ["abr", "acodec:m4a"]
+
 
 def format_size(num_bytes) -> str:
     if not num_bytes:
@@ -153,12 +159,20 @@ class DownloadWorker(QThread):
     finished_ok = pyqtSignal()
     finished_error = pyqtSignal(str)
 
-    def __init__(self, url: str, out_dir: str, format_spec: str, postprocessors: list | None = None):
+    def __init__(
+        self,
+        url: str,
+        out_dir: str,
+        format_spec: str,
+        postprocessors: list | None = None,
+        format_sort: list | None = None,
+    ):
         super().__init__()
         self.url = url
         self.out_dir = out_dir
         self.format_spec = format_spec
         self.postprocessors = postprocessors or []
+        self.format_sort = format_sort
         self._is_cancelled = False
 
     def cancel(self):
@@ -198,6 +212,9 @@ class DownloadWorker(QThread):
 
             if self.postprocessors:
                 ydl_opts["postprocessors"] = self.postprocessors
+
+            if self.format_sort:
+                ydl_opts["format_sort"] = self.format_sort
 
             ffmpeg_location = get_ffmpeg_location()
             if ffmpeg_location:
@@ -480,7 +497,7 @@ class MainWindow(QMainWindow):
     def append_log(self, msg: str):
         self.log_view.appendPlainText(msg)
 
-    def resolve_format_spec(self) -> tuple[str, list]:
+    def resolve_format_spec(self) -> tuple[str, list, list | None]:
         if self.detail_checkbox.isChecked():
             video_fmt = self.video_format_combo.currentData()
             audio_fmt = self.audio_format_combo.currentData()
@@ -503,21 +520,27 @@ class MainWindow(QMainWindow):
                             "preferredquality": "192",
                         }
                     ]
-            return format_spec, postprocessors
+            return format_spec, postprocessors, None
 
         format_label = self.format_combo.currentText()
         format_key = FORMAT_OPTIONS[format_label]
         if format_key == "audio_mp3":
-            return "ba/b", [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }
-            ]
+            return (
+                "ba/b",
+                [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+                None,
+            )
         if format_key == "audio_best":
-            return "ba/b", []
-        return format_key, []
+            return "ba/b", [], BEST_AUDIO_COMPATIBLE_SORT
+        if format_label == "動画 (最高画質)":
+            return format_key, [], BEST_QUALITY_COMPATIBLE_SORT
+        return format_key, [], None
 
     def start_download(self):
         url = self.url_edit.text().strip()
@@ -538,7 +561,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            format_spec, postprocessors = self.resolve_format_spec()
+            format_spec, postprocessors, format_sort = self.resolve_format_spec()
         except ValueError as e:
             QMessageBox.warning(self, "入力エラー", str(e))
             return
@@ -554,7 +577,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("ダウンロード中...")
 
-        self.worker = DownloadWorker(url, out_dir, format_spec, postprocessors)
+        self.worker = DownloadWorker(url, out_dir, format_spec, postprocessors, format_sort)
         self.worker.progress.connect(self.on_progress)
         self.worker.log.connect(self.append_log)
         self.worker.finished_ok.connect(self.on_finished_ok)
