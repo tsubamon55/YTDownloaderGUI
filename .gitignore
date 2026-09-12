@@ -1,0 +1,17 @@
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Bundled ffmpeg binaries (large, fetched separately - see README)
+ffmpeg/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
