@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,6 +18,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -36,15 +36,13 @@ from paths import get_downloads_folder, get_ffmpeg_location
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, SpinnerWidget
 from workers import DownloadWorker, FormatListWorker
 
-IDLE_STATUS_TEXT = "URLを入力すると自動で動画情報を取得します"
-TITLE_PLACEHOLDER_TEXT = "URLを入力すると、ここに動画のタイトルとサムネイルが表示されます"
+IDLE_STATUS_TEXT = "待機中"
 
 LINK_BUTTON_STYLE = """
 QPushButton {
     color: #1a73e8;
-    text-align: left;
     border: none;
-    padding: 2px 0;
+    padding: 2px 4px;
     background: transparent;
 }
 QPushButton:hover { text-decoration: underline; }
@@ -55,7 +53,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("YouTube 動画ダウンローダー")
-        self.resize(820, 560)
+        self.resize(760, 420)
 
         self.worker: DownloadWorker | None = None
         self.format_worker: FormatListWorker | None = None
@@ -74,90 +72,66 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
 
-        # --- ヘッダー ---
-        heading = QLabel("YouTube 動画ダウンローダー")
-        heading_font = heading.font()
-        heading_font.setPointSize(heading_font.pointSize() + 5)
-        heading_font.setBold(True)
-        heading.setFont(heading_font)
-        layout.addWidget(heading)
-
-        subheading = QLabel("動画のURLを貼り付けて「ダウンロード開始」を押すだけで保存できます")
-        subheading.setStyleSheet("color: #808080;")
-        layout.addWidget(subheading)
-
-        layout.addSpacing(6)
-
-        # --- ステップ1: URL入力 ---
-        layout.addWidget(self._make_step_label("① 動画のURLを貼り付け"))
-
+        # --- URL入力 ---
         url_row = QHBoxLayout()
+        url_row.addWidget(QLabel("URL:"))
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
-        self.url_edit.setMinimumHeight(34)
-        url_font = self.url_edit.font()
-        url_font.setPointSize(url_font.pointSize() + 1)
-        self.url_edit.setFont(url_font)
+        self.url_edit.setMinimumHeight(32)
         self.url_edit.textChanged.connect(self.on_url_changed)
         url_row.addWidget(self.url_edit, stretch=1)
         self.paste_btn = QPushButton("貼り付け")
-        self.paste_btn.setMinimumHeight(34)
         self.paste_btn.clicked.connect(self.paste_from_clipboard)
         url_row.addWidget(self.paste_btn)
         layout.addLayout(url_row)
 
-        info_row = QHBoxLayout()
+        # --- 動画プレビュー ---
+        preview_row = QHBoxLayout()
         self.thumbnail_label = QLabel()
-        self.thumbnail_label.setFixedSize(160, 90)
+        self.thumbnail_label.setFixedSize(120, 68)
         self.thumbnail_label.setScaledContents(True)
-        self.thumbnail_label.setStyleSheet(
-            "background-color: rgba(128, 128, 128, 40); border-radius: 4px;"
-        )
-        info_row.addWidget(self.thumbnail_label)
-        self.title_label = QLabel(TITLE_PLACEHOLDER_TEXT)
-        self.title_label.setStyleSheet("color: #808080;")
+        self.thumbnail_label.setStyleSheet("background-color: rgba(128, 128, 128, 35); border-radius: 3px;")
+        preview_row.addWidget(self.thumbnail_label)
+        self.title_label = QLabel("")
         self.title_label.setWordWrap(True)
-        info_row.addWidget(self.title_label, stretch=1)
-        layout.addLayout(info_row)
+        preview_row.addWidget(self.title_label, stretch=1)
+        layout.addLayout(preview_row)
 
-        layout.addWidget(self._make_separator())
-
-        # --- ステップ2: フォーマット選択 ---
-        layout.addWidget(self._make_step_label("② 画質・形式を選ぶ(そのままでもOK)"))
-
+        # --- フォーマット選択 ---
+        format_row = QHBoxLayout()
         self.simple_format_container = QWidget()
-        simple_layout = QVBoxLayout(self.simple_format_container)
+        simple_layout = QHBoxLayout(self.simple_format_container)
         simple_layout.setContentsMargins(0, 0, 0, 0)
-        fmt_row = QHBoxLayout()
+        simple_layout.addWidget(QLabel("形式:"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMAT_OPTIONS.keys())
-        self.format_combo.setMinimumHeight(30)
-        fmt_row.addWidget(self.format_combo, stretch=1)
-        simple_layout.addLayout(fmt_row)
-        layout.addWidget(self.simple_format_container)
-
-        detail_toggle_row = QHBoxLayout()
-        self.detail_toggle_btn = QPushButton("詳細設定を表示(手動でフォーマットを選択) ▾")
+        simple_layout.addWidget(self.format_combo, stretch=1)
+        format_row.addWidget(self.simple_format_container, stretch=1)
+        # simple_format_container が非表示のときはこのスペーサーが余白を吸収し、
+        # detail_toggle_btn が引き伸ばされて中央寄りに見えるのを防ぐ
+        format_row.addStretch(0)
+        self.detail_toggle_btn = QPushButton("詳細設定 ▾")
         self.detail_toggle_btn.setCheckable(True)
         self.detail_toggle_btn.setFlat(True)
+        self.detail_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.detail_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
         self.detail_toggle_btn.toggled.connect(self.on_detail_toggled)
-        detail_toggle_row.addWidget(self.detail_toggle_btn)
-        detail_toggle_row.addStretch()
-        layout.addLayout(detail_toggle_row)
+        format_row.addWidget(self.detail_toggle_btn)
+        self.format_row = format_row
+        layout.addLayout(format_row)
 
         self.detail_container = QWidget()
         detail_layout = QVBoxLayout(self.detail_container)
-        detail_layout.setContentsMargins(0, 4, 0, 0)
+        detail_layout.setContentsMargins(0, 2, 0, 0)
 
         self.format_item_delegate = FormatItemDelegate()
         format_combo_min_width = sum(FORMAT_COLUMN_WIDTHS) + 40
 
-        video_label = QLabel("動画フォーマット:")
-        audio_label = QLabel("音声フォーマット:")
+        video_label = QLabel("動画:")
+        audio_label = QLabel("音声:")
         label_width = max(video_label.sizeHint().width(), audio_label.sizeHint().width())
         video_label.setFixedWidth(label_width)
         audio_label.setFixedWidth(label_width)
@@ -206,11 +180,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.detail_container)
         self.detail_container.setVisible(False)
 
-        layout.addWidget(self._make_separator())
-
-        # --- 保存先(副次的な設定) ---
-        layout.addWidget(self._make_step_label("保存先", secondary=True))
+        # --- 保存先 ---
         out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("保存先:"))
         self.out_edit = QLineEdit(saved_out_dir)
         out_row.addWidget(self.out_edit, stretch=1)
         self.browse_btn = QPushButton("参照...")
@@ -218,16 +190,11 @@ class MainWindow(QMainWindow):
         out_row.addWidget(self.browse_btn)
         layout.addLayout(out_row)
 
-        layout.addWidget(self._make_separator())
-
-        # --- ステップ3: ダウンロード ---
-        layout.addWidget(self._make_step_label("③ ダウンロード開始"))
-
+        # --- ダウンロード ---
         btn_row = QHBoxLayout()
         self.download_btn = QPushButton("ダウンロード開始")
-        self.download_btn.setMinimumHeight(42)
+        self.download_btn.setMinimumHeight(40)
         download_font = self.download_btn.font()
-        download_font.setPointSize(download_font.pointSize() + 2)
         download_font.setBold(True)
         self.download_btn.setFont(download_font)
         self.download_btn.setStyleSheet(
@@ -268,18 +235,13 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel(IDLE_STATUS_TEXT)
         status_row.addWidget(self.status_label)
         status_row.addStretch()
-        layout.addLayout(status_row)
-
-        # --- ログ(折りたたみ、通常は非表示) ---
-        log_toggle_row = QHBoxLayout()
-        self.log_toggle_btn = QPushButton("ログを表示 ▾")
+        self.log_toggle_btn = QPushButton("ログ ▾")
         self.log_toggle_btn.setCheckable(True)
         self.log_toggle_btn.setFlat(True)
         self.log_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
         self.log_toggle_btn.toggled.connect(self.on_log_toggle)
-        log_toggle_row.addWidget(self.log_toggle_btn)
-        log_toggle_row.addStretch()
-        layout.addLayout(log_toggle_row)
+        status_row.addWidget(self.log_toggle_btn)
+        layout.addLayout(status_row)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -301,26 +263,10 @@ class MainWindow(QMainWindow):
 
         self.auto_paste_from_clipboard()
 
-    def _make_step_label(self, text: str, secondary: bool = False) -> QLabel:
-        label = QLabel(text)
-        font = label.font()
-        font.setBold(True)
-        if secondary:
-            font.setPointSize(max(7, font.pointSize() - 1))
-            label.setStyleSheet("color: #808080;")
-        label.setFont(font)
-        return label
-
-    def _make_separator(self) -> QFrame:
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        return line
-
     def on_log_toggle(self, checked: bool):
         self.log_view.setVisible(checked)
-        self.log_toggle_btn.setText("ログを隠す ▴" if checked else "ログを表示 ▾")
-        delta = 220
+        self.log_toggle_btn.setText("ログ ▴" if checked else "ログ ▾")
+        delta = 200
         if checked:
             self.resize(self.width(), self.height() + delta)
         else:
@@ -334,25 +280,16 @@ class MainWindow(QMainWindow):
         if stripped.startswith("http://") or stripped.startswith("https://"):
             self._info_fetch_timer.start()
         else:
-            self._set_title_placeholder()
+            self.title_label.setText("")
             self.thumbnail_label.clear()
             self.status_label.setText(IDLE_STATUS_TEXT)
 
-    def _set_title_placeholder(self):
-        self.title_label.setStyleSheet("color: #808080;")
-        self.title_label.setText(TITLE_PLACEHOLDER_TEXT)
-
-    def _set_title_loaded(self, title: str):
-        self.title_label.setStyleSheet("font-weight: 600;")
-        self.title_label.setText(title)
-
     def on_detail_toggled(self, checked: bool):
-        self.detail_toggle_btn.setText(
-            "詳細設定を隠す ▴" if checked else "詳細設定を表示(手動でフォーマットを選択) ▾"
-        )
+        self.detail_toggle_btn.setText("詳細設定 ▴" if checked else "詳細設定 ▾")
         self.simple_format_container.setVisible(not checked)
+        # simple_format_container が非表示の間は代わりにスペーサーへ伸縮を持たせる
+        self.format_row.setStretch(1, 1 if checked else 0)
         self.detail_container.setVisible(checked)
-        self.format_combo.setEnabled(not checked)
         has_items = self.video_format_combo.count() > 0
         self.video_format_combo.setEnabled(checked and has_items)
         self.audio_format_combo.setEnabled(checked and has_items)
@@ -382,7 +319,7 @@ class MainWindow(QMainWindow):
         self.audio_format_combo.clear()
         self.video_format_combo.setEnabled(False)
         self.audio_format_combo.setEnabled(False)
-        self._set_title_placeholder()
+        self.title_label.setText("")
         self.thumbnail_label.clear()
         self.info_ready = False
         self.download_btn.setEnabled(False)
@@ -434,15 +371,13 @@ class MainWindow(QMainWindow):
         self.audio_format_combo.setEnabled(self.detail_toggle_btn.isChecked())
         self.on_detail_selection_changed()
 
-        self._set_title_loaded(title)
+        self.title_label.setText(title)
         if thumbnail_bytes:
             pixmap = QPixmap()
             if pixmap.loadFromData(thumbnail_bytes):
                 self.thumbnail_label.setPixmap(pixmap)
 
-        self.status_label.setText(
-            f"動画{video_count}件・音声{audio_count}件のフォーマットを取得しました。ダウンロード開始を押してください"
-        )
+        self.status_label.setText(f"動画{video_count}件・音声{audio_count}件を検出しました")
         self.spinner.stop()
         self.info_ready = True
         self.download_btn.setEnabled(True)
@@ -453,7 +388,7 @@ class MainWindow(QMainWindow):
 
         self.spinner.stop()
         if auto:
-            self.status_label.setText("動画情報の取得に失敗しました。URLを確認してください")
+            self.status_label.setText("動画情報を取得できませんでした")
         else:
             self.status_label.setText("フォーマット取得に失敗しました")
             QMessageBox.critical(self, "フォーマット取得エラー", message)
@@ -600,7 +535,7 @@ class MainWindow(QMainWindow):
 
     def on_finished_ok(self):
         self.spinner.stop()
-        self.status_label.setText("完了しました。「フォルダを開く」で保存先を確認できます")
+        self.status_label.setText("完了")
         self.set_inputs_enabled(True)
         self.download_btn.setEnabled(self.info_ready)
         self.cancel_btn.setEnabled(False)
