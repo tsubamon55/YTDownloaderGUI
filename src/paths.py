@@ -9,7 +9,8 @@ from uuid import UUID
 def get_base_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    # 開発時: このファイルは <プロジェクトルート>/src/ にあるため、一つ上がルート
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class _GUID(ctypes.Structure):
