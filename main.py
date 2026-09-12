@@ -5,8 +5,8 @@ import traceback
 import urllib.request
 from uuid import UUID
 
-from PyQt6.QtCore import QRect, Qt, QSettings, QThread, pyqtSignal
-from PyQt6.QtGui import QPainter, QPixmap
+from PyQt6.QtCore import QRect, Qt, QSettings, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -217,6 +217,47 @@ class FormatComboBox(QComboBox):
             rect = QRect(x, field_rect.y(), width, field_rect.height())
             painter.drawText(rect, int(Qt.AlignmentFlag.AlignVCenter), text)
             x += width
+
+
+class SpinnerWidget(QWidget):
+    """処理がフリーズしていないことを示す回転インジケータ"""
+
+    def __init__(self, parent=None, diameter: int = 18):
+        super().__init__(parent)
+        self._diameter = diameter
+        self._angle = 0
+        self.setFixedSize(diameter, diameter)
+        self._timer = QTimer(self)
+        self._timer.setInterval(60)
+        self._timer.timeout.connect(self._advance)
+        self.setVisible(False)
+
+    def start(self):
+        self._angle = 0
+        self.setVisible(True)
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self.setVisible(False)
+
+    def _advance(self):
+        self._angle = (self._angle + 30) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.translate(self._diameter / 2, self._diameter / 2)
+        painter.rotate(self._angle)
+        pen = QPen(QColor("#1a73e8"))
+        pen.setWidth(3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        radius = self._diameter / 2 - 2
+        rect = QRect(int(-radius), int(-radius), int(radius * 2), int(radius * 2))
+        painter.drawArc(rect, 0, 270 * 16)
+        painter.end()
 
 
 class FormatHeaderWidget(QWidget):
@@ -540,8 +581,13 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         layout.addWidget(self.progress_bar)
 
+        status_row = QHBoxLayout()
+        self.spinner = SpinnerWidget()
+        status_row.addWidget(self.spinner)
         self.status_label = QLabel("待機中")
-        layout.addWidget(self.status_label)
+        status_row.addWidget(self.status_label)
+        status_row.addStretch()
+        layout.addLayout(status_row)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -598,6 +644,7 @@ class MainWindow(QMainWindow):
         self.title_label.setText("")
         self.thumbnail_label.clear()
         self.status_label.setText("フォーマット一覧を取得中...")
+        self.spinner.start()
 
         self.format_worker = FormatListWorker(url)
         self.format_worker.finished_ok.connect(self.on_formats_fetched)
@@ -644,8 +691,10 @@ class MainWindow(QMainWindow):
                 self.thumbnail_label.setPixmap(pixmap)
 
         self.status_label.setText(f"動画{video_count}件・音声{audio_count}件のフォーマットを取得しました")
+        self.spinner.stop()
 
     def on_formats_error(self, message: str):
+        self.spinner.stop()
         self.fetch_formats_btn.setEnabled(True)
         self.status_label.setText("フォーマット取得に失敗しました")
         QMessageBox.critical(self, "フォーマット取得エラー", message)
@@ -768,6 +817,7 @@ class MainWindow(QMainWindow):
         self.open_folder_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.status_label.setText("ダウンロード中...")
+        self.spinner.start()
 
         self.worker = DownloadWorker(url, out_dir, format_spec, postprocessors, format_sort)
         self.worker.progress.connect(self.on_progress)
@@ -786,6 +836,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(text)
 
     def on_finished_ok(self):
+        self.spinner.stop()
         self.status_label.setText("完了")
         self.set_inputs_enabled(True)
         self.download_btn.setEnabled(True)
@@ -794,6 +845,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100)
 
     def on_finished_error(self, message: str):
+        self.spinner.stop()
         self.status_label.setText("エラーまたはキャンセル")
         self.set_inputs_enabled(True)
         self.download_btn.setEnabled(True)
