@@ -556,12 +556,15 @@ class MainWindow(QMainWindow):
 
     def on_finished_ok(self):
         self.spinner.stop()
-        self.status_label.setText("完了")
+        self.url_edit.clear()
+        self.video_format_combo.clear()
+        self.audio_format_combo.clear()
         self.set_inputs_enabled(True)
-        self.download_btn.setEnabled(self.info_ready)
+        self.download_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
         self.open_folder_btn.setEnabled(True)
-        self.progress_bar.setValue(100)
+        self.progress_bar.reset()
+        self.status_label.setText("完了")
 
     def on_finished_error(self, message: str):
         self.spinner.stop()
@@ -569,4 +572,5 @@ class MainWindow(QMainWindow):
         self.set_inputs_enabled(True)
         self.download_btn.setEnabled(self.info_ready)
         self.cancel_btn.setEnabled(False)
+        self.progress_bar.reset()
         QMessageBox.critical(self, "ダウンロード失敗", message)
