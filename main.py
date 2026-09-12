@@ -329,10 +329,32 @@ class DownloadWorker(QThread):
     def _log_message(self, msg: str):
         self.log.emit(msg)
 
+    def _resolve_unique_title(self, title: str) -> str:
+        sanitized = yt_dlp.utils.sanitize_filename(title, restricted=False)
+        if not os.path.isdir(self.out_dir):
+            return sanitized
+        existing_stems = {os.path.splitext(name)[0] for name in os.listdir(self.out_dir)}
+        if sanitized not in existing_stems:
+            return sanitized
+        counter = 1
+        while True:
+            candidate = f"{sanitized} ({counter})"
+            if candidate not in existing_stems:
+                return candidate
+            counter += 1
+
     def run(self):
         try:
+            ffmpeg_location = get_ffmpeg_location()
+
+            with yt_dlp.YoutubeDL(
+                {"noplaylist": True, "quiet": True, "no_warnings": True}
+            ) as probe_ydl:
+                probe_info = probe_ydl.extract_info(self.url, download=False)
+            unique_title = self._resolve_unique_title(probe_info.get("title") or "video")
+
             ydl_opts = {
-                "outtmpl": os.path.join(self.out_dir, "%(title)s.%(ext)s"),
+                "outtmpl": os.path.join(self.out_dir, f"{unique_title}.%(ext)s"),
                 "progress_hooks": [self._progress_hook],
                 "noplaylist": True,
                 "quiet": True,
@@ -345,7 +367,6 @@ class DownloadWorker(QThread):
             if self.format_sort:
                 ydl_opts["format_sort"] = self.format_sort
 
-            ffmpeg_location = get_ffmpeg_location()
             if ffmpeg_location:
                 ydl_opts["ffmpeg_location"] = ffmpeg_location
 
@@ -488,6 +509,21 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         self.download_btn = QPushButton("ダウンロード開始")
+        self.download_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #1a73e8;
+                color: white;
+                font-weight: bold;
+                padding: 6px 16px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #1765cc; }
+            QPushButton:pressed { background-color: #145bb5; }
+            QPushButton:disabled { background-color: #a7c6f5; color: #f0f0f0; }
+            """
+        )
         self.download_btn.clicked.connect(self.start_download)
         btn_row.addWidget(self.download_btn)
         self.cancel_btn = QPushButton("キャンセル")
