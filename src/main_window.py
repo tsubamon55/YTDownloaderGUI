@@ -443,9 +443,40 @@ class MainWindow(QMainWindow):
             self.out_edit.setText(folder)
             self.settings.setValue("last_output_dir", folder)
 
+    def find_open_explorer_window(self, path: str):
+        """指定フォルダを既に開いているエクスプローラーウィンドウがあれば返す"""
+        normalized = os.path.normcase(os.path.normpath(path))
+        try:
+            import win32com.client
+
+            shell = win32com.client.Dispatch("Shell.Application")
+            for window in shell.Windows():
+                try:
+                    folder_path = window.Document.Folder.Self.Path
+                except Exception:
+                    continue
+                if os.path.normcase(os.path.normpath(folder_path)) == normalized:
+                    return window
+        except Exception:
+            return None
+        return None
+
     def open_output_folder(self):
-        if self.last_output_dir and os.path.isdir(self.last_output_dir):
-            os.startfile(self.last_output_dir)
+        if not (self.last_output_dir and os.path.isdir(self.last_output_dir)):
+            return
+
+        window = self.find_open_explorer_window(self.last_output_dir)
+        if window is not None:
+            try:
+                import win32gui
+
+                window.Visible = True
+                win32gui.SetForegroundWindow(window.HWND)
+            except Exception:
+                pass
+            return
+
+        os.startfile(self.last_output_dir)
 
     def set_inputs_enabled(self, enabled: bool):
         for widget in self.input_widgets:
@@ -565,6 +596,7 @@ class MainWindow(QMainWindow):
         self.open_folder_btn.setEnabled(True)
         self.progress_bar.reset()
         self.status_label.setText("完了")
+        self.open_output_folder()
 
     def on_finished_error(self, message: str):
         self.spinner.stop()
