@@ -270,6 +270,7 @@ class MainWindow(QMainWindow):
         ]
 
         self.auto_paste_from_clipboard()
+        self._sync_window_height()
 
     def _sync_window_height(self):
         """現在表示中のウィジェットに合わせてウィンドウの高さだけを追従させる"""
