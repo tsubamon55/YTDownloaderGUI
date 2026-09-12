@@ -169,17 +169,35 @@ class DownloadWorker(QThread):
             if count == 0:
                 self.log.emit(f"後処理完了: {name}")
 
-    def _resolve_unique_title(self, title: str) -> str:
+    def _expected_ext(self, probe_info: dict) -> str | None:
+        for pp in self.postprocessors:
+            if pp.get("key") == "FFmpegExtractAudio" and pp.get("preferredcodec"):
+                return pp["preferredcodec"]
+        ext = probe_info.get("ext")
+        if ext == "webm" and probe_info.get("requested_formats") and probe_info.get("thumbnails"):
+            # 映像+音声の結合時、サムネイル埋め込み(EmbedThumbnail)のためyt-dlpがwebmをmkvへ切り替える
+            ext = "mkv"
+        return ext
+
+    def _resolve_unique_title(self, title: str, expected_ext: str | None) -> str:
         sanitized = yt_dlp.utils.sanitize_filename(title, restricted=False)
         if not os.path.isdir(self.out_dir):
             return sanitized
-        existing_stems = {os.path.splitext(name)[0] for name in os.listdir(self.out_dir)}
-        if sanitized not in existing_stems:
+
+        def conflicts(stem: str) -> bool:
+            if expected_ext is None:
+                # 最終拡張子が特定できない場合は、同名の拡張子違いも含めて衝突とみなす
+                return any(
+                    os.path.splitext(name)[0] == stem for name in os.listdir(self.out_dir)
+                )
+            return os.path.isfile(os.path.join(self.out_dir, f"{stem}.{expected_ext}"))
+
+        if not conflicts(sanitized):
             return sanitized
         counter = 1
         while True:
             candidate = f"{sanitized} ({counter})"
-            if candidate not in existing_stems:
+            if not conflicts(candidate):
                 return candidate
             counter += 1
 
@@ -190,11 +208,18 @@ class DownloadWorker(QThread):
 
             self.log.emit(f"開始: {self.url}")
 
-            with yt_dlp.YoutubeDL(
-                {"noplaylist": True, "quiet": True, "no_warnings": True}
-            ) as probe_ydl:
+            probe_opts = {
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "format": self.format_spec,
+            }
+            if self.format_sort:
+                probe_opts["format_sort"] = self.format_sort
+            with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
                 probe_info = probe_ydl.extract_info(self.url, download=False)
-            self._unique_title = self._resolve_unique_title(probe_info.get("title") or "video")
+            expected_ext = self._expected_ext(probe_info)
+            self._unique_title = self._resolve_unique_title(probe_info.get("title") or "video", expected_ext)
             self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
 
             ydl_opts = {
