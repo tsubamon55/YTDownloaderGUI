@@ -1,10 +1,12 @@
+import ctypes
 import os
 import sys
 import traceback
 import urllib.request
+from uuid import UUID
 
-from PyQt6.QtCore import Qt, QSettings, QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QRect, Qt, QSettings, QThread, pyqtSignal
+from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,6 +20,10 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QPlainTextEdit,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionComboBox,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
 )
@@ -29,6 +35,39 @@ def get_base_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+    def __init__(self, guid_str: str):
+        u = UUID(guid_str)
+        self.Data1, self.Data2, self.Data3, rest = u.fields[0], u.fields[1], u.fields[2], u.bytes[8:]
+        for i, b in enumerate(rest):
+            self.Data4[i] = b
+
+
+def get_downloads_folder() -> str:
+    fallback = os.path.join(os.path.expanduser("~"), "Downloads")
+    try:
+        folder_id = _GUID("{374DE290-123F-4565-9164-39C4925E467B}")  # FOLDERID_Downloads
+        path_ptr = ctypes.c_wchar_p()
+        result = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(folder_id), 0, 0, ctypes.byref(path_ptr)
+        )
+        if result == 0 and path_ptr.value:
+            path = path_ptr.value
+            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+            if os.path.isdir(path):
+                return path
+    except Exception:
+        pass
+    return fallback
 
 
 def get_ffmpeg_location() -> str | None:
@@ -67,13 +106,18 @@ def format_size(num_bytes) -> str:
     return f"{mb:.1f}MB"
 
 
-def describe_format(fmt: dict) -> str:
+FORMAT_COLUMN_LABELS = ["ID", "形式", "種別", "画質/音質", "fps", "サイズ", "備考"]
+FORMAT_COLUMN_WIDTHS = [65, 55, 70, 90, 55, 70, 150]
+FORMAT_ROW_HEIGHT = 26
+
+
+def format_columns(fmt: dict) -> list[str]:
     format_id = fmt.get("format_id", "?")
     ext = fmt.get("ext", "?")
     vcodec = fmt.get("vcodec", "none")
     acodec = fmt.get("acodec", "none")
-    has_video = vcodec and vcodec != "none"
-    has_audio = acodec and acodec != "none"
+    has_video = bool(vcodec and vcodec != "none")
+    has_audio = bool(acodec and acodec != "none")
 
     if has_video and has_audio:
         kind = "動画+音声"
@@ -84,31 +128,117 @@ def describe_format(fmt: dict) -> str:
     else:
         kind = "不明"
 
-    parts = [f"[{format_id}]", ext, kind]
-
+    info1 = ""
+    info2 = ""
     if has_video:
         resolution = fmt.get("resolution") or (
             f"{fmt.get('width')}x{fmt.get('height')}" if fmt.get("height") else None
         )
-        if resolution:
-            parts.append(resolution)
+        info1 = resolution or ""
         fps = fmt.get("fps")
-        if fps:
-            parts.append(f"{fps}fps")
-
-    if has_audio and not has_video:
+        info2 = f"{fps}fps" if fps else ""
+    elif has_audio:
         abr = fmt.get("abr")
-        if abr:
-            parts.append(f"{abr:.0f}kbps")
+        info1 = f"{abr:.0f}kbps" if abr else ""
 
-    size = fmt.get("filesize") or fmt.get("filesize_approx")
-    parts.append(format_size(size))
+    size = format_size(fmt.get("filesize") or fmt.get("filesize_approx"))
+    note = fmt.get("format_note") or ""
 
-    note = fmt.get("format_note")
-    if note:
-        parts.append(note)
+    return [f"[{format_id}]", ext, kind, info1, info2, size, note]
 
-    return " | ".join(str(p) for p in parts)
+
+def describe_format_plain(fmt: dict) -> str:
+    return " | ".join(c for c in format_columns(fmt) if c)
+
+
+FORMAT_COLUMN_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+class FormatItemDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+            painter.setPen(option.palette.highlightedText().color())
+        else:
+            painter.setPen(option.palette.text().color())
+
+        columns = index.data(FORMAT_COLUMN_ROLE)
+        if not columns:
+            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            painter.drawText(
+                option.rect.adjusted(4, 0, 0, 0),
+                int(Qt.AlignmentFlag.AlignVCenter),
+                text,
+            )
+            painter.restore()
+            return
+
+        x = option.rect.x() + 4
+        for text, width in zip(columns, FORMAT_COLUMN_WIDTHS):
+            rect = QRect(x, option.rect.y(), width, option.rect.height())
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignVCenter), text)
+            x += width
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(FORMAT_ROW_HEIGHT)
+        size.setWidth(sum(FORMAT_COLUMN_WIDTHS))
+        return size
+
+
+class FormatComboBox(QComboBox):
+    """ドロップダウンの幅を選択ボックス自身の幅に一致させ、選択後の表示も列位置を揃えるQComboBox"""
+
+    def showPopup(self):
+        self.view().setMinimumWidth(self.width())
+        super().showPopup()
+
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
+
+        columns = self.itemData(self.currentIndex(), FORMAT_COLUMN_ROLE)
+        if not columns:
+            painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opt)
+            return
+
+        field_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, opt, QStyle.SubControl.SC_ComboBoxEditField, self
+        )
+        x = field_rect.x() + 2
+        for text, width in zip(columns, FORMAT_COLUMN_WIDTHS):
+            rect = QRect(x, field_rect.y(), width, field_rect.height())
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignVCenter), text)
+            x += width
+
+
+class FormatHeaderWidget(QWidget):
+    """フォーマット一覧の各列が何を示すかを示す見出し行"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(18)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        font = painter.font()
+        font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
+        painter.setFont(font)
+        painter.setPen(self.palette().color(self.foregroundRole()).lighter(160))
+
+        x = 4
+        for label, width in zip(FORMAT_COLUMN_LABELS, FORMAT_COLUMN_WIDTHS):
+            rect = QRect(x, 0, width, self.height())
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignVCenter), label)
+            x += width
+        painter.end()
 
 
 class FormatListWorker(QThread):
@@ -238,14 +368,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("yt-dlp GUI ダウンローダー")
-        self.resize(640, 520)
+        self.resize(780, 540)
 
         self.worker: DownloadWorker | None = None
         self.format_worker: FormatListWorker | None = None
         self.last_output_dir: str | None = None
 
         self.settings = QSettings("ytdlp-gui", "YTDownloaderGUI")
-        default_out_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        default_out_dir = get_downloads_folder()
         saved_out_dir = self.settings.value("last_output_dir", default_out_dir, type=str)
 
         central = QWidget()
@@ -310,18 +440,39 @@ class MainWindow(QMainWindow):
         info_row.addWidget(self.title_label, stretch=1)
         detail_layout.addLayout(info_row)
 
+        self.format_item_delegate = FormatItemDelegate()
+        format_combo_min_width = sum(FORMAT_COLUMN_WIDTHS) + 40
+
+        video_label = QLabel("動画フォーマット:")
+        audio_label = QLabel("音声フォーマット:")
+        label_width = max(video_label.sizeHint().width(), audio_label.sizeHint().width())
+        video_label.setFixedWidth(label_width)
+        audio_label.setFixedWidth(label_width)
+
+        header_row = QHBoxLayout()
+        header_spacer = QLabel("")
+        header_spacer.setFixedWidth(label_width)
+        header_row.addWidget(header_spacer)
+        self.format_header = FormatHeaderWidget()
+        header_row.addWidget(self.format_header, stretch=1)
+        detail_layout.addLayout(header_row)
+
         video_row = QHBoxLayout()
-        video_row.addWidget(QLabel("動画フォーマット:"))
-        self.video_format_combo = QComboBox()
+        video_row.addWidget(video_label)
+        self.video_format_combo = FormatComboBox()
         self.video_format_combo.setEnabled(False)
+        self.video_format_combo.setItemDelegate(self.format_item_delegate)
+        self.video_format_combo.setMinimumWidth(format_combo_min_width)
         self.video_format_combo.currentIndexChanged.connect(self.on_detail_selection_changed)
         video_row.addWidget(self.video_format_combo, stretch=1)
         detail_layout.addLayout(video_row)
 
         audio_row = QHBoxLayout()
-        audio_row.addWidget(QLabel("音声フォーマット:"))
-        self.audio_format_combo = QComboBox()
+        audio_row.addWidget(audio_label)
+        self.audio_format_combo = FormatComboBox()
         self.audio_format_combo.setEnabled(False)
+        self.audio_format_combo.setItemDelegate(self.format_item_delegate)
+        self.audio_format_combo.setMinimumWidth(format_combo_min_width)
         self.audio_format_combo.currentIndexChanged.connect(self.on_detail_selection_changed)
         audio_row.addWidget(self.audio_format_combo, stretch=1)
         detail_layout.addLayout(audio_row)
@@ -434,11 +585,17 @@ class MainWindow(QMainWindow):
             has_audio = bool(acodec and acodec != "none")
 
             if has_video:
-                self.video_format_combo.addItem(describe_format(fmt), userData=fmt)
+                combo = self.video_format_combo
                 video_count += 1
             elif has_audio:
-                self.audio_format_combo.addItem(describe_format(fmt), userData=fmt)
+                combo = self.audio_format_combo
                 audio_count += 1
+            else:
+                continue
+
+            combo.addItem(describe_format_plain(fmt), userData=fmt)
+            row = combo.count() - 1
+            combo.setItemData(row, format_columns(fmt), FORMAT_COLUMN_ROLE)
 
         self.video_format_combo.setEnabled(True)
         self.audio_format_combo.setEnabled(True)
