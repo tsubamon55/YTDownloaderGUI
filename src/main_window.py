@@ -304,7 +304,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(IDLE_STATUS_TEXT)
 
     def on_detail_toggled(self, checked: bool):
-        self.detail_toggle_btn.setText("詳細設定 ▴" if checked else "詳細設定 ▾")
+        self.detail_toggle_btn.setText("簡易設定 ▴" if checked else "詳細設定 ▾")
         self.simple_format_container.setVisible(not checked)
         # simple_format_container が非表示の間は代わりにスペーサーへ伸縮を持たせる
         self.format_row.setStretch(1, 1 if checked else 0)
