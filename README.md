@@ -39,7 +39,8 @@ youtube-downloader/
 ├── ffmpeg/
 │   ├── ffmpeg.exe
 │   └── ffprobe.exe
-├── main.py
+├── src/
+│   └── main.py
 └── ...
 ```
 
@@ -48,7 +49,7 @@ youtube-downloader/
 ### 3. ソースから実行
 
 ```powershell
-.venv\Scripts\python main.py
+.venv\Scripts\python src\main.py
 ```
 
 ## 配布用exeのビルド
@@ -57,7 +58,7 @@ Python未インストールの環境でも動く単体exeを作成できます�
 
 ```powershell
 .venv\Scripts\pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --name YTDownloaderGUI --windowed --add-data "ffmpeg;ffmpeg" main.py
+.venv\Scripts\pyinstaller --noconfirm --name YTDownloaderGUI --windowed --add-data "ffmpeg;ffmpeg" src\main.py
 ```
 
 ビルド後、`dist\YTDownloaderGUI\` フォルダ一式(`YTDownloaderGUI.exe` と `_internal`)を配布してください。
