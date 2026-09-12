@@ -338,10 +338,9 @@ class DownloadWorker(QThread):
                 "quiet": True,
                 "no_warnings": True,
                 "format": self.format_spec,
+                "writethumbnail": True,
+                "postprocessors": [*self.postprocessors, {"key": "EmbedThumbnail"}],
             }
-
-            if self.postprocessors:
-                ydl_opts["postprocessors"] = self.postprocessors
 
             if self.format_sort:
                 ydl_opts["format_sort"] = self.format_sort
