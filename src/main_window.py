@@ -29,8 +29,11 @@ from formats import (
     FORMAT_COLUMN_ROLE,
     FORMAT_COLUMN_WIDTHS,
     FORMAT_OPTIONS,
+    FORMAT_OPTIONS_1080P,
+    HIGH_RESOLUTION_CHECK_LABELS,
     describe_format_plain,
     format_columns,
+    format_size,
 )
 from paths import get_downloads_folder, get_ffmpeg_location
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, SpinnerWidget
@@ -59,6 +62,7 @@ class MainWindow(QMainWindow):
         self.format_worker: FormatListWorker | None = None
         self.last_output_dir: str | None = None
         self.info_ready = False
+        self.available_formats: list = []
 
         self._info_fetch_timer = QTimer(self)
         self._info_fetch_timer.setSingleShot(True)
@@ -343,6 +347,7 @@ class MainWindow(QMainWindow):
         self.title_label.setText("")
         self.thumbnail_label.clear()
         self.info_ready = False
+        self.available_formats = []
         self.download_btn.setEnabled(False)
         self.status_label.setText("動画情報を取得中...")
         self.spinner.start()
@@ -363,6 +368,7 @@ class MainWindow(QMainWindow):
 
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
+        self.available_formats = formats
 
         self.video_format_combo.addItem("なし", userData=None)
         self.audio_format_combo.addItem("なし", userData=None)
@@ -502,6 +508,114 @@ class MainWindow(QMainWindow):
             return format_key, [], BEST_QUALITY_COMPATIBLE_SORT
         return format_key, [], None
 
+    def select_best_video_format(self, mp4_only: bool, max_height: int | None = None) -> dict | None:
+        candidates = []
+        for fmt in self.available_formats:
+            vcodec = fmt.get("vcodec", "none")
+            if not vcodec or vcodec == "none":
+                continue
+            height = fmt.get("height")
+            if not height:
+                continue
+            if mp4_only and fmt.get("ext") != "mp4":
+                continue
+            if max_height is not None and height > max_height:
+                continue
+            candidates.append(fmt)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda f: (f.get("height") or 0, f.get("tbr") or 0, f.get("filesize") or f.get("filesize_approx") or 0),
+            reverse=True,
+        )
+        return candidates[0]
+
+    def select_best_audio_format(self, m4a_only: bool) -> dict | None:
+        candidates = []
+        for fmt in self.available_formats:
+            acodec = fmt.get("acodec", "none")
+            vcodec = fmt.get("vcodec", "none")
+            if not acodec or acodec == "none":
+                continue
+            if vcodec and vcodec != "none":
+                continue
+            if m4a_only and fmt.get("ext") != "m4a":
+                continue
+            candidates.append(fmt)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda f: (f.get("abr") or 0, f.get("filesize") or f.get("filesize_approx") or 0),
+            reverse=True,
+        )
+        return candidates[0]
+
+    def estimate_total_size(self, video_fmt: dict | None, audio_fmt: dict | None) -> int | None:
+        if not video_fmt:
+            return None
+        total = video_fmt.get("filesize") or video_fmt.get("filesize_approx") or 0
+        found = bool(total)
+        acodec = video_fmt.get("acodec", "none")
+        has_audio_included = bool(acodec and acodec != "none")
+        if not has_audio_included and audio_fmt:
+            audio_size = audio_fmt.get("filesize") or audio_fmt.get("filesize_approx")
+            if audio_size:
+                total += audio_size
+                found = True
+        return total if found else None
+
+    def confirm_high_resolution_download(self, format_label: str) -> str | None:
+        """簡易設定の最高画質が1920x1080を超える場合に確認する。
+        戻り値: "best"(最高画質のまま) / "1080p"(1080pに制限) / None(キャンセル)"""
+        mp4_only = format_label == "動画 (最高画質 mp4)"
+        best_video = self.select_best_video_format(mp4_only=mp4_only)
+        if best_video is None:
+            return "best"
+
+        height = best_video.get("height") or 0
+        width = best_video.get("width") or 0
+        if height <= 1080 and width <= 1920:
+            return "best"
+
+        best_audio = self.select_best_audio_format(m4a_only=mp4_only)
+        best_size = self.estimate_total_size(best_video, best_audio)
+        fallback_video = self.select_best_video_format(mp4_only=mp4_only, max_height=1080)
+        fallback_size = self.estimate_total_size(fallback_video, best_audio) if fallback_video else None
+
+        resolution_text = f"{width}x{height}" if width and height else (best_video.get("resolution") or "不明")
+        size_text = format_size(best_size) if best_size else "不明"
+
+        message = f"最高画質は {resolution_text}(約{size_text})です。\n1080pを超える解像度のため、ファイルサイズが大きくなります。"
+        if fallback_video is not None:
+            fallback_height = fallback_video.get("height") or 0
+            fallback_width = fallback_video.get("width") or 0
+            fallback_resolution_text = (
+                f"{fallback_width}x{fallback_height}" if fallback_width and fallback_height else "1080p"
+            )
+            fallback_size_text = format_size(fallback_size) if fallback_size else "不明"
+            message += f"\n1080pにすると {fallback_resolution_text}(約{fallback_size_text})になります。"
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("高解像度の動画です")
+        box.setText(message)
+        best_btn = box.addButton("最高画質でダウンロード", QMessageBox.ButtonRole.AcceptRole)
+        p1080_btn = (
+            box.addButton("1080pでダウンロード", QMessageBox.ButtonRole.ActionRole)
+            if fallback_video is not None
+            else None
+        )
+        box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(p1080_btn if p1080_btn is not None else best_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is best_btn:
+            return "best"
+        if clicked is p1080_btn:
+            return "1080p"
+        return None
+
     def start_download(self):
         url = self.url_edit.text().strip()
         out_dir = self.out_edit.text().strip()
@@ -525,6 +639,15 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             QMessageBox.warning(self, "入力エラー", str(e))
             return
+
+        if not self.detail_toggle_btn.isChecked():
+            format_label = self.format_combo.currentText()
+            if format_label in HIGH_RESOLUTION_CHECK_LABELS:
+                choice = self.confirm_high_resolution_download(format_label)
+                if choice is None:
+                    return
+                if choice == "1080p":
+                    format_spec = FORMAT_OPTIONS_1080P[format_label]
 
         os.makedirs(out_dir, exist_ok=True)
         self.last_output_dir = out_dir

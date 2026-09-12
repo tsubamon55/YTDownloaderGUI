@@ -9,6 +9,15 @@ FORMAT_OPTIONS = {
     "音声のみ (最高音質)": "audio_best",
 }
 
+# 簡易設定の「最高画質」系オプションで、1080p以下に画質を制限したい場合の代替セレクタ
+FORMAT_OPTIONS_1080P = {
+    "動画 (最高画質 mp4)": "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/b",
+    "動画 (最高画質)": "bv*[height<=1080]+ba/b[height<=1080]",
+}
+
+# 簡易設定で解像度確認ダイアログの対象となる「最高画質」系オプション
+HIGH_RESOLUTION_CHECK_LABELS = ("動画 (最高画質 mp4)", "動画 (最高画質)")
+
 # 解像度を最優先しつつ、同じ解像度の中では最も互換性の高いコーデック(h264/aac)を選ぶ
 BEST_QUALITY_COMPATIBLE_SORT = ["res", "codec:avc:m4a"]
 
