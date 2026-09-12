@@ -3,7 +3,7 @@
 import os
 from datetime import datetime
 
-from PyQt6.QtCore import QSettings, QTimer
+from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -89,16 +89,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(url_row)
 
         # --- 動画プレビュー ---
-        preview_row = QHBoxLayout()
-        self.thumbnail_label = QLabel()
+        # wordWrap付きQLabelをQHBoxLayout経由で直接QVBoxLayoutに入れると、
+        # heightForWidthの計算がずれて縦方向に大きく間延びするため、
+        # 高さを固定したコンテナで包んで挙動を安定させる
+        preview_container = QWidget()
+        preview_container.setFixedHeight(68)
+        preview_row = QHBoxLayout(preview_container)
+        preview_row.setContentsMargins(0, 0, 0, 0)
+        self.thumbnail_label = QLabel(preview_container)
         self.thumbnail_label.setFixedSize(120, 68)
         self.thumbnail_label.setScaledContents(True)
         self.thumbnail_label.setStyleSheet("background-color: rgba(128, 128, 128, 35); border-radius: 3px;")
         preview_row.addWidget(self.thumbnail_label)
-        self.title_label = QLabel("")
+        self.title_label = QLabel("", preview_container)
         self.title_label.setWordWrap(True)
+        self.title_label.setMaximumHeight(68)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         preview_row.addWidget(self.title_label, stretch=1)
-        layout.addLayout(preview_row)
+        layout.addWidget(preview_container)
 
         # --- フォーマット選択 ---
         format_row = QHBoxLayout()
@@ -263,14 +271,24 @@ class MainWindow(QMainWindow):
 
         self.auto_paste_from_clipboard()
 
+    def _sync_window_height(self):
+        """現在表示中のウィジェットに合わせてウィンドウの高さだけを追従させる"""
+        central = self.centralWidget()
+        # setVisible直後はレイアウトの最小サイズキャッシュが古いままのことがあるため、
+        # sizeHintを読む前に明示的に再計算させる
+        central.layout().invalidate()
+        central.layout().activate()
+        chrome_height = self.height() - central.height()
+        target_height = central.layout().sizeHint().height() + chrome_height
+        # QMainWindowは一度大きくなった最小サイズを記憶したままになることがあるため、
+        # 縮める前にリセットしてから目的の高さへ合わせる
+        self.setMinimumSize(0, 0)
+        self.resize(self.width(), target_height)
+
     def on_log_toggle(self, checked: bool):
         self.log_view.setVisible(checked)
         self.log_toggle_btn.setText("ログ ▴" if checked else "ログ ▾")
-        delta = 200
-        if checked:
-            self.resize(self.width(), self.height() + delta)
-        else:
-            self.resize(self.width(), max(self.minimumSizeHint().height(), self.height() - delta))
+        self._sync_window_height()
 
     def on_url_changed(self, text: str):
         self._info_fetch_timer.stop()
@@ -290,6 +308,7 @@ class MainWindow(QMainWindow):
         # simple_format_container が非表示の間は代わりにスペーサーへ伸縮を持たせる
         self.format_row.setStretch(1, 1 if checked else 0)
         self.detail_container.setVisible(checked)
+        self._sync_window_height()
         has_items = self.video_format_combo.count() > 0
         self.video_format_combo.setEnabled(checked and has_items)
         self.audio_format_combo.setEnabled(checked and has_items)
