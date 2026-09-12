@@ -1,8 +1,10 @@
 import ctypes
 import os
 import sys
+import time
 import traceback
 import urllib.request
+from datetime import datetime
 from uuid import UUID
 
 from PyQt6.QtCore import QRect, Qt, QSettings, QThread, QTimer, pyqtSignal
@@ -345,9 +347,38 @@ class DownloadWorker(QThread):
         self.postprocessors = postprocessors or []
         self.format_sort = format_sort
         self._is_cancelled = False
+        self._logged_format_ids: set[str] = set()
+        self._final_filepath: str | None = None
+        self._start_time: float | None = None
+        self._active_postprocessors: dict[str, int] = {}
 
     def cancel(self):
         self._is_cancelled = True
+
+    @staticmethod
+    def _describe_selected_format(info: dict) -> str:
+        vcodec = info.get("vcodec") or "none"
+        acodec = info.get("acodec") or "none"
+        has_video = vcodec != "none"
+        has_audio = acodec != "none"
+        kind = "映像+音声" if has_video and has_audio else ("映像" if has_video else "音声")
+
+        parts = [f"使用フォーマット: [{info.get('format_id')}] {kind} ({info.get('ext')})"]
+        if has_video:
+            width, height = info.get("width"), info.get("height")
+            resolution = info.get("resolution") or (f"{width}x{height}" if width and height else "不明")
+            fps = info.get("fps")
+            parts.append(f"解像度:{resolution}" + (f" {fps}fps" if fps else ""))
+            parts.append(f"映像コーデック:{vcodec}")
+        if has_audio:
+            abr = info.get("abr")
+            parts.append(f"音声コーデック:{acodec}" + (f" 約{round(abr)}kbps" if abr else ""))
+
+        size = info.get("filesize") or info.get("filesize_approx")
+        if size:
+            parts.append(f"サイズ:{format_size(size)}")
+
+        return " / ".join(parts)
 
     def _progress_hook(self, d):
         if self._is_cancelled:
@@ -355,6 +386,12 @@ class DownloadWorker(QThread):
 
         status = d.get("status")
         if status == "downloading":
+            info = d.get("info_dict") or {}
+            fmt_id = info.get("format_id")
+            if fmt_id and fmt_id not in self._logged_format_ids:
+                self._logged_format_ids.add(fmt_id)
+                self.log.emit(self._describe_selected_format(info))
+
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             downloaded = d.get("downloaded_bytes", 0)
             if total:
@@ -365,7 +402,28 @@ class DownloadWorker(QThread):
             eta = d.get("_eta_str", "").strip()
             self.progress.emit(percent, f"{d.get('_percent_str', '').strip()} 速度:{speed} 残り:{eta}")
         elif status == "finished":
+            filename = d.get("filename")
+            if filename:
+                self.log.emit(f"コンポーネントのダウンロード完了: {os.path.basename(filename)}")
             self.progress.emit(100.0, "ダウンロード完了、後処理中...")
+
+    def _postprocessor_hook(self, d):
+        status = d.get("status")
+        name = d.get("postprocessor", "")
+        if status == "started":
+            count = self._active_postprocessors.get(name, 0)
+            self._active_postprocessors[name] = count + 1
+            if count == 0:
+                self.log.emit(f"後処理開始: {name}")
+        elif status == "finished":
+            info = d.get("info_dict") or {}
+            filepath = info.get("filepath")
+            if filepath:
+                self._final_filepath = filepath
+            count = max(self._active_postprocessors.get(name, 1) - 1, 0)
+            self._active_postprocessors[name] = count
+            if count == 0:
+                self.log.emit(f"後処理完了: {name}")
 
     def _log_message(self, msg: str):
         self.log.emit(msg)
@@ -385,18 +443,23 @@ class DownloadWorker(QThread):
             counter += 1
 
     def run(self):
+        self._start_time = time.monotonic()
         try:
             ffmpeg_location = get_ffmpeg_location()
+
+            self.log.emit(f"開始: {self.url}")
 
             with yt_dlp.YoutubeDL(
                 {"noplaylist": True, "quiet": True, "no_warnings": True}
             ) as probe_ydl:
                 probe_info = probe_ydl.extract_info(self.url, download=False)
             unique_title = self._resolve_unique_title(probe_info.get("title") or "video")
+            self.log.emit(f"保存ファイル名(拡張子除く): {unique_title}")
 
             ydl_opts = {
                 "outtmpl": os.path.join(self.out_dir, f"{unique_title}.%(ext)s"),
                 "progress_hooks": [self._progress_hook],
+                "postprocessor_hooks": [self._postprocessor_hook],
                 "noplaylist": True,
                 "quiet": True,
                 "no_warnings": True,
@@ -411,13 +474,17 @@ class DownloadWorker(QThread):
             if ffmpeg_location:
                 ydl_opts["ffmpeg_location"] = ffmpeg_location
 
-            self.log.emit(f"開始: {self.url}")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([self.url])
 
             if self._is_cancelled:
                 self.finished_error.emit("キャンセルされました")
             else:
+                elapsed = time.monotonic() - self._start_time
+                if self._final_filepath and os.path.isfile(self._final_filepath):
+                    size = format_size(os.path.getsize(self._final_filepath))
+                    self.log.emit(f"保存先: {self._final_filepath} ({size})")
+                self.log.emit(f"所要時間: {elapsed:.1f}秒")
                 self.log.emit("完了しました")
                 self.finished_ok.emit()
         except Exception as e:
@@ -769,7 +836,8 @@ class MainWindow(QMainWindow):
             self.on_detail_toggled(self.detail_checkbox.isChecked())
 
     def append_log(self, msg: str):
-        self.log_view.appendPlainText(msg)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_view.appendPlainText(f"[{timestamp}] {msg}")
 
     def resolve_format_spec(self) -> tuple[str, list, list | None]:
         if self.detail_checkbox.isChecked():
