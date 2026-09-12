@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self.worker: DownloadWorker | None = None
         self.format_worker: FormatListWorker | None = None
         self.last_output_dir: str | None = None
+        self.info_ready = False
 
         self._info_fetch_timer = QTimer(self)
         self._info_fetch_timer.setSingleShot(True)
@@ -185,6 +186,7 @@ class MainWindow(QMainWindow):
             """
         )
         self.download_btn.clicked.connect(self.start_download)
+        self.download_btn.setEnabled(False)
         btn_row.addWidget(self.download_btn)
         self.cancel_btn = QPushButton("キャンセル")
         self.cancel_btn.clicked.connect(self.cancel_download)
@@ -230,6 +232,8 @@ class MainWindow(QMainWindow):
 
     def on_url_changed(self, text: str):
         self._info_fetch_timer.stop()
+        self.info_ready = False
+        self.download_btn.setEnabled(False)
         stripped = text.strip()
         if stripped.startswith("http://") or stripped.startswith("https://"):
             self._info_fetch_timer.start()
@@ -272,6 +276,8 @@ class MainWindow(QMainWindow):
         self.audio_format_combo.setEnabled(False)
         self.title_label.setText("")
         self.thumbnail_label.clear()
+        self.info_ready = False
+        self.download_btn.setEnabled(False)
         self.status_label.setText("動画情報を取得中...")
         self.spinner.start()
 
@@ -328,6 +334,8 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText(f"動画{video_count}件・音声{audio_count}件のフォーマットを取得しました")
         self.spinner.stop()
+        self.info_ready = True
+        self.download_btn.setEnabled(True)
 
     def on_formats_error(self, message: str, worker=None, auto: bool = False):
         if worker is not None and worker is not self.format_worker:
@@ -484,7 +492,7 @@ class MainWindow(QMainWindow):
         self.spinner.stop()
         self.status_label.setText("完了")
         self.set_inputs_enabled(True)
-        self.download_btn.setEnabled(True)
+        self.download_btn.setEnabled(self.info_ready)
         self.cancel_btn.setEnabled(False)
         self.open_folder_btn.setEnabled(True)
         self.progress_bar.setValue(100)
@@ -493,6 +501,6 @@ class MainWindow(QMainWindow):
         self.spinner.stop()
         self.status_label.setText("エラーまたはキャンセル")
         self.set_inputs_enabled(True)
-        self.download_btn.setEnabled(True)
+        self.download_btn.setEnabled(self.info_ready)
         self.cancel_btn.setEnabled(False)
         QMessageBox.critical(self, "ダウンロード失敗", message)
