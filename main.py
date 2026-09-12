@@ -474,9 +474,14 @@ class MainWindow(QMainWindow):
         simple_layout.addLayout(fmt_row)
         layout.addWidget(self.simple_format_container)
 
-        self.detail_checkbox = QCheckBox("詳細フォーマットを使用(取得した一覧から選択)")
+        detail_checkbox_row = QHBoxLayout()
+        self.detail_checkbox = QCheckBox()
         self.detail_checkbox.toggled.connect(self.on_detail_toggled)
-        layout.addWidget(self.detail_checkbox)
+        detail_checkbox_row.addWidget(self.detail_checkbox)
+        self.detail_label = QLabel("詳細フォーマットを使用(取得した一覧から選択)")
+        detail_checkbox_row.addWidget(self.detail_label)
+        detail_checkbox_row.addStretch()
+        layout.addLayout(detail_checkbox_row)
 
         self.detail_container = QWidget()
         detail_layout = QVBoxLayout(self.detail_container)
@@ -541,9 +546,15 @@ class MainWindow(QMainWindow):
         self.merge_note_label = QLabel("")
         detail_layout.addWidget(self.merge_note_label)
 
-        self.mp3_checkbox = QCheckBox("音声のみのダウンロードの場合、mp3に変換する")
+        mp3_checkbox_row = QHBoxLayout()
+        self.mp3_checkbox = QCheckBox()
         self.mp3_checkbox.setEnabled(False)
-        detail_layout.addWidget(self.mp3_checkbox)
+        mp3_checkbox_row.addWidget(self.mp3_checkbox)
+        self.mp3_label = QLabel("音声のみのダウンロードの場合、mp3に変換する")
+        self.mp3_label.setEnabled(False)
+        mp3_checkbox_row.addWidget(self.mp3_label)
+        mp3_checkbox_row.addStretch()
+        detail_layout.addLayout(mp3_checkbox_row)
 
         layout.addWidget(self.detail_container)
         self.detail_container.setVisible(False)
@@ -600,10 +611,12 @@ class MainWindow(QMainWindow):
             self.browse_btn,
             self.format_combo,
             self.detail_checkbox,
+            self.detail_label,
             self.fetch_formats_btn,
             self.video_format_combo,
             self.audio_format_combo,
             self.mp3_checkbox,
+            self.mp3_label,
         ]
 
         self.auto_paste_from_clipboard()
@@ -702,13 +715,16 @@ class MainWindow(QMainWindow):
     def on_detail_selection_changed(self, *_):
         if not self.detail_checkbox.isChecked():
             self.mp3_checkbox.setEnabled(False)
+            self.mp3_label.setEnabled(False)
             self.merge_note_label.setText("")
             return
 
         video_fmt = self.video_format_combo.currentData()
         audio_fmt = self.audio_format_combo.currentData()
 
-        self.mp3_checkbox.setEnabled(video_fmt is None and audio_fmt is not None)
+        mp3_enabled = video_fmt is None and audio_fmt is not None
+        self.mp3_checkbox.setEnabled(mp3_enabled)
+        self.mp3_label.setEnabled(mp3_enabled)
 
         if video_fmt is not None and audio_fmt is not None:
             self.merge_note_label.setText("動画と音声を合成してダウンロードします")
