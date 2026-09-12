@@ -79,9 +79,25 @@ class DownloadWorker(QThread):
         self._final_filepath: str | None = None
         self._start_time: float | None = None
         self._active_postprocessors: dict[str, int] = {}
+        self._unique_title: str | None = None
 
     def cancel(self):
         self._is_cancelled = True
+
+    def _cleanup_leftover_files(self):
+        """キャンセル時にダウンロード先へ残った未完成ファイル(.part等)を削除する"""
+        if not self._unique_title or not os.path.isdir(self.out_dir):
+            return
+        prefix = f"{self._unique_title}."
+        for name in os.listdir(self.out_dir):
+            if not name.startswith(prefix):
+                continue
+            path = os.path.join(self.out_dir, name)
+            try:
+                os.remove(path)
+                self.log.emit(f"未完了ファイルを削除しました: {name}")
+            except OSError:
+                pass
 
     @staticmethod
     def _describe_selected_format(info: dict) -> str:
@@ -178,11 +194,11 @@ class DownloadWorker(QThread):
                 {"noplaylist": True, "quiet": True, "no_warnings": True}
             ) as probe_ydl:
                 probe_info = probe_ydl.extract_info(self.url, download=False)
-            unique_title = self._resolve_unique_title(probe_info.get("title") or "video")
-            self.log.emit(f"保存ファイル名(拡張子除く): {unique_title}")
+            self._unique_title = self._resolve_unique_title(probe_info.get("title") or "video")
+            self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
 
             ydl_opts = {
-                "outtmpl": os.path.join(self.out_dir, f"{unique_title}.%(ext)s"),
+                "outtmpl": os.path.join(self.out_dir, f"{self._unique_title}.%(ext)s"),
                 "progress_hooks": [self._progress_hook],
                 "postprocessor_hooks": [self._postprocessor_hook],
                 "noplaylist": True,
@@ -203,6 +219,7 @@ class DownloadWorker(QThread):
                 ydl.download([self.url])
 
             if self._is_cancelled:
+                self._cleanup_leftover_files()
                 self.finished_error.emit("キャンセルされました")
             else:
                 elapsed = time.monotonic() - self._start_time
@@ -214,4 +231,6 @@ class DownloadWorker(QThread):
                 self.finished_ok.emit()
         except Exception as e:
             self.log.emit(f"エラー: {e}")
+            if self._is_cancelled:
+                self._cleanup_leftover_files()
             self.finished_error.emit(str(e))
