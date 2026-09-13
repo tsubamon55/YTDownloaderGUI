@@ -592,9 +592,22 @@ class MainWindow(QMainWindow):
                 None,
             )
         if format_key == "audio_m4a":
-            return "ba[ext=m4a]/ba*[acodec^=mp4a]/ba", [], None
+            # 音声のみに限定できない場合の"ba"フォールバックで動画結合フォーマットが
+            # 選ばれてしまう事態に備え、常に音声トラックのみを取り出す後処理を付ける
+            # (対象が既に音声のみ・良コーデックならffmpegは何もせずスキップする)
+            return (
+                "ba[ext=m4a]/ba[acodec^=mp4a]/ba",
+                [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}],
+                None,
+            )
         if format_key == "audio_best":
-            return "ba/b", [], BEST_AUDIO_COMPATIBLE_SORT
+            # "ba"に一致するフォーマットが無い場合の"/b"フォールバックで動画結合
+            # フォーマットが選ばれてしまう事態に備え、音声トラックのみを取り出す
+            return (
+                "ba/b",
+                [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}],
+                BEST_AUDIO_COMPATIBLE_SORT,
+            )
         if format_label == "動画 (最高画質)":
             return format_key, [], BEST_QUALITY_COMPATIBLE_SORT
         return format_key, [], None

@@ -235,8 +235,14 @@ class DownloadWorker(QThread):
 
     def _expected_ext(self, probe_info: dict) -> str | None:
         for pp in self.postprocessors:
-            if pp.get("key") == "FFmpegExtractAudio" and pp.get("preferredcodec"):
-                return pp["preferredcodec"]
+            if pp.get("key") != "FFmpegExtractAudio":
+                continue
+            preferred = pp.get("preferredcodec")
+            # "best"(未指定込み)は元の音声コーデックによって最終拡張子が変わる
+            # (既に音声のみ・良コーデックならffmpegはスキップし元の拡張子のまま)ため、
+            # 確定拡張子とはみなさずprobe_infoの拡張子をそのまま採用する
+            if preferred and preferred != "best":
+                return preferred
         ext = probe_info.get("ext")
         if ext == "webm" and probe_info.get("requested_formats") and probe_info.get("thumbnails"):
             # 映像+音声の結合時、サムネイル埋め込み(EmbedThumbnail)のためyt-dlpがwebmをmkvへ切り替える
@@ -275,7 +281,21 @@ class DownloadWorker(QThread):
         base_selector = yt_dlp.YoutubeDL({"quiet": True}).build_format_selector(self.format_spec)
 
         def selector(ctx):
-            filtered_ctx = dict(ctx, formats=[f for f in ctx["formats"] if not is_codec_container_mismatch(f)])
+            filtered_formats = [f for f in ctx["formats"] if not is_codec_container_mismatch(f)]
+            # has_merged_format/incomplete_formatsはyt-dlp側がフィルタ前の全フォーマットから
+            # 計算した値なので、除外後のフォーマットに合わせて計算し直す
+            # (計算式はyt_dlp.YoutubeDL._select_formatsに準拠)
+            filtered_ctx = dict(
+                ctx,
+                formats=filtered_formats,
+                has_merged_format=any(
+                    "none" not in (f.get("acodec"), f.get("vcodec")) for f in filtered_formats
+                ),
+                incomplete_formats=(
+                    all(f.get("vcodec") == "none" for f in filtered_formats)
+                    or all(f.get("acodec") == "none" for f in filtered_formats)
+                ),
+            )
             return base_selector(filtered_ctx)
 
         return selector

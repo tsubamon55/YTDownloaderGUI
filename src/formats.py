@@ -38,11 +38,14 @@ def format_spec_1080p(format_label: str, portrait: bool) -> str:
     横長/縦長どちらの上限を使うかをここで決める。
     """
     width_cap, height_cap = (1080, 1920) if portrait else (1920, 1080)
+    # 最後の"/b"は本当に候補が皆無だった場合の最終手段であり、解像度上限を守れないため、
+    # その手前に「コンテナ/コーデック条件は緩めるが上限は維持する」段階を挟んでおく
     if format_label == "動画 (最高画質 mp4)":
         return (
             f"bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba[ext=m4a]"
             f"/bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba*[acodec^=mp4a]"
             f"/b[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]"
+            f"/b[width<={width_cap}][height<={height_cap}]"
             "/b"
         )
     return (
