@@ -9,7 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import yt_dlp
 
 from formats import format_size, is_codec_container_mismatch, protocol_rank
-from paths import get_ffmpeg_location
+from paths import get_ffmpeg_location, log_debug
 from yt_dlp_selection import make_filtering_format_selector
 
 
@@ -50,7 +50,8 @@ class FormatListWorker(QThread):
                 try:
                     with urllib.request.urlopen(thumbnail_url, timeout=10) as resp:
                         thumbnail_bytes = resp.read()
-                except Exception:
+                except Exception as e:
+                    log_debug(f"FormatListWorker: サムネイル取得に失敗 ({e!r})")
                     thumbnail_bytes = b""
 
             self.finished_ok.emit(formats, title, thumbnail_bytes)
@@ -106,8 +107,8 @@ class DownloadWorker(QThread):
             try:
                 os.remove(path)
                 self.log.emit(f"未完了ファイルを削除しました: {name}")
-            except OSError:
-                pass
+            except OSError as e:
+                log_debug(f"_cleanup_leftover_files: {name} の削除に失敗 ({e!r})")
 
     @staticmethod
     def _describe_selected_format(info: dict) -> str:

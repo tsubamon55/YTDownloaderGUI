@@ -2,6 +2,7 @@
 
 import os
 from datetime import datetime
+from typing import Any
 
 from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtGui import QPixmap
@@ -40,7 +41,7 @@ from formats import (
     format_columns,
     is_codec_container_mismatch,
 )
-from paths import get_downloads_folder, get_ffmpeg_location
+from paths import get_downloads_folder, get_ffmpeg_location, log_debug
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, SpinnerWidget
 from workers import DownloadWorker, FormatListWorker
 
@@ -58,7 +59,7 @@ QPushButton:hover { text-decoration: underline; }
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("YouTube 動画ダウンローダー")
         self.resize(760, 420)
@@ -293,7 +294,7 @@ class MainWindow(QMainWindow):
         self.auto_paste_from_clipboard()
         self._sync_window_height()
 
-    def _sync_window_height(self):
+    def _sync_window_height(self) -> None:
         """現在表示中のウィジェットに合わせてウィンドウの高さだけを追従させる"""
         central = self.centralWidget()
         # setVisible直後はレイアウトの最小サイズキャッシュが古いままのことがあるため、
@@ -307,12 +308,12 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(0, 0)
         self.resize(self.width(), target_height)
 
-    def on_log_toggle(self, checked: bool):
+    def on_log_toggle(self, checked: bool) -> None:
         self.log_view.setVisible(checked)
         self.log_toggle_btn.setText("ログ ▴" if checked else "ログ ▾")
         self._sync_window_height()
 
-    def on_url_changed(self, text: str):
+    def on_url_changed(self, text: str) -> None:
         self._info_fetch_timer.stop()
         self.info_ready = False
         self.download_btn.setEnabled(False)
@@ -324,7 +325,7 @@ class MainWindow(QMainWindow):
             self.thumbnail_label.clear()
             self.status_label.setText(IDLE_STATUS_TEXT)
 
-    def on_detail_toggled(self, checked: bool):
+    def on_detail_toggled(self, checked: bool) -> None:
         self.detail_toggle_btn.setText("簡易設定 ▴" if checked else "詳細設定 ▾")
         self.simple_format_container.setVisible(not checked)
         # simple_format_container が非表示の間は代わりにスペーサーへ伸縮を持たせる
@@ -342,17 +343,17 @@ class MainWindow(QMainWindow):
         if checked and url and not has_items and not is_fetching:
             self.fetch_formats(auto=False)
 
-    def paste_from_clipboard(self):
+    def paste_from_clipboard(self) -> None:
         text = QApplication.clipboard().text().strip()
         if text:
             self.url_edit.setText(text)
 
-    def auto_paste_from_clipboard(self):
+    def auto_paste_from_clipboard(self) -> None:
         text = QApplication.clipboard().text().strip()
         if text.startswith("http://") or text.startswith("https://"):
             self.url_edit.setText(text)
 
-    def fetch_formats(self, auto: bool = False):
+    def fetch_formats(self, auto: bool = False) -> None:
         url = self.url_edit.text().strip()
         if not url:
             return
@@ -381,7 +382,14 @@ class MainWindow(QMainWindow):
         )
         worker.start()
 
-    def on_formats_fetched(self, formats: list, title: str, thumbnail_bytes: bytes, worker, auto: bool = False):
+    def on_formats_fetched(
+        self,
+        formats: list[dict],
+        title: str,
+        thumbnail_bytes: bytes,
+        worker: FormatListWorker,
+        auto: bool = False,
+    ) -> None:
         if worker is not self.format_worker:
             return
 
@@ -433,7 +441,7 @@ class MainWindow(QMainWindow):
         self.info_ready = True
         self.download_btn.setEnabled(True)
 
-    def on_formats_error(self, message: str, worker=None, auto: bool = False):
+    def on_formats_error(self, message: str, worker: FormatListWorker | None = None, auto: bool = False) -> None:
         if worker is not None and worker is not self.format_worker:
             return
 
@@ -444,7 +452,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("フォーマット取得に失敗しました")
             QMessageBox.critical(self, "フォーマット取得エラー", message)
 
-    def on_detail_selection_changed(self, *_):
+    def on_detail_selection_changed(self, *_: Any) -> None:
         if not self.detail_toggle_btn.isChecked():
             self.mp3_checkbox.setEnabled(False)
             self.mp3_label.setEnabled(False)
@@ -467,7 +475,7 @@ class MainWindow(QMainWindow):
         else:
             self.merge_note_label.setText("")
 
-    def update_simple_format_note(self, *_):
+    def update_simple_format_note(self, *_: Any) -> None:
         """簡易設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
         解像度が落ちる場合のみ、非モーダルな注記で分かるようにする。
         注記がない間はラベル自体を隠し、空欄による不自然な余白が残らないようにする"""
@@ -481,13 +489,13 @@ class MainWindow(QMainWindow):
             return ""
         return compute_simple_format_note(self.available_formats, self.format_combo.currentText())
 
-    def browse_folder(self):
+    def browse_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.out_edit.text())
         if folder:
             self.out_edit.setText(folder)
             self.settings.setValue("last_output_dir", folder)
 
-    def find_open_explorer_window(self, path: str):
+    def find_open_explorer_window(self, path: str) -> Any | None:
         """指定フォルダを既に開いているエクスプローラーウィンドウがあれば返す"""
         normalized = os.path.normcase(os.path.normpath(path))
         try:
@@ -498,14 +506,16 @@ class MainWindow(QMainWindow):
                 try:
                     folder_path = window.Document.Folder.Self.Path
                 except Exception:
+                    # 制御パネル等、フォルダを持たないシェルウィンドウもあるため無視して次へ
                     continue
                 if os.path.normcase(os.path.normpath(folder_path)) == normalized:
                     return window
-        except Exception:
+        except Exception as e:
+            log_debug(f"find_open_explorer_window: シェルウィンドウの列挙に失敗 ({e!r})")
             return None
         return None
 
-    def open_output_folder(self):
+    def open_output_folder(self) -> None:
         if not (self.last_output_dir and os.path.isdir(self.last_output_dir)):
             return
 
@@ -516,19 +526,19 @@ class MainWindow(QMainWindow):
 
                 window.Visible = True
                 win32gui.SetForegroundWindow(window.HWND)
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug(f"open_output_folder: 既存ウィンドウの前面化に失敗 ({e!r})")
             return
 
         os.startfile(self.last_output_dir)
 
-    def set_inputs_enabled(self, enabled: bool):
+    def set_inputs_enabled(self, enabled: bool) -> None:
         for widget in self.input_widgets:
             widget.setEnabled(enabled)
         if enabled:
             self.on_detail_toggled(self.detail_toggle_btn.isChecked())
 
-    def append_log(self, msg: str):
+    def append_log(self, msg: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{timestamp}] {msg}")
 
@@ -573,7 +583,7 @@ class MainWindow(QMainWindow):
             return "1080p", plan.fallback_spec
         return None, None
 
-    def start_download(self):
+    def start_download(self) -> None:
         url = self.url_edit.text().strip()
         out_dir = self.out_edit.text().strip()
 
@@ -646,16 +656,16 @@ class MainWindow(QMainWindow):
         self.worker.finished_error.connect(self.on_finished_error)
         self.worker.start()
 
-    def cancel_download(self):
+    def cancel_download(self) -> None:
         if self.worker is not None:
             self.worker.cancel()
             self.status_label.setText("キャンセル中...")
 
-    def on_progress(self, percent: float, text: str):
+    def on_progress(self, percent: float, text: str) -> None:
         self.progress_bar.setValue(int(percent))
         self.status_label.setText(text)
 
-    def on_finished_ok(self):
+    def on_finished_ok(self) -> None:
         self.spinner.stop()
         self.url_edit.clear()
         self.video_format_combo.clear()
@@ -671,7 +681,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("完了")
         self.open_output_folder()
 
-    def on_finished_error(self, message: str):
+    def on_finished_error(self, message: str) -> None:
         self.spinner.stop()
         self.status_label.setText("エラーまたはキャンセル")
         self.set_inputs_enabled(True)

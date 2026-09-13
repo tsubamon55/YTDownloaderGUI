@@ -17,6 +17,7 @@ from formats import (
     format_spec_1080p,
     is_codec_container_mismatch,
 )
+from paths import log_debug
 from yt_dlp_selection import select_formats
 
 MP3_POSTPROCESSOR = {
@@ -90,7 +91,8 @@ def select_best_format(
     formats = filter_mismatched_formats(copy.deepcopy(available_formats))
     try:
         selected = select_formats(formats, format_spec, format_sort)
-    except Exception:
+    except Exception as e:
+        log_debug(f"select_best_format: format_spec={format_spec!r} の選択に失敗 ({e!r})")
         return None
     return selected[0] if selected else None
 

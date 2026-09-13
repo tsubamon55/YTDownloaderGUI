@@ -4,6 +4,7 @@ import ctypes
 import os
 import shutil
 import sys
+from datetime import datetime
 from uuid import UUID
 
 
@@ -19,6 +20,18 @@ def get_log_file_path() -> str:
     クラッシュログは常にユーザー書き込み可能なLOCALAPPDATA配下に置く"""
     base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(base, "YTDownloaderGUI", "crash.log")
+
+
+def log_debug(message: str) -> None:
+    """crash.logと同じファイルに、ユーザーには見せず処理を続行させた例外の情報を記録する。
+    (except Exceptionで握りつぶすだけだと、後から不具合の原因を追跡できなくなるため)"""
+    log_path = get_log_file_path()
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}\n")
+    except OSError:
+        pass
 
 
 class _GUID(ctypes.Structure):
@@ -49,8 +62,8 @@ def get_downloads_folder() -> str:
             ctypes.windll.ole32.CoTaskMemFree(path_ptr)
             if os.path.isdir(path):
                 return path
-    except Exception:
-        pass
+    except Exception as e:
+        log_debug(f"get_downloads_folder: SHGetKnownFolderPathに失敗、~/Downloadsにフォールバック ({e!r})")
     return fallback
 
 
