@@ -9,11 +9,28 @@ FORMAT_OPTIONS = {
     "音声のみ (最高音質)": "audio_best",
 }
 
-# 簡易設定の「最高画質」系オプションで、1080p以下に画質を制限したい場合の代替セレクタ
-FORMAT_OPTIONS_1080P = {
-    "動画 (最高画質 mp4)": "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/b",
-    "動画 (最高画質)": "bv*[height<=1080]+ba/b[height<=1080]",
-}
+def format_spec_1080p(format_label: str, portrait: bool) -> str:
+    """簡易設定の「最高画質」系オプションで、1080p相当に画質を制限する代替セレクタを作る。
+
+    縦型動画はwidth/heightがlandscapeと逆転する(例: 1080pの縦動画は1080x1920)。
+    yt-dlpのフォーマットフィルタは width/height を独立に比較するだけで
+    「width>=heightなら横型」のような向き判定はできないため
+    (例: [width<=1920][height<=1080] は縦型480p相当の608x1080も素通りしてしまう)、
+    呼び出し側で実際に選ばれた最高画質フォーマットの向きを判定してから、
+    横長/縦長どちらの上限を使うかをここで決める。
+    """
+    width_cap, height_cap = (1080, 1920) if portrait else (1920, 1080)
+    if format_label == "動画 (最高画質 mp4)":
+        return (
+            f"bv*[ext=mp4][width<={width_cap}][height<={height_cap}]+ba[ext=m4a]"
+            f"/b[ext=mp4][width<={width_cap}][height<={height_cap}]"
+            "/b"
+        )
+    return (
+        f"bv*[width<={width_cap}][height<={height_cap}]+ba"
+        f"/b[width<={width_cap}][height<={height_cap}]"
+        "/b"
+    )
 
 # 簡易設定で解像度確認ダイアログの対象となる「最高画質」系オプション
 HIGH_RESOLUTION_CHECK_LABELS = ("動画 (最高画質 mp4)", "動画 (最高画質)")

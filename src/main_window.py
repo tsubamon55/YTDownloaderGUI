@@ -31,11 +31,11 @@ from formats import (
     FORMAT_COLUMN_ROLE,
     FORMAT_COLUMN_WIDTHS,
     FORMAT_OPTIONS,
-    FORMAT_OPTIONS_1080P,
     HIGH_RESOLUTION_CHECK_LABELS,
     describe_format_plain,
     format_columns,
     format_size,
+    format_spec_1080p,
 )
 from paths import get_downloads_folder, get_ffmpeg_location
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, SpinnerWidget
@@ -584,24 +584,28 @@ class MainWindow(QMainWindow):
 
     def confirm_high_resolution_download(
         self, format_label: str, format_spec: str, format_sort: list | None
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """簡易設定の最高画質が1920x1080を超える場合に確認する。
-        戻り値: "best"(最高画質のまま) / "1080p"(1080pに制限) / None(キャンセル)"""
+        縦型動画では width/height が landscape と逆転するため、長辺・短辺で判定する。
+        戻り値: (選択, 1080p選択時の代替format_spec)
+        選択は "best"(最高画質のまま) / "1080p"(1080pに制限) / None(キャンセル)"""
         best_selected = self.resolve_selected_formats(format_spec, format_sort)
         resolution = self.selection_resolution(best_selected)
         if resolution is None:
-            return "best"
+            return "best", None
 
         width, height = resolution
-        if height <= 1080 and width <= 1920:
-            return "best"
+        long_side, short_side = max(width, height), min(width, height)
+        if long_side <= 1920 and short_side <= 1080:
+            return "best", None
 
         best_size = self.estimate_selection_size(best_selected)
 
-        fallback_spec = FORMAT_OPTIONS_1080P.get(format_label)
-        fallback_selected = (
-            self.resolve_selected_formats(fallback_spec, format_sort) if fallback_spec else None
-        )
+        # width<=1920/height<=1080のような単純なフィルタでは縦型動画の向きを
+        # 判定できないため、実際に選ばれた最高画質フォーマットの向きから判定する
+        is_portrait = height > width
+        fallback_spec = format_spec_1080p(format_label, is_portrait)
+        fallback_selected = self.resolve_selected_formats(fallback_spec, format_sort)
         fallback_resolution = self.selection_resolution(fallback_selected)
         fallback_size = self.estimate_selection_size(fallback_selected)
 
@@ -631,10 +635,10 @@ class MainWindow(QMainWindow):
 
         clicked = box.clickedButton()
         if clicked is best_btn:
-            return "best"
+            return "best", None
         if clicked is p1080_btn:
-            return "1080p"
-        return None
+            return "1080p", fallback_spec
+        return None, None
 
     def start_download(self):
         url = self.url_edit.text().strip()
@@ -664,11 +668,11 @@ class MainWindow(QMainWindow):
         if not self.detail_toggle_btn.isChecked():
             format_label = self.format_combo.currentText()
             if format_label in HIGH_RESOLUTION_CHECK_LABELS:
-                choice = self.confirm_high_resolution_download(format_label, format_spec, format_sort)
+                choice, fallback_spec = self.confirm_high_resolution_download(format_label, format_spec, format_sort)
                 if choice is None:
                     return
                 if choice == "1080p":
-                    format_spec = FORMAT_OPTIONS_1080P[format_label]
+                    format_spec = fallback_spec
 
         os.makedirs(out_dir, exist_ok=True)
         self.last_output_dir = out_dir
