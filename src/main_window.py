@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
         self.url_edit.setMinimumHeight(32)
+        self.url_edit.setClearButtonEnabled(True)
         self.url_edit.textChanged.connect(self.on_url_changed)
         url_row.addWidget(self.url_edit, stretch=1)
         self.paste_btn = QPushButton("貼り付け")
