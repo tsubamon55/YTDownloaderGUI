@@ -8,7 +8,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 import yt_dlp
 
-from formats import format_size
+from formats import format_size, is_codec_container_mismatch
 from paths import get_ffmpeg_location
 
 
@@ -67,6 +67,7 @@ class DownloadWorker(QThread):
         format_spec: str,
         postprocessors: list | None = None,
         format_sort: list | None = None,
+        exclude_mismatched: bool = False,
     ):
         super().__init__()
         self.url = url
@@ -74,6 +75,7 @@ class DownloadWorker(QThread):
         self.format_spec = format_spec
         self.postprocessors = postprocessors or []
         self.format_sort = format_sort
+        self.exclude_mismatched = exclude_mismatched
         self._is_cancelled = False
         self._logged_format_ids: set[str] = set()
         self._final_filepath: str | None = None
@@ -260,6 +262,21 @@ class DownloadWorker(QThread):
                 return candidate
             counter += 1
 
+    def _build_format_selector(self):
+        """簡易設定ではコンテナ/コーデックが一致しない非推奨フォーマットを候補から
+        完全に除外した上でformat_specを解決する。詳細設定でユーザーが明示的にIDを
+        指定した場合はexclude_mismatched=Falseとなり、そのまま尊重する。"""
+        if not self.exclude_mismatched:
+            return self.format_spec
+
+        base_selector = yt_dlp.YoutubeDL({"quiet": True}).build_format_selector(self.format_spec)
+
+        def selector(ctx):
+            filtered_ctx = dict(ctx, formats=[f for f in ctx["formats"] if not is_codec_container_mismatch(f)])
+            return base_selector(filtered_ctx)
+
+        return selector
+
     def run(self):
         self._start_time = time.monotonic()
         try:
@@ -267,11 +284,12 @@ class DownloadWorker(QThread):
 
             self.log.emit(f"開始: {self.url}")
 
+            format_selector = self._build_format_selector()
             probe_opts = {
                 "noplaylist": True,
                 "quiet": True,
                 "no_warnings": True,
-                "format": self.format_spec,
+                "format": format_selector,
             }
             if self.format_sort:
                 probe_opts["format_sort"] = self.format_sort
@@ -289,7 +307,7 @@ class DownloadWorker(QThread):
                 "noplaylist": True,
                 "quiet": True,
                 "no_warnings": True,
-                "format": self.format_spec,
+                "format": format_selector,
                 "writethumbnail": True,
                 "postprocessors": list(self.postprocessors),
             }

@@ -34,9 +34,11 @@ from formats import (
     FORMAT_OPTIONS,
     HIGH_RESOLUTION_CHECK_LABELS,
     describe_format_plain,
+    filter_mismatched_formats,
     format_columns,
     format_size,
     format_spec_1080p,
+    is_codec_container_mismatch,
 )
 from paths import get_downloads_folder, get_ffmpeg_location
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, SpinnerWidget
@@ -383,7 +385,10 @@ class MainWindow(QMainWindow):
 
         video_count = 0
         audio_count = 0
-        for fmt in formats:
+        # コンテナ/コーデックが一致しない非推奨フォーマットを一覧の下の方に追いやる(安定ソートなので
+        # 元々の解像度順は各グループ内で保たれる)
+        sorted_formats = sorted(formats, key=is_codec_container_mismatch)
+        for fmt in sorted_formats:
             vcodec = fmt.get("vcodec", "none")
             acodec = fmt.get("acodec", "none")
             has_video = bool(vcodec and vcodec != "none")
@@ -560,7 +565,7 @@ class MainWindow(QMainWindow):
         if format_sort:
             ydl_opts["format_sort"] = format_sort
         ydl = yt_dlp.YoutubeDL(ydl_opts)
-        formats = copy.deepcopy(self.available_formats)
+        formats = filter_mismatched_formats(copy.deepcopy(self.available_formats))
         try:
             ydl.sort_formats({"formats": formats})
             selected = ydl._select_formats(formats, ydl.build_format_selector(format_spec))
@@ -694,7 +699,10 @@ class MainWindow(QMainWindow):
         self.status_label.setText("ダウンロード中...")
         self.spinner.start()
 
-        self.worker = DownloadWorker(url, out_dir, format_spec, postprocessors, format_sort)
+        self.worker = DownloadWorker(
+            url, out_dir, format_spec, postprocessors, format_sort,
+            exclude_mismatched=not self.detail_toggle_btn.isChecked(),
+        )
         self.worker.progress.connect(self.on_progress)
         self.worker.log.connect(self.append_log)
         self.worker.finished_ok.connect(self.on_finished_ok)

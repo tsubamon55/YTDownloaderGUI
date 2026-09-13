@@ -96,10 +96,16 @@ CODEC_LABELS = {
 }
 
 
-def _codec_label(codec: str | None) -> str:
+def _codec_prefix(codec: str | None) -> str:
     if not codec or codec == "none":
         return ""
-    prefix = codec.split(".")[0].lower()
+    return codec.split(".")[0].lower()
+
+
+def _codec_label(codec: str | None) -> str:
+    prefix = _codec_prefix(codec)
+    if not prefix:
+        return ""
     return CODEC_LABELS.get(prefix, prefix.upper())
 
 
@@ -108,6 +114,40 @@ def format_codec(fmt: dict) -> str:
     コーデックが違えば別物(例: H.264 vs AV1)なので見分けられるようにする"""
     labels = [_codec_label(fmt.get("vcodec")), _codec_label(fmt.get("acodec"))]
     return "+".join(label for label in labels if label)
+
+
+# コンテナが実質的に前提としているコーデックの組み合わせ。YouTubeでは高解像度で
+# H.264のmp4が存在しない場合に、webm版VP9をそのままmp4タグのHLSバリアントとして
+# 配信することがあり、サイズ不明・進捗不正確な上に一部の再生環境(Apple製品や
+# 簡易ハードウェアプレイヤー等)では再生できないことがある「見た目だけmp4」になる。
+_MISMATCHED_VCODEC_BY_EXT = {
+    "mp4": ("vp9", "vp09", "vp8", "vp08"),
+    "webm": ("avc1", "h264"),
+}
+_MISMATCHED_ACODEC_BY_EXT = {
+    "mp4": ("opus", "vorbis"),
+    "m4a": ("opus", "vorbis"),
+    "webm": ("mp4a", "aac"),
+}
+
+
+def is_codec_container_mismatch(fmt: dict) -> bool:
+    """コンテナ(ext)と実際のコーデックが一致しない、実質的に劣化コピーでしかない
+    フォーマットかどうかを判定する"""
+    ext = fmt.get("ext")
+    vcodec_prefix = _codec_prefix(fmt.get("vcodec"))
+    acodec_prefix = _codec_prefix(fmt.get("acodec"))
+
+    if vcodec_prefix and vcodec_prefix in _MISMATCHED_VCODEC_BY_EXT.get(ext, ()):
+        return True
+    if acodec_prefix and acodec_prefix in _MISMATCHED_ACODEC_BY_EXT.get(ext, ()):
+        return True
+    return False
+
+
+def filter_mismatched_formats(formats: list[dict]) -> list[dict]:
+    """簡易設定の選択候補からコンテナ/コーデック不一致のフォーマットを完全に除外する"""
+    return [f for f in formats if not is_codec_container_mismatch(f)]
 
 
 def format_protocol(fmt: dict) -> str:
@@ -161,6 +201,8 @@ def format_columns(fmt: dict) -> list[str]:
 
     size = format_size(fmt.get("filesize") or fmt.get("filesize_approx"))
     note = fmt.get("format_note") or ""
+    if is_codec_container_mismatch(fmt):
+        note = f"⚠非推奨 {note}".strip()
 
     return [f"[{format_id}]", ext, kind, info1, info2, format_codec(fmt), format_protocol(fmt), size, note]
 
