@@ -11,7 +11,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from formats import FORMAT_COLUMN_LABELS, FORMAT_COLUMN_ROLE, FORMAT_COLUMN_WIDTHS, FORMAT_ROW_HEIGHT
+from formats import (
+    FORMAT_COLUMN_LABELS,
+    FORMAT_COLUMN_ROLE,
+    FORMAT_COLUMN_WIDTHS,
+    FORMAT_MISMATCH_ROLE,
+    FORMAT_ROW_HEIGHT,
+)
 
 
 class FormatItemDelegate(QStyledItemDelegate):
@@ -21,6 +27,9 @@ class FormatItemDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, option.palette.highlight())
             painter.setPen(option.palette.highlightedText().color())
         else:
+            if index.data(FORMAT_MISMATCH_ROLE):
+                # コンテナ/コーデック不一致の非推奨フォーマットだと分かるよう背景をグレーにする
+                painter.fillRect(option.rect, QColor(128, 128, 128, 60))
             painter.setPen(option.palette.text().color())
 
         columns = index.data(FORMAT_COLUMN_ROLE)

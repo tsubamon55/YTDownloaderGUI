@@ -30,6 +30,7 @@ from formats import (
     BEST_QUALITY_COMPATIBLE_SORT,
     FORMAT_COLUMN_ROLE,
     FORMAT_COLUMN_WIDTHS,
+    FORMAT_MISMATCH_ROLE,
     FORMAT_OPTION_TOOLTIPS,
     FORMAT_OPTIONS,
     HIGH_RESOLUTION_CHECK_LABELS,
@@ -406,6 +407,7 @@ class MainWindow(QMainWindow):
             combo.addItem(describe_format_plain(fmt), userData=fmt)
             row = combo.count() - 1
             combo.setItemData(row, format_columns(fmt), FORMAT_COLUMN_ROLE)
+            combo.setItemData(row, is_codec_container_mismatch(fmt), FORMAT_MISMATCH_ROLE)
 
         self.video_format_combo.setEnabled(self.detail_toggle_btn.isChecked())
         self.audio_format_combo.setEnabled(self.detail_toggle_btn.isChecked())

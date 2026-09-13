@@ -75,6 +75,7 @@ FORMAT_COLUMN_WIDTHS = [65, 55, 70, 90, 55, 75, 60, 70, 150]
 FORMAT_ROW_HEIGHT = 26
 
 FORMAT_COLUMN_ROLE = Qt.ItemDataRole.UserRole + 1
+FORMAT_MISMATCH_ROLE = Qt.ItemDataRole.UserRole + 2
 
 # コーデックIDの先頭部分(ドット区切りの最初)からユーザーに分かりやすい名称への対応表。
 # 例: "avc1.640028" -> "avc1" -> "H.264"
