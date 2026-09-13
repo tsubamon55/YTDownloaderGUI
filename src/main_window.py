@@ -1,10 +1,8 @@
 """メインウィンドウ(UI組み立てとイベントハンドリング)"""
 
-import copy
 import os
 from datetime import datetime
 
-import yt_dlp
 from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
@@ -25,9 +23,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from format_engine import (
+    compute_simple_format_note,
+    mismatched_selected_formats,
+    plan_high_resolution_confirmation,
+    resolve_format_spec as resolve_format_spec_logic,
+)
 from formats import (
-    BEST_AUDIO_COMPATIBLE_SORT,
-    BEST_QUALITY_COMPATIBLE_SORT,
     FORMAT_COLUMN_ROLE,
     FORMAT_COLUMN_WIDTHS,
     FORMAT_MISMATCH_ROLE,
@@ -35,10 +37,7 @@ from formats import (
     FORMAT_OPTIONS,
     HIGH_RESOLUTION_CHECK_LABELS,
     describe_format_plain,
-    filter_mismatched_formats,
     format_columns,
-    format_size,
-    format_spec_1080p,
     is_codec_container_mismatch,
 )
 from paths import get_downloads_folder, get_ffmpeg_location
@@ -478,28 +477,9 @@ class MainWindow(QMainWindow):
         self._sync_window_height()
 
     def _compute_simple_format_note(self) -> str:
-        if self.detail_toggle_btn.isChecked() or not self.available_formats:
+        if self.detail_toggle_btn.isChecked():
             return ""
-
-        format_label = self.format_combo.currentText()
-        if format_label != "動画 (最高画質 mp4)":
-            return ""
-
-        mp4_selected = self.resolve_selected_formats(FORMAT_OPTIONS[format_label], None)
-        mp4_resolution = self.selection_resolution(mp4_selected)
-
-        best_label = "動画 (最高画質)"
-        best_selected = self.resolve_selected_formats(FORMAT_OPTIONS[best_label], BEST_QUALITY_COMPATIBLE_SORT)
-        best_resolution = self.selection_resolution(best_selected)
-
-        if mp4_resolution is None or best_resolution is None:
-            return ""
-
-        _, mp4_height = mp4_resolution
-        _, best_height = best_resolution
-        if mp4_height < best_height:
-            return f"※ 互換性優先のため画質が{mp4_height}pに制限されます(本来の最高画質は{best_height}p)"
-        return ""
+        return compute_simple_format_note(self.available_formats, self.format_combo.currentText())
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.out_edit.text())
@@ -553,151 +533,33 @@ class MainWindow(QMainWindow):
         self.log_view.appendPlainText(f"[{timestamp}] {msg}")
 
     def resolve_format_spec(self) -> tuple[str, list, list | None]:
-        if self.detail_toggle_btn.isChecked():
-            video_fmt = self.video_format_combo.currentData()
-            audio_fmt = self.audio_format_combo.currentData()
-
-            if video_fmt is None and audio_fmt is None:
-                raise ValueError("動画または音声のフォーマットを選択してください")
-
-            postprocessors = []
-            if video_fmt is not None and audio_fmt is not None:
-                format_spec = f"{video_fmt['format_id']}+{audio_fmt['format_id']}"
-            elif video_fmt is not None:
-                format_spec = video_fmt["format_id"]
-            else:
-                format_spec = audio_fmt["format_id"]
-                if self.mp3_checkbox.isChecked():
-                    postprocessors = [
-                        {
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": "mp3",
-                            "preferredquality": "192",
-                        }
-                    ]
-            return format_spec, postprocessors, None
-
-        format_label = self.format_combo.currentText()
-        format_key = FORMAT_OPTIONS[format_label]
-        if format_key == "audio_mp3":
-            return (
-                "ba/b",
-                [
-                    {
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "192",
-                    }
-                ],
-                None,
-            )
-        if format_key == "audio_m4a":
-            # 音声のみに限定できない場合の"ba"フォールバックで動画結合フォーマットが
-            # 選ばれてしまう事態に備え、常に音声トラックのみを取り出す後処理を付ける
-            # (対象が既に音声のみ・良コーデックならffmpegは何もせずスキップする)
-            return (
-                "ba[ext=m4a]/ba[acodec^=mp4a]/ba",
-                [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}],
-                None,
-            )
-        if format_key == "audio_best":
-            # "ba"に一致するフォーマットが無い場合の"/b"フォールバックで動画結合
-            # フォーマットが選ばれてしまう事態に備え、音声トラックのみを取り出す
-            return (
-                "ba/b",
-                [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}],
-                BEST_AUDIO_COMPATIBLE_SORT,
-            )
-        if format_label == "動画 (最高画質)":
-            return format_key, [], BEST_QUALITY_COMPATIBLE_SORT
-        return format_key, [], None
-
-    def resolve_selected_formats(self, format_spec: str, format_sort: list | None) -> dict | None:
-        """実際のダウンロード(DownloadWorker)と全く同じformat_spec/format_sortをyt-dlp本体の
-        選択エンジンに通し、実際に選ばれるフォーマットを求める(ネットワークアクセスなし)。
-        プレビュー用の選択ロジックを独自実装すると、実際のダウンロード結果とズレる恐れがあるため、
-        yt-dlpの選択ロジックそのものを再利用して一貫性を保つ。"""
-        if not self.available_formats:
-            return None
-        ydl_opts = {"quiet": True, "no_warnings": True}
-        if format_sort:
-            ydl_opts["format_sort"] = format_sort
-        ydl = yt_dlp.YoutubeDL(ydl_opts)
-        formats = filter_mismatched_formats(copy.deepcopy(self.available_formats))
-        try:
-            ydl.sort_formats({"formats": formats})
-            selected = ydl._select_formats(formats, ydl.build_format_selector(format_spec))
-        except Exception:
-            return None
-        return selected[0] if selected else None
-
-    def estimate_selection_size(self, selected: dict | None) -> int | None:
-        if not selected:
-            return None
-        total = 0
-        for part in selected.get("requested_formats") or [selected]:
-            size = part.get("filesize") or part.get("filesize_approx")
-            if not size:
-                # いずれかの構成要素のサイズが不明な場合、合計値も不正確になるため不明として扱う
-                return None
-            total += size
-        return total
-
-    def selection_resolution(self, selected: dict | None) -> tuple[int, int] | None:
-        if not selected:
-            return None
-        for part in selected.get("requested_formats") or [selected]:
-            height = part.get("height")
-            width = part.get("width")
-            if height:
-                return width or 0, height
-        return None
+        detail_mode = self.detail_toggle_btn.isChecked()
+        return resolve_format_spec_logic(
+            detail_mode,
+            self.video_format_combo.currentData() if detail_mode else None,
+            self.audio_format_combo.currentData() if detail_mode else None,
+            self.mp3_checkbox.isChecked(),
+            self.format_combo.currentText(),
+        )
 
     def confirm_high_resolution_download(
         self, format_label: str, format_spec: str, format_sort: list | None
     ) -> tuple[str | None, str | None]:
         """簡易設定の最高画質が1920x1080を超える場合に確認する。
-        縦型動画では width/height が landscape と逆転するため、長辺・短辺で判定する。
         戻り値: (選択, 1080p選択時の代替format_spec)
         選択は "best"(最高画質のまま) / "1080p"(1080pに制限) / None(キャンセル)"""
-        best_selected = self.resolve_selected_formats(format_spec, format_sort)
-        resolution = self.selection_resolution(best_selected)
-        if resolution is None:
+        plan = plan_high_resolution_confirmation(self.available_formats, format_label, format_spec, format_sort)
+        if not plan.needs_confirmation:
             return "best", None
-
-        width, height = resolution
-        long_side, short_side = max(width, height), min(width, height)
-        if long_side <= 1920 and short_side <= 1080:
-            return "best", None
-
-        best_size = self.estimate_selection_size(best_selected)
-
-        # width<=1920/height<=1080のような単純なフィルタでは縦型動画の向きを
-        # 判定できないため、実際に選ばれた最高画質フォーマットの向きから判定する
-        is_portrait = height > width
-        fallback_spec = format_spec_1080p(format_label, is_portrait)
-        fallback_selected = self.resolve_selected_formats(fallback_spec, format_sort)
-        fallback_resolution = self.selection_resolution(fallback_selected)
-        fallback_size = self.estimate_selection_size(fallback_selected)
-
-        resolution_text = f"{width}x{height}"
-        size_text = f"約{format_size(best_size)}" if best_size else "不明"
-
-        message = f"最高画質は {resolution_text}({size_text})です。\n1080pを超える解像度のため、ファイルサイズが大きくなります。"
-        if fallback_resolution is not None:
-            fallback_width, fallback_height = fallback_resolution
-            fallback_resolution_text = f"{fallback_width}x{fallback_height}"
-            fallback_size_text = f"約{format_size(fallback_size)}" if fallback_size else "不明"
-            message += f"\n1080pにすると {fallback_resolution_text}({fallback_size_text})になります。"
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("高解像度の動画です")
-        box.setText(message)
+        box.setText(plan.message)
         best_btn = box.addButton("最高画質でダウンロード", QMessageBox.ButtonRole.AcceptRole)
         p1080_btn = (
             box.addButton("1080pでダウンロード", QMessageBox.ButtonRole.ActionRole)
-            if fallback_resolution is not None
+            if plan.has_fallback
             else None
         )
         box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
@@ -708,7 +570,7 @@ class MainWindow(QMainWindow):
         if clicked is best_btn:
             return "best", None
         if clicked is p1080_btn:
-            return "1080p", fallback_spec
+            return "1080p", plan.fallback_spec
         return None, None
 
     def start_download(self):
@@ -737,11 +599,9 @@ class MainWindow(QMainWindow):
             return
 
         if self.detail_toggle_btn.isChecked():
-            mismatched_fmts = [
-                fmt
-                for fmt in (self.video_format_combo.currentData(), self.audio_format_combo.currentData())
-                if fmt is not None and is_codec_container_mismatch(fmt)
-            ]
+            mismatched_fmts = mismatched_selected_formats(
+                self.video_format_combo.currentData(), self.audio_format_combo.currentData()
+            )
             if mismatched_fmts:
                 ids = ", ".join(f"[{fmt.get('format_id')}]" for fmt in mismatched_fmts)
                 reply = QMessageBox.question(
