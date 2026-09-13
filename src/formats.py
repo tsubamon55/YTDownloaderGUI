@@ -3,7 +3,15 @@
 from PyQt6.QtCore import Qt
 
 FORMAT_OPTIONS = {
-    "動画 (最高画質 mp4)": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+    # ext=mp4/m4aだけではコーデックまでは保証されない(高解像度ではYouTubeがH.264を提供せず、
+    # VP9がmp4コンテナのHLSバリアントとして出てくることがある)ため、
+    # H.264(avc1)・AAC(mp4a)であることも明示的に条件にする
+    "動画 (最高画質 mp4)": (
+        "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]"
+        "/bv*[ext=mp4][vcodec^=avc1]+ba*[acodec^=mp4a]"
+        "/b[ext=mp4][vcodec^=avc1]"
+        "/b"
+    ),
     "動画 (最高画質)": "bv*+ba/b",
     "音声のみ (最高音質 m4a)": "audio_m4a",
     "音声のみ (最高音質)": "audio_best",
@@ -32,8 +40,9 @@ def format_spec_1080p(format_label: str, portrait: bool) -> str:
     width_cap, height_cap = (1080, 1920) if portrait else (1920, 1080)
     if format_label == "動画 (最高画質 mp4)":
         return (
-            f"bv*[ext=mp4][width<={width_cap}][height<={height_cap}]+ba[ext=m4a]"
-            f"/b[ext=mp4][width<={width_cap}][height<={height_cap}]"
+            f"bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba[ext=m4a]"
+            f"/bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba*[acodec^=mp4a]"
+            f"/b[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]"
             "/b"
         )
     return (
