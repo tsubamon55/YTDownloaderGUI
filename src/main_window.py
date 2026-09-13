@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
             tooltip = FORMAT_OPTION_TOOLTIPS.get(label)
             if tooltip:
                 self.format_combo.setItemData(i, tooltip, Qt.ItemDataRole.ToolTipRole)
+        self.format_combo.currentIndexChanged.connect(self.update_simple_format_note)
         simple_layout.addWidget(self.format_combo, stretch=1)
         format_row.addWidget(self.simple_format_container, stretch=1)
         # simple_format_container が非表示のときはこのスペーサーが余白を吸収し、
@@ -146,6 +147,11 @@ class MainWindow(QMainWindow):
         format_row.addWidget(self.detail_toggle_btn)
         self.format_row = format_row
         layout.addLayout(format_row)
+
+        self.simple_format_note_label = QLabel("")
+        self.simple_format_note_label.setStyleSheet("color: #b06000;")
+        self.simple_format_note_label.setVisible(False)
+        layout.addWidget(self.simple_format_note_label)
 
         self.detail_container = QWidget()
         detail_layout = QVBoxLayout(self.detail_container)
@@ -330,6 +336,7 @@ class MainWindow(QMainWindow):
         self.video_format_combo.setEnabled(checked and has_items)
         self.audio_format_combo.setEnabled(checked and has_items)
         self.on_detail_selection_changed()
+        self.update_simple_format_note()
 
         url = self.url_edit.text().strip()
         is_fetching = self.format_worker is not None and self.format_worker.isRunning()
@@ -359,6 +366,8 @@ class MainWindow(QMainWindow):
         self.thumbnail_label.clear()
         self.info_ready = False
         self.available_formats = []
+        self.simple_format_note_label.setText("")
+        self.simple_format_note_label.setVisible(False)
         self.download_btn.setEnabled(False)
         self.status_label.setText("動画情報を取得中...")
         self.spinner.start()
@@ -412,6 +421,7 @@ class MainWindow(QMainWindow):
         self.video_format_combo.setEnabled(self.detail_toggle_btn.isChecked())
         self.audio_format_combo.setEnabled(self.detail_toggle_btn.isChecked())
         self.on_detail_selection_changed()
+        self.update_simple_format_note()
 
         self.title_label.setText(title)
         if thumbnail_bytes:
@@ -457,6 +467,39 @@ class MainWindow(QMainWindow):
             self.merge_note_label.setText("音声のみダウンロードします")
         else:
             self.merge_note_label.setText("")
+
+    def update_simple_format_note(self, *_):
+        """簡易設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
+        解像度が落ちる場合のみ、非モーダルな注記で分かるようにする。
+        注記がない間はラベル自体を隠し、空欄による不自然な余白が残らないようにする"""
+        note = self._compute_simple_format_note()
+        self.simple_format_note_label.setText(note)
+        self.simple_format_note_label.setVisible(bool(note))
+        self._sync_window_height()
+
+    def _compute_simple_format_note(self) -> str:
+        if self.detail_toggle_btn.isChecked() or not self.available_formats:
+            return ""
+
+        format_label = self.format_combo.currentText()
+        if format_label != "動画 (最高画質 mp4)":
+            return ""
+
+        mp4_selected = self.resolve_selected_formats(FORMAT_OPTIONS[format_label], None)
+        mp4_resolution = self.selection_resolution(mp4_selected)
+
+        best_label = "動画 (最高画質)"
+        best_selected = self.resolve_selected_formats(FORMAT_OPTIONS[best_label], BEST_QUALITY_COMPATIBLE_SORT)
+        best_resolution = self.selection_resolution(best_selected)
+
+        if mp4_resolution is None or best_resolution is None:
+            return ""
+
+        _, mp4_height = mp4_resolution
+        _, best_height = best_resolution
+        if mp4_height < best_height:
+            return f"※ 互換性優先のため画質が{mp4_height}pに制限されます(本来の最高画質は{best_height}p)"
+        return ""
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.out_edit.text())
@@ -744,6 +787,9 @@ class MainWindow(QMainWindow):
         self.url_edit.clear()
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
+        self.available_formats = []
+        self.simple_format_note_label.setText("")
+        self.simple_format_note_label.setVisible(False)
         self.set_inputs_enabled(True)
         self.download_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
