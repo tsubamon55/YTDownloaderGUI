@@ -680,6 +680,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "入力エラー", str(e))
             return
 
+        if self.detail_toggle_btn.isChecked():
+            mismatched_fmts = [
+                fmt
+                for fmt in (self.video_format_combo.currentData(), self.audio_format_combo.currentData())
+                if fmt is not None and is_codec_container_mismatch(fmt)
+            ]
+            if mismatched_fmts:
+                ids = ", ".join(f"[{fmt.get('format_id')}]" for fmt in mismatched_fmts)
+                reply = QMessageBox.question(
+                    self,
+                    "非推奨フォーマットの選択",
+                    f"選択中のフォーマット({ids})はコンテナとコーデックが一致しない非推奨のものです。"
+                    "再生環境によっては正しく再生できない場合があります。\n\nこのままダウンロードしますか?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
         if not self.detail_toggle_btn.isChecked():
             format_label = self.format_combo.currentText()
             if format_label in HIGH_RESOLUTION_CHECK_LABELS:
