@@ -206,6 +206,10 @@ class DownloadWorker(QThread):
             else:
                 self.progress.emit(min(self._completed_weight * 100, 100.0), "次のコンポーネントを準備中...")
 
+    THUMBNAIL_EMBEDDABLE_EXTS = {
+        "mp3", "mkv", "mka", "ogg", "opus", "flac", "m4a", "mp4", "m4v", "mov",
+    }
+
     def _postprocessor_hook(self, d):
         status = d.get("status")
         name = d.get("postprocessor", "")
@@ -287,8 +291,12 @@ class DownloadWorker(QThread):
                 "no_warnings": True,
                 "format": self.format_spec,
                 "writethumbnail": True,
-                "postprocessors": [*self.postprocessors, {"key": "EmbedThumbnail"}],
+                "postprocessors": list(self.postprocessors),
             }
+            if expected_ext in self.THUMBNAIL_EMBEDDABLE_EXTS:
+                ydl_opts["postprocessors"].append({"key": "EmbedThumbnail"})
+            else:
+                ydl_opts["writethumbnail"] = False
 
             if self.format_sort:
                 ydl_opts["format_sort"] = self.format_sort
