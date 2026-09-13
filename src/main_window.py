@@ -668,14 +668,14 @@ class MainWindow(QMainWindow):
         fallback_size = self.estimate_selection_size(fallback_selected)
 
         resolution_text = f"{width}x{height}"
-        size_text = format_size(best_size) if best_size else "不明"
+        size_text = f"約{format_size(best_size)}" if best_size else "不明"
 
-        message = f"最高画質は {resolution_text}(約{size_text})です。\n1080pを超える解像度のため、ファイルサイズが大きくなります。"
+        message = f"最高画質は {resolution_text}({size_text})です。\n1080pを超える解像度のため、ファイルサイズが大きくなります。"
         if fallback_resolution is not None:
             fallback_width, fallback_height = fallback_resolution
             fallback_resolution_text = f"{fallback_width}x{fallback_height}"
-            fallback_size_text = format_size(fallback_size) if fallback_size else "不明"
-            message += f"\n1080pにすると {fallback_resolution_text}(約{fallback_size_text})になります。"
+            fallback_size_text = f"約{format_size(fallback_size)}" if fallback_size else "不明"
+            message += f"\n1080pにすると {fallback_resolution_text}({fallback_size_text})になります。"
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
