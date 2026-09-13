@@ -10,6 +10,7 @@ import yt_dlp
 
 from formats import format_size, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location
+from yt_dlp_selection import make_filtering_format_selector
 
 
 class FormatListWorker(QThread):
@@ -277,28 +278,7 @@ class DownloadWorker(QThread):
         指定した場合はexclude_mismatched=Falseとなり、そのまま尊重する。"""
         if not self.exclude_mismatched:
             return self.format_spec
-
-        base_selector = yt_dlp.YoutubeDL({"quiet": True}).build_format_selector(self.format_spec)
-
-        def selector(ctx):
-            filtered_formats = [f for f in ctx["formats"] if not is_codec_container_mismatch(f)]
-            # has_merged_format/incomplete_formatsはyt-dlp側がフィルタ前の全フォーマットから
-            # 計算した値なので、除外後のフォーマットに合わせて計算し直す
-            # (計算式はyt_dlp.YoutubeDL._select_formatsに準拠)
-            filtered_ctx = dict(
-                ctx,
-                formats=filtered_formats,
-                has_merged_format=any(
-                    "none" not in (f.get("acodec"), f.get("vcodec")) for f in filtered_formats
-                ),
-                incomplete_formats=(
-                    all(f.get("vcodec") == "none" for f in filtered_formats)
-                    or all(f.get("acodec") == "none" for f in filtered_formats)
-                ),
-            )
-            return base_selector(filtered_ctx)
-
-        return selector
+        return make_filtering_format_selector(self.format_spec, is_codec_container_mismatch)
 
     def run(self):
         self._start_time = time.monotonic()

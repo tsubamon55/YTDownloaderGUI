@@ -8,8 +8,6 @@ QtやQMessageBoxには一切依存しないため、単体テストがそのま�
 import copy
 from dataclasses import dataclass
 
-import yt_dlp
-
 from formats import (
     BEST_AUDIO_COMPATIBLE_SORT,
     BEST_QUALITY_COMPATIBLE_SORT,
@@ -19,6 +17,7 @@ from formats import (
     format_spec_1080p,
     is_codec_container_mismatch,
 )
+from yt_dlp_selection import select_formats
 
 MP3_POSTPROCESSOR = {
     "key": "FFmpegExtractAudio",
@@ -88,14 +87,9 @@ def select_best_format(
     yt-dlpの選択ロジックそのものを再利用して一貫性を保つ。"""
     if not available_formats:
         return None
-    ydl_opts = {"quiet": True, "no_warnings": True}
-    if format_sort:
-        ydl_opts["format_sort"] = format_sort
-    ydl = yt_dlp.YoutubeDL(ydl_opts)
     formats = filter_mismatched_formats(copy.deepcopy(available_formats))
     try:
-        ydl.sort_formats({"formats": formats})
-        selected = ydl._select_formats(formats, ydl.build_format_selector(format_spec))
+        selected = select_formats(formats, format_spec, format_sort)
     except Exception:
         return None
     return selected[0] if selected else None

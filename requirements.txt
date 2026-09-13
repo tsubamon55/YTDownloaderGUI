@@ -1,4 +1,8 @@
-yt-dlp
+# yt-dlpはsrc/yt_dlp_selection.pyでYoutubeDLの非公開の内部契約(フォーマット選択ctxの形)に
+# 依存しているため、無条件に最新版を取得しないようバージョンを固定している。
+# 更新する場合は、バージョンを上げてから必ず `python -m unittest discover -s tests` を実行し、
+# tests/test_yt_dlp_selection.py が通ることを確認した上でコミットすること。
+yt-dlp==2026.8.19
 PyQt6
 mutagen
 pywin32
