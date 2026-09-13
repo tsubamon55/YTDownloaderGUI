@@ -8,7 +8,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 import yt_dlp
 
-from formats import format_size, is_codec_container_mismatch
+from formats import format_size, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location
 
 
@@ -37,7 +37,10 @@ class FormatListWorker(QThread):
 
             formats = info.get("formats") or []
             formats = [f for f in formats if f.get("format_id")]
-            formats.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
+            formats.sort(
+                key=lambda f: (f.get("height") or 0, protocol_rank(f), f.get("tbr") or 0),
+                reverse=True,
+            )
 
             title = info.get("title") or ""
             thumbnail_bytes = b""

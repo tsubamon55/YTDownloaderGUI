@@ -166,6 +166,15 @@ def format_protocol(fmt: dict) -> str:
     return protocol
 
 
+# 同じ解像度・コーデックのHLS/DASH版はHTTPS/HTTP版よりファイルサイズ不明・進捗不正確になりやすいため、
+# 一覧の並び順ではHTTPS/HTTP版を優先する(自動選択側はyt-dlp自身のproto優先度で既に対応済み)
+_PROTOCOL_RANK = {"HTTPS": 2, "HTTP": 2, "DASH": 1, "HLS": 0}
+
+
+def protocol_rank(fmt: dict) -> int:
+    return _PROTOCOL_RANK.get(format_protocol(fmt), 1)
+
+
 def format_columns(fmt: dict) -> list[str]:
     format_id = fmt.get("format_id", "?")
     ext = fmt.get("ext", "?")
