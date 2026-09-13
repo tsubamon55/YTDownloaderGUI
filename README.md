@@ -89,4 +89,9 @@ Python未インストールの環境でも動くexeを作成できます。ビ�
 ## ライセンスに関する注意
 
 同梱・利用する ffmpeg essentials build は **GPL** ライセンスの構成でビルドされています。
-第三者に配布する場合は、ffmpegのライセンス表記(COPYING.GPLv3など)を同梱し、ソースの入手先を明記することを推奨します。
+第三者に配布する場合は、ffmpegのライセンス表記(COPYING.GPLv3など)を同梱し、ソースの入手先を明記する必要があります。
+
+`licenses/` フォルダに以下を用意しています(インストーラーにも `licenses/` として同梱されます):
+
+- `COPYING.GPLv3.txt` — GNU General Public License v3 の正式テキスト
+- `FFMPEG_NOTICE.md` — 同梱ffmpegのビルド元・ソース入手先の明記

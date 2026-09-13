@@ -29,6 +29,8 @@ Name: "desktopicon"; Description: "デスクトップにアイコンを作成す
 
 [Files]
 Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "licenses\COPYING.GPLv3.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "licenses\FFMPEG_NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
