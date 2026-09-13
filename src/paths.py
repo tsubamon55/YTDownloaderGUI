@@ -14,6 +14,13 @@ def get_base_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def get_log_file_path() -> str:
+    """インストール先(Program Files等)は書き込み不可なことがあるため、
+    クラッシュログは常にユーザー書き込み可能なLOCALAPPDATA配下に置く"""
+    base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "YTDownloaderGUI", "crash.log")
+
+
 class _GUID(ctypes.Structure):
     _fields_ = [
         ("Data1", ctypes.c_ulong),
