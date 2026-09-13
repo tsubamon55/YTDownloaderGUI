@@ -1,3 +1,4 @@
 yt-dlp
 PyQt6
 mutagen
+pywin32
