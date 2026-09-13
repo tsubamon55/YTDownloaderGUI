@@ -54,15 +54,30 @@ youtube-downloader/
 
 ## 配布用exeのビルド
 
-Python未インストールの環境でも動く単体exeを作成できます。
+Python未インストールの環境でも動くexeを作成できます。ビルド設定は `YTDownloaderGUI.spec` にまとめてあるので、ソースコードを変更したら以下を実行するだけで再ビルドできます。
 
 ```powershell
 .venv\Scripts\pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --name YTDownloaderGUI --windowed --add-data "ffmpeg;ffmpeg" src\main.py
+.venv\Scripts\pyinstaller YTDownloaderGUI.spec --noconfirm
 ```
 
-ビルド後、`dist\YTDownloaderGUI\` フォルダ一式(`YTDownloaderGUI.exe` と `_internal`)を配布してください。
+`dist\YTDownloaderGUI\` フォルダ一式(`YTDownloaderGUI.exe` と `_internal`)が更新されます。
 フォルダ内にffmpegが同梱されているため、配布先のPCに追加のインストール作業は不要です。
+
+**注意:** `YTDownloaderGUI.exe` 単体だけをコピーして配布・実行すると `_internal` フォルダが見つからず起動時にエラーになります。フォルダごと配布するか、下記のインストーラーを使ってください。
+
+## インストーラーのビルド
+
+[Inno Setup](https://jrsoftware.org/isinfo.php) がインストールされていれば、`installer.iss` からインストーラーを作成できます(未インストールの場合は `winget install --id JRSoftware.InnoSetup -e`)。
+
+```powershell
+.venv\Scripts\pyinstaller YTDownloaderGUI.spec --noconfirm
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer.iss
+```
+
+`installer_output\YTDownloaderGUI-Setup-<バージョン>.exe` が生成されます。このインストーラーは管理者権限不要で `%LOCALAPPDATA%\Programs\YTDownloaderGUI` にインストールし、スタートメニュー/デスクトップにショートカットを作成します。
+
+バージョンを上げる場合は `installer.iss` 冒頭の `#define MyAppVersion "1.0.0"` を書き換えてから再ビルドしてください。
 
 ## ライセンスに関する注意
 

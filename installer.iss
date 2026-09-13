@@ -1,0 +1,39 @@
+; Inno Setup script for YTDownloaderGUI
+; Build the app first: pyinstaller YTDownloaderGUI.spec
+; Then compile this script: iscc installer.iss
+
+#define MyAppName "YTDownloaderGUI"
+#define MyAppVersion "1.0.0"
+#define MyAppExeName "YTDownloaderGUI.exe"
+
+[Setup]
+AppId={{B3B5B1B0-5B1C-4E6C-9C6B-8F4B6B7B2A11}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+PrivilegesRequired=lowest
+DefaultDirName={localappdata}\Programs\{#MyAppName}
+DefaultGroupName={#MyAppName}
+UninstallDisplayIcon={app}\{#MyAppExeName}
+OutputDir=installer_output
+OutputBaseFilename={#MyAppName}-Setup-{#MyAppVersion}
+Compression=lzma2
+SolidCompression=yes
+ArchitecturesInstallIn64BitMode=x64compatible
+DisableProgramGroupPage=yes
+
+[Languages]
+Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "デスクトップにアイコンを作成する"; GroupDescription: "追加のアイコン:"
+
+[Files]
+Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent

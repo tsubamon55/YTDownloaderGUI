@@ -3,7 +3,9 @@
 # PyInstaller build artifacts
 build/
 dist/
-*.spec
+
+# Inno Setup build output
+installer_output/
 
 # Bundled ffmpeg binaries (large, fetched separately - see README)
 ffmpeg/
