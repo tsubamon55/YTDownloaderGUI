@@ -30,6 +30,7 @@ from formats import (
     BEST_QUALITY_COMPATIBLE_SORT,
     FORMAT_COLUMN_ROLE,
     FORMAT_COLUMN_WIDTHS,
+    FORMAT_OPTION_TOOLTIPS,
     FORMAT_OPTIONS,
     HIGH_RESOLUTION_CHECK_LABELS,
     describe_format_plain,
@@ -124,6 +125,10 @@ class MainWindow(QMainWindow):
         simple_layout.addWidget(QLabel("形式:"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMAT_OPTIONS.keys())
+        for i, label in enumerate(FORMAT_OPTIONS.keys()):
+            tooltip = FORMAT_OPTION_TOOLTIPS.get(label)
+            if tooltip:
+                self.format_combo.setItemData(i, tooltip, Qt.ItemDataRole.ToolTipRole)
         simple_layout.addWidget(self.format_combo, stretch=1)
         format_row.addWidget(self.simple_format_container, stretch=1)
         # simple_format_container が非表示のときはこのスペーサーが余白を吸収し、
@@ -536,6 +541,8 @@ class MainWindow(QMainWindow):
                 ],
                 None,
             )
+        if format_key == "audio_m4a":
+            return "ba[ext=m4a]/ba*[acodec^=mp4a]/ba", [], None
         if format_key == "audio_best":
             return "ba/b", [], BEST_AUDIO_COMPATIBLE_SORT
         if format_label == "動画 (最高画質)":
