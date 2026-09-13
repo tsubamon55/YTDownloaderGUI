@@ -26,7 +26,9 @@ python -m venv .venv
 ### 2. ffmpegの配置
 
 このリポジトリに `ffmpeg/` フォルダは含まれていません(バイナリが大きいため `.gitignore` で除外)。
-mp3変換や動画+音声の結合ダウンロードには ffmpeg が必要なので、以下の手順で配置してください。
+mp3変換や動画+音声の結合ダウンロードには ffmpeg が必要です。以下のどちらかの方法で用意してください。
+
+**方法A: プロジェクト直下に配置する(推奨)**
 
 1. [FFmpeg (Essentials Build) by Gyan.Dev](https://www.gyan.dev/ffmpeg/builds/) をダウンロード、または winget を使う:
    ```powershell
@@ -44,7 +46,12 @@ youtube-downloader/
 └── ...
 ```
 
-アプリは実行時にこの `ffmpeg/` フォルダを自動検出して使用します(システムのPATHには依存しません)。
+**方法B: システムにインストールしてPATHを通す**
+
+`winget install --id Gyan.FFmpeg.Essentials -e` などでffmpegをインストールし、PATHが通っていれば、
+`ffmpeg/` フォルダが無くてもアプリが自動検出して使用します。
+
+アプリは起動時にまず同梱の `ffmpeg/` フォルダを探し、無ければシステムPATH上のffmpegにフォールバックします。
 
 ### 3. ソースから実行
 

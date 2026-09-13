@@ -661,7 +661,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "ffmpegが見つかりません",
-                "同梱のffmpegフォルダが見つかりません。アプリの ffmpeg\\ffmpeg.exe を確認してください。",
+                "ffmpegが見つかりません。アプリの ffmpeg\\ffmpeg.exe を配置するか、"
+                "システムにffmpegをインストールしてPATHを通してください。",
             )
             return
 

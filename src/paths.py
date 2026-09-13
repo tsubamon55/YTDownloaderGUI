@@ -2,6 +2,7 @@
 
 import ctypes
 import os
+import shutil
 import sys
 from uuid import UUID
 
@@ -56,4 +57,10 @@ def get_ffmpeg_location() -> str | None:
         ffmpeg_dir = os.path.join(base, "ffmpeg")
         if os.path.isfile(os.path.join(ffmpeg_dir, "ffmpeg.exe")):
             return ffmpeg_dir
+
+    # 同梱フォルダが無い場合、システムPATHのffmpegにフォールバック
+    # (winget等で別途インストール済みの開発者向け)
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return os.path.dirname(system_ffmpeg)
     return None
