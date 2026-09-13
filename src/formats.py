@@ -61,11 +61,59 @@ def format_size(num_bytes) -> str:
     return f"{mb:.1f}MB"
 
 
-FORMAT_COLUMN_LABELS = ["ID", "形式", "種別", "画質/音質", "fps", "サイズ", "備考"]
-FORMAT_COLUMN_WIDTHS = [65, 55, 70, 90, 55, 70, 150]
+FORMAT_COLUMN_LABELS = ["ID", "形式", "種別", "画質/音質", "fps", "コーデック", "配信", "サイズ", "備考"]
+FORMAT_COLUMN_WIDTHS = [65, 55, 70, 90, 55, 75, 60, 70, 150]
 FORMAT_ROW_HEIGHT = 26
 
 FORMAT_COLUMN_ROLE = Qt.ItemDataRole.UserRole + 1
+
+# コーデックIDの先頭部分(ドット区切りの最初)からユーザーに分かりやすい名称への対応表。
+# 例: "avc1.640028" -> "avc1" -> "H.264"
+CODEC_LABELS = {
+    "avc1": "H.264",
+    "h264": "H.264",
+    "av01": "AV1",
+    "vp9": "VP9",
+    "vp09": "VP9",
+    "vp8": "VP8",
+    "mp4a": "AAC",
+    "aac": "AAC",
+    "opus": "Opus",
+    "vorbis": "Vorbis",
+    "ac-3": "AC3",
+    "ec-3": "EAC3",
+    "flac": "FLAC",
+    "alac": "ALAC",
+}
+
+
+def _codec_label(codec: str | None) -> str:
+    if not codec or codec == "none":
+        return ""
+    prefix = codec.split(".")[0].lower()
+    return CODEC_LABELS.get(prefix, prefix.upper())
+
+
+def format_codec(fmt: dict) -> str:
+    """映像/音声コーデックの短いラベル。同じ解像度/fps/配信方式でも
+    コーデックが違えば別物(例: H.264 vs AV1)なので見分けられるようにする"""
+    labels = [_codec_label(fmt.get("vcodec")), _codec_label(fmt.get("acodec"))]
+    return "+".join(label for label in labels if label)
+
+
+def format_protocol(fmt: dict) -> str:
+    """配信方式を表す短いラベル。HLS(m3u8)配信はContent-Lengthが分からずサイズが
+    不明になりやすいなど、進捗表示の挙動に関わるためユーザーに区別できるようにする"""
+    protocol = fmt.get("protocol") or ""
+    if "m3u8" in protocol:
+        return "HLS"
+    if "dash" in protocol:
+        return "DASH"
+    if protocol == "https":
+        return "HTTPS"
+    if protocol == "http":
+        return "HTTP"
+    return protocol
 
 
 def format_columns(fmt: dict) -> list[str]:
@@ -93,7 +141,11 @@ def format_columns(fmt: dict) -> list[str]:
         )
         info1 = resolution or ""
         fps = fmt.get("fps")
-        info2 = f"{fps}fps" if fps else ""
+        if fps:
+            fps_display = int(fps) if float(fps).is_integer() else fps
+            info2 = f"{fps_display}fps"
+        else:
+            info2 = ""
     elif has_audio:
         abr = fmt.get("abr")
         info1 = f"{abr:.0f}kbps" if abr else ""
@@ -101,7 +153,7 @@ def format_columns(fmt: dict) -> list[str]:
     size = format_size(fmt.get("filesize") or fmt.get("filesize_approx"))
     note = fmt.get("format_note") or ""
 
-    return [f"[{format_id}]", ext, kind, info1, info2, size, note]
+    return [f"[{format_id}]", ext, kind, info1, info2, format_codec(fmt), format_protocol(fmt), size, note]
 
 
 def describe_format_plain(fmt: dict) -> str:
