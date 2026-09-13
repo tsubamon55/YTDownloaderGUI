@@ -80,6 +80,10 @@ class DownloadWorker(QThread):
         self._start_time: float | None = None
         self._active_postprocessors: dict[str, int] = {}
         self._unique_title: str | None = None
+        self._component_ids: list[str | None] = []
+        self._component_weights: list[float] = [1.0]
+        self._completed_weight: float = 0.0
+        self._current_component_index: int = 0
 
     def cancel(self):
         self._is_cancelled = True
@@ -124,6 +128,29 @@ class DownloadWorker(QThread):
 
         return " / ".join(parts)
 
+    def _init_component_weights(self, probe_info: dict):
+        """映像+音声を別々にダウンロードする形式向けに、各コンポーネントの
+        推定サイズ比から全体進捗に対する重みを求めておく(サイズ不明な場合は均等割り)"""
+        components = probe_info.get("requested_formats") or [probe_info]
+        self._component_ids = [c.get("format_id") for c in components]
+        sizes = [c.get("filesize") or c.get("filesize_approx") or 0 for c in components]
+        total_size = sum(sizes)
+        if total_size > 0 and all(sizes):
+            self._component_weights = [s / total_size for s in sizes]
+        else:
+            self._component_weights = [1.0 / len(components) for _ in components]
+
+    @staticmethod
+    def _format_eta(seconds: float) -> str:
+        if seconds < 0 or seconds != seconds:  # NaN check
+            return "--:--"
+        seconds = int(seconds)
+        hours, rem = divmod(seconds, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
     def _progress_hook(self, d):
         if self._is_cancelled:
             raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
@@ -136,20 +163,48 @@ class DownloadWorker(QThread):
                 self._logged_format_ids.add(fmt_id)
                 self.log.emit(self._describe_selected_format(info))
 
+            if fmt_id in self._component_ids:
+                component_index = self._component_ids.index(fmt_id)
+            else:
+                component_index = self._current_component_index
+            component_weight = (
+                self._component_weights[component_index]
+                if component_index < len(self._component_weights)
+                else 0.0
+            )
+
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             downloaded = d.get("downloaded_bytes", 0)
-            if total:
-                percent = downloaded / total * 100
+            component_percent = downloaded / total if total else 0.0
+            percent = min((self._completed_weight + component_weight * component_percent) * 100, 100.0)
+
+            # コンポーネント切り替え時に残り時間表示が乱高下しないよう、
+            # 全体の経過時間と進捗率から残り時間を推定する
+            elapsed = time.monotonic() - self._start_time if self._start_time else 0.0
+            if percent > 0:
+                eta = self._format_eta(elapsed * (100 - percent) / percent)
             else:
-                percent = 0.0
+                eta = "--:--"
             speed = d.get("_speed_str", "").strip()
-            eta = d.get("_eta_str", "").strip()
-            self.progress.emit(percent, f"{d.get('_percent_str', '').strip()} 速度:{speed} 残り:{eta}")
+            self.progress.emit(percent, f"{percent:.1f}% 速度:{speed} 残り:{eta}")
         elif status == "finished":
             filename = d.get("filename")
             if filename:
                 self.log.emit(f"コンポーネントのダウンロード完了: {os.path.basename(filename)}")
-            self.progress.emit(100.0, "ダウンロード完了、後処理中...")
+            info = d.get("info_dict") or {}
+            fmt_id = info.get("format_id")
+            if fmt_id in self._component_ids:
+                component_index = self._component_ids.index(fmt_id)
+            else:
+                component_index = self._current_component_index
+            if component_index < len(self._component_weights):
+                self._completed_weight += self._component_weights[component_index]
+            self._current_component_index = component_index + 1
+
+            if self._current_component_index >= len(self._component_weights):
+                self.progress.emit(100.0, "ダウンロード完了、後処理中...")
+            else:
+                self.progress.emit(min(self._completed_weight * 100, 100.0), "次のコンポーネントを準備中...")
 
     def _postprocessor_hook(self, d):
         status = d.get("status")
@@ -221,6 +276,7 @@ class DownloadWorker(QThread):
             expected_ext = self._expected_ext(probe_info)
             self._unique_title = self._resolve_unique_title(probe_info.get("title") or "video", expected_ext)
             self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
+            self._init_component_weights(probe_info)
 
             ydl_opts = {
                 "outtmpl": os.path.join(self.out_dir, f"{self._unique_title}.%(ext)s"),
