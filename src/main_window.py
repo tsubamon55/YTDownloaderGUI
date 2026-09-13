@@ -1,8 +1,10 @@
 """メインウィンドウ(UI組み立てとイベントハンドリング)"""
 
+import copy
 import os
 from datetime import datetime
 
+import yt_dlp
 from PyQt6.QtCore import Qt, QSettings, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
@@ -539,90 +541,77 @@ class MainWindow(QMainWindow):
             return format_key, [], BEST_QUALITY_COMPATIBLE_SORT
         return format_key, [], None
 
-    def select_best_video_format(self, mp4_only: bool, max_height: int | None = None) -> dict | None:
-        candidates = []
-        for fmt in self.available_formats:
-            vcodec = fmt.get("vcodec", "none")
-            if not vcodec or vcodec == "none":
-                continue
-            height = fmt.get("height")
-            if not height:
-                continue
-            if mp4_only and fmt.get("ext") != "mp4":
-                continue
-            if max_height is not None and height > max_height:
-                continue
-            candidates.append(fmt)
-        if not candidates:
+    def resolve_selected_formats(self, format_spec: str, format_sort: list | None) -> dict | None:
+        """実際のダウンロード(DownloadWorker)と全く同じformat_spec/format_sortをyt-dlp本体の
+        選択エンジンに通し、実際に選ばれるフォーマットを求める(ネットワークアクセスなし)。
+        プレビュー用の選択ロジックを独自実装すると、実際のダウンロード結果とズレる恐れがあるため、
+        yt-dlpの選択ロジックそのものを再利用して一貫性を保つ。"""
+        if not self.available_formats:
             return None
-        candidates.sort(
-            key=lambda f: (f.get("height") or 0, f.get("tbr") or 0, f.get("filesize") or f.get("filesize_approx") or 0),
-            reverse=True,
-        )
-        return candidates[0]
-
-    def select_best_audio_format(self, m4a_only: bool) -> dict | None:
-        candidates = []
-        for fmt in self.available_formats:
-            acodec = fmt.get("acodec", "none")
-            vcodec = fmt.get("vcodec", "none")
-            if not acodec or acodec == "none":
-                continue
-            if vcodec and vcodec != "none":
-                continue
-            if m4a_only and fmt.get("ext") != "m4a":
-                continue
-            candidates.append(fmt)
-        if not candidates:
+        ydl_opts = {"quiet": True, "no_warnings": True}
+        if format_sort:
+            ydl_opts["format_sort"] = format_sort
+        ydl = yt_dlp.YoutubeDL(ydl_opts)
+        formats = copy.deepcopy(self.available_formats)
+        try:
+            ydl.sort_formats({"formats": formats})
+            selected = ydl._select_formats(formats, ydl.build_format_selector(format_spec))
+        except Exception:
             return None
-        candidates.sort(
-            key=lambda f: (f.get("abr") or 0, f.get("filesize") or f.get("filesize_approx") or 0),
-            reverse=True,
-        )
-        return candidates[0]
+        return selected[0] if selected else None
 
-    def estimate_total_size(self, video_fmt: dict | None, audio_fmt: dict | None) -> int | None:
-        if not video_fmt:
+    def estimate_selection_size(self, selected: dict | None) -> int | None:
+        if not selected:
             return None
-        total = video_fmt.get("filesize") or video_fmt.get("filesize_approx") or 0
-        found = bool(total)
-        acodec = video_fmt.get("acodec", "none")
-        has_audio_included = bool(acodec and acodec != "none")
-        if not has_audio_included and audio_fmt:
-            audio_size = audio_fmt.get("filesize") or audio_fmt.get("filesize_approx")
-            if audio_size:
-                total += audio_size
-                found = True
-        return total if found else None
+        total = 0
+        for part in selected.get("requested_formats") or [selected]:
+            size = part.get("filesize") or part.get("filesize_approx")
+            if not size:
+                # いずれかの構成要素のサイズが不明な場合、合計値も不正確になるため不明として扱う
+                return None
+            total += size
+        return total
 
-    def confirm_high_resolution_download(self, format_label: str) -> str | None:
+    def selection_resolution(self, selected: dict | None) -> tuple[int, int] | None:
+        if not selected:
+            return None
+        for part in selected.get("requested_formats") or [selected]:
+            height = part.get("height")
+            width = part.get("width")
+            if height:
+                return width or 0, height
+        return None
+
+    def confirm_high_resolution_download(
+        self, format_label: str, format_spec: str, format_sort: list | None
+    ) -> str | None:
         """簡易設定の最高画質が1920x1080を超える場合に確認する。
         戻り値: "best"(最高画質のまま) / "1080p"(1080pに制限) / None(キャンセル)"""
-        mp4_only = format_label == "動画 (最高画質 mp4)"
-        best_video = self.select_best_video_format(mp4_only=mp4_only)
-        if best_video is None:
+        best_selected = self.resolve_selected_formats(format_spec, format_sort)
+        resolution = self.selection_resolution(best_selected)
+        if resolution is None:
             return "best"
 
-        height = best_video.get("height") or 0
-        width = best_video.get("width") or 0
+        width, height = resolution
         if height <= 1080 and width <= 1920:
             return "best"
 
-        best_audio = self.select_best_audio_format(m4a_only=mp4_only)
-        best_size = self.estimate_total_size(best_video, best_audio)
-        fallback_video = self.select_best_video_format(mp4_only=mp4_only, max_height=1080)
-        fallback_size = self.estimate_total_size(fallback_video, best_audio) if fallback_video else None
+        best_size = self.estimate_selection_size(best_selected)
 
-        resolution_text = f"{width}x{height}" if width and height else (best_video.get("resolution") or "不明")
+        fallback_spec = FORMAT_OPTIONS_1080P.get(format_label)
+        fallback_selected = (
+            self.resolve_selected_formats(fallback_spec, format_sort) if fallback_spec else None
+        )
+        fallback_resolution = self.selection_resolution(fallback_selected)
+        fallback_size = self.estimate_selection_size(fallback_selected)
+
+        resolution_text = f"{width}x{height}"
         size_text = format_size(best_size) if best_size else "不明"
 
         message = f"最高画質は {resolution_text}(約{size_text})です。\n1080pを超える解像度のため、ファイルサイズが大きくなります。"
-        if fallback_video is not None:
-            fallback_height = fallback_video.get("height") or 0
-            fallback_width = fallback_video.get("width") or 0
-            fallback_resolution_text = (
-                f"{fallback_width}x{fallback_height}" if fallback_width and fallback_height else "1080p"
-            )
+        if fallback_resolution is not None:
+            fallback_width, fallback_height = fallback_resolution
+            fallback_resolution_text = f"{fallback_width}x{fallback_height}"
             fallback_size_text = format_size(fallback_size) if fallback_size else "不明"
             message += f"\n1080pにすると {fallback_resolution_text}(約{fallback_size_text})になります。"
 
@@ -633,7 +622,7 @@ class MainWindow(QMainWindow):
         best_btn = box.addButton("最高画質でダウンロード", QMessageBox.ButtonRole.AcceptRole)
         p1080_btn = (
             box.addButton("1080pでダウンロード", QMessageBox.ButtonRole.ActionRole)
-            if fallback_video is not None
+            if fallback_resolution is not None
             else None
         )
         box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
@@ -675,7 +664,7 @@ class MainWindow(QMainWindow):
         if not self.detail_toggle_btn.isChecked():
             format_label = self.format_combo.currentText()
             if format_label in HIGH_RESOLUTION_CHECK_LABELS:
-                choice = self.confirm_high_resolution_download(format_label)
+                choice = self.confirm_high_resolution_download(format_label, format_spec, format_sort)
                 if choice is None:
                     return
                 if choice == "1080p":
