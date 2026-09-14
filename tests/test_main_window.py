@@ -15,9 +15,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from PyQt6.QtCore import QBuffer, QIODevice
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import QBuffer, QEvent, QIODevice, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent, QPixmap
+from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox
 
 import main_window as main_window_module
 from main_window import IDLE_STATUS_TEXT, MainWindow
@@ -96,6 +96,63 @@ class MainWindowTestCase(unittest.TestCase):
         self.window.show()
 
 
+class EventFilterTest(MainWindowTestCase):
+    """入力欄をクリックした後、フォーカスを持たない場所(ラベル・背景等)を
+    クリックしてもカーソル/フォーカス枠が残り続けてしまう問題への対応を検証する"""
+
+    @staticmethod
+    def _mouse_press_event():
+        return QMouseEvent(
+            QEvent.Type.MouseButtonPress, QPointF(0, 0), QPointF(0, 0),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        )
+
+    def test_click_outside_focused_line_edit_clears_focus(self):
+        # offscreenプラットフォームでは実際のsetFocus()/hasFocus()が信頼できないため、
+        # QApplication.focusWidget()の戻り値をモックし、clearFocus()の呼び出し有無で検証する
+        with patch.object(QApplication, "focusWidget", return_value=self.window.url_edit), \
+             patch.object(QApplication, "widgetAt", return_value=self.window.out_edit), \
+             patch.object(type(self.window.url_edit), "clearFocus") as clear_focus_mock:
+            self.window.eventFilter(self.window, self._mouse_press_event())
+
+        clear_focus_mock.assert_called_once()
+
+    def test_click_on_focused_line_edit_itself_keeps_focus(self):
+        # クリックした先がまさにフォーカス中のウィジェット自身なら解除しない
+        with patch.object(QApplication, "focusWidget", return_value=self.window.url_edit), \
+             patch.object(QApplication, "widgetAt", return_value=self.window.url_edit), \
+             patch.object(type(self.window.url_edit), "clearFocus") as clear_focus_mock:
+            self.window.eventFilter(self.window, self._mouse_press_event())
+
+        clear_focus_mock.assert_not_called()
+
+    def test_non_mouse_press_event_is_ignored(self):
+        move_event = QMouseEvent(
+            QEvent.Type.MouseMove, QPointF(0, 0), QPointF(0, 0),
+            Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        )
+
+        with patch.object(QApplication, "focusWidget", return_value=self.window.url_edit), \
+             patch.object(QApplication, "widgetAt", return_value=self.window.out_edit), \
+             patch.object(type(self.window.url_edit), "clearFocus") as clear_focus_mock:
+            self.window.eventFilter(self.window, move_event)
+
+        clear_focus_mock.assert_not_called()
+
+    def test_focus_widget_from_another_window_is_left_alone(self):
+        # 親を持たないQLineEditはwindow()が自分自身を返すため、このウィンドウには属さない
+        # (例: 別ダイアログの入力欄)ケースを再現できる。その場合は関与せず何もしない
+        unrelated_edit = QLineEdit()
+        self.addCleanup(unrelated_edit.deleteLater)
+
+        with patch.object(QApplication, "focusWidget", return_value=unrelated_edit), \
+             patch.object(QApplication, "widgetAt", return_value=self.window.out_edit), \
+             patch.object(type(unrelated_edit), "clearFocus") as clear_focus_mock:
+            self.window.eventFilter(self.window, self._mouse_press_event())
+
+        clear_focus_mock.assert_not_called()
+
+
 class OnUrlChangedTest(MainWindowTestCase):
     def test_non_url_text_resets_status_and_disables_download(self):
         self.window.download_btn.setEnabled(True)
@@ -108,13 +165,42 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.window.on_url_changed("https://example.com/watch?v=abc")
         self.assertTrue(self.window._info_fetch_timer.isActive())
 
+    def test_changing_to_new_valid_url_resets_previous_format_and_progress_state(self):
+        # 動画Aを読み込み済みの状態を再現する(フォーマット選択・mp3変換・進捗バー等)
+        self.window.video_format_combo.addItem("dummy")
+        self.window.video_format_combo.setEnabled(True)
+        self.window.available_formats = [make_video()]
+        self.window.mp3_checkbox.setEnabled(True)
+        self.window.mp3_checkbox.setChecked(True)
+        self.window.mp3_label.setEnabled(True)
+        self.window.merge_note_label.setText("動画と音声を合成してダウンロードします")
+        self.window.progress_bar.setValue(55)
+        self.window.video_duration = 300.0
+
+        # URLを空にせず、別の有効なURLに貼り替えた場合でも即座に(fetch_formats実行前に)
+        # 前の動画に対する選択内容がリセットされることを確認する
+        self.window.on_url_changed("https://example.com/watch?v=different")
+
+        self.assertEqual(self.window.video_format_combo.count(), 0)
+        self.assertFalse(self.window.video_format_combo.isEnabled())
+        self.assertEqual(self.window.available_formats, [])
+        self.assertFalse(self.window.mp3_checkbox.isChecked())
+        self.assertFalse(self.window.mp3_checkbox.isEnabled())
+        self.assertFalse(self.window.mp3_label.isEnabled())
+        self.assertEqual(self.window.merge_note_label.text(), "")
+        self.assertLess(self.window.progress_bar.value(), 0)  # reset()後は無効値
+        self.assertIsNone(self.window.video_duration)
+        # リセット後も有効なURLなので取得タイマーは開始される
+        self.assertTrue(self.window._info_fetch_timer.isActive())
+
     def test_clearing_url_after_video_loaded_resets_and_disables_clip_slider(self):
         # 動画読み込み済みの状態を再現する
         self.window.video_duration = 635.0
         self.window.storyboard_format = make_storyboard()
         self.window._storyboard_cache["https://example.com/x.jpg"] = QPixmap(10, 10)
-        self.window.clip_range_slider.setEnabled(True)
+        self.window.clip_container.setEnabled(True)
         self.window.clip_range_slider.setRange(0, 635)
+        self.window.clip_range_slider.setValues(60, 600)
         self.window.clip_duration_label.setText("動画の長さ: 10:35")
         self.window.clip_start_edit.setText("1:00")
         self.window.clip_end_edit.setText("2:00")
@@ -129,6 +215,8 @@ class OnUrlChangedTest(MainWindowTestCase):
         # 古い動画のクリップ範囲が新しい動画に持ち込まれないよう、テキストもクリアする
         self.assertEqual(self.window.clip_start_edit.text(), "")
         self.assertEqual(self.window.clip_end_edit.text(), "")
+        # スライダーのハンドル位置・範囲も古い動画の長さのまま残らないようリセットされる
+        self.assertEqual(self.window.clip_range_slider.values(), (0, 100))
 
 
 class FetchFormatsTest(MainWindowTestCase):

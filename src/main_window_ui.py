@@ -218,6 +218,9 @@ class Ui_MainWindow(QMainWindow):
         layout.addLayout(clip_header_row)
 
         self.clip_container = QWidget()
+        # 動画情報の取得前はスライダー・開始/終了欄・長さラベルをまとめて無効化しておく
+        # (トグルボタン自体はclip_containerの外にあるため開閉操作には影響しない)
+        self.clip_container.setEnabled(False)
         clip_layout = QVBoxLayout(self.clip_container)
         clip_layout.setContentsMargins(0, 4, 0, 0)
         clip_layout.setSpacing(6)
@@ -243,7 +246,6 @@ class Ui_MainWindow(QMainWindow):
         left_spacer.setFixedWidth(duration_label_width)
         clip_slider_row.addWidget(left_spacer)
         self.clip_range_slider = RangeSlider()
-        self.clip_range_slider.setEnabled(False)
         self.clip_range_slider.setFixedWidth(320)
         clip_slider_row.addWidget(self.clip_range_slider)
         # 動画の長さは開始・終了欄に入力すると(プレースホルダーが消えて)見えなくなるため、
@@ -356,7 +358,5 @@ class Ui_MainWindow(QMainWindow):
             self.mp3_checkbox,
             self.mp3_label,
             self.clip_toggle_btn,
-            self.clip_start_edit,
-            self.clip_end_edit,
-            self.clip_range_slider,
+            self.clip_container,
         ]

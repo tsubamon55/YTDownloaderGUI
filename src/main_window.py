@@ -161,7 +161,11 @@ class MainWindow(Ui_MainWindow):
         self.video_duration = None
         self.storyboard_format = None
         self._storyboard_cache = {}
-        self.clip_range_slider.setEnabled(False)
+        self.clip_container.setEnabled(False)
+        # 古い動画の長さに基づいた範囲(0〜635等)がハンドル位置に残ったままにならないよう、
+        # スライダー自体もコンストラクタ相当の初期状態(全区間選択)に戻す
+        self.clip_range_slider.setRange(0, 100)
+        self.clip_range_slider.setValues(0, 100)
         self.clip_duration_label.setText("")
         self.clip_end_edit.setPlaceholderText("")
         self.clip_start_edit.clear()
@@ -299,16 +303,16 @@ class MainWindow(Ui_MainWindow):
 
     def _update_clip_slider_range(self) -> None:
         """動画の長さが判明した時点で、スライダーの範囲を0〜動画の長さに合わせる。
-        長さが不明(ライブ配信等)な場合はスライダー自体を無効化する。"""
+        長さが不明(ライブ配信等)な場合はクリップ範囲の入力全体を無効化する。"""
         duration = self.video_duration
         if not duration or duration <= 0:
-            self.clip_range_slider.setEnabled(False)
+            self.clip_container.setEnabled(False)
             self.clip_duration_label.setText("")
             self.clip_end_edit.setPlaceholderText("")
             return
 
         total = int(duration)
-        self.clip_range_slider.setEnabled(True)
+        self.clip_container.setEnabled(True)
         self.clip_range_slider.setRange(0, total)
         self.clip_range_slider.setValues(0, total)
         self.clip_duration_label.setText(f"動画の長さ: {format_clip_time(duration)}")
@@ -494,7 +498,7 @@ class MainWindow(Ui_MainWindow):
             self.on_detail_toggled(self.detail_toggle_btn.isChecked())
             # video_format_combo等と同様、動画の長さが判明していない間は無効のままにしたいため、
             # 一括enable後に補正する(値は変更せず有効/無効のみ再判定する)
-            self.clip_range_slider.setEnabled(bool(self.video_duration and self.video_duration > 0))
+            self.clip_container.setEnabled(bool(self.video_duration and self.video_duration > 0))
 
     def append_log(self, msg: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")

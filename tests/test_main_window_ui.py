@@ -44,6 +44,13 @@ class SetupUiTest(unittest.TestCase):
     def test_clip_container_starts_hidden(self):
         self.assertFalse(self.window.clip_container.isVisible())
 
+    def test_clip_container_starts_disabled(self):
+        # スライダー・開始/終了欄はclip_container単位でまとめて無効化されている
+        self.assertFalse(self.window.clip_container.isEnabled())
+        self.assertFalse(self.window.clip_range_slider.isEnabled())
+        self.assertFalse(self.window.clip_start_edit.isEnabled())
+        self.assertFalse(self.window.clip_end_edit.isEnabled())
+
     def test_video_and_audio_combos_start_disabled(self):
         self.assertFalse(self.window.video_format_combo.isEnabled())
         self.assertFalse(self.window.audio_format_combo.isEnabled())
@@ -72,9 +79,7 @@ class SetupUiTest(unittest.TestCase):
             self.window.mp3_checkbox,
             self.window.mp3_label,
             self.window.clip_toggle_btn,
-            self.window.clip_start_edit,
-            self.window.clip_end_edit,
-            self.window.clip_range_slider,
+            self.window.clip_container,
         }
         self.assertEqual(set(self.window.input_widgets), expected)
 
