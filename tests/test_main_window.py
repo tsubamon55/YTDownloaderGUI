@@ -297,6 +297,25 @@ class OnFormatsFetchedTest(MainWindowTestCase):
         self.assertEqual(self.window.video_format_combo.itemData(1)["format_id"], "137")
         self.assertEqual(self.window.video_format_combo.itemData(2)["format_id"], "399")
 
+    def test_thumbnail_is_scaled_to_label_size_without_distortion(self):
+        # 元画像はラベルとアスペクト比が異なる(1280x720)ものを使い、
+        # 単純な引き伸ばしではなく中央切り出しでラベルの実寸に収まることを確認する
+        source = QPixmap(1280, 720)
+        source.fill(Qt.GlobalColor.red)
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.ReadWrite)
+        source.save(buffer, "PNG")
+        thumbnail_bytes = bytes(buffer.data())
+
+        worker = MagicMock()
+        self.window.format_worker = worker
+
+        self.window.on_formats_fetched([make_video()], "T", thumbnail_bytes, 60.0, worker, auto=False)
+
+        result = self.window.thumbnail_label.pixmap()
+        self.assertIsNotNone(result)
+        self.assertEqual(result.size(), self.window.thumbnail_label.size())
+
 
 class OnFormatsErrorTest(MainWindowTestCase):
     def test_auto_fetch_error_sets_silent_status(self):

@@ -12,13 +12,62 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
-from workers import DownloadWorker
+from workers import DownloadWorker, FormatListWorker
 
 
 def make_worker(**kwargs):
     defaults = dict(url="https://example.com/watch?v=x", out_dir="C:/out", format_spec="b")
     defaults.update(kwargs)
     return DownloadWorker(**defaults)
+
+
+class ThumbnailUrlCandidatesTest(unittest.TestCase):
+    def test_prefers_declared_thumbnail_first(self):
+        info = {
+            "thumbnail": "https://example.com/maxresdefault.webp",
+            "thumbnails": [
+                {"url": "https://example.com/default.jpg", "width": 120, "height": 90},
+                {"url": "https://example.com/hqdefault.jpg", "width": 480, "height": 360},
+            ],
+        }
+        candidates = FormatListWorker._thumbnail_url_candidates(info)
+        self.assertEqual(candidates[0], "https://example.com/maxresdefault.webp")
+
+    def test_orders_remaining_by_resolution_descending(self):
+        info = {
+            "thumbnail": None,
+            "thumbnails": [
+                {"url": "https://example.com/small.jpg", "width": 120, "height": 90},
+                {"url": "https://example.com/large.jpg", "width": 1280, "height": 720},
+                {"url": "https://example.com/medium.jpg", "width": 480, "height": 360},
+            ],
+        }
+        candidates = FormatListWorker._thumbnail_url_candidates(info)
+        self.assertEqual(
+            candidates,
+            [
+                "https://example.com/large.jpg",
+                "https://example.com/medium.jpg",
+                "https://example.com/small.jpg",
+            ],
+        )
+
+    def test_deduplicates_urls(self):
+        info = {
+            "thumbnail": "https://example.com/same.jpg",
+            "thumbnails": [
+                {"url": "https://example.com/same.jpg", "width": 1280, "height": 720},
+                {"url": "https://example.com/other.jpg", "width": 480, "height": 360},
+            ],
+        }
+        candidates = FormatListWorker._thumbnail_url_candidates(info)
+        self.assertEqual(
+            candidates,
+            ["https://example.com/same.jpg", "https://example.com/other.jpg"],
+        )
+
+    def test_handles_missing_thumbnails(self):
+        self.assertEqual(FormatListWorker._thumbnail_url_candidates({}), [])
 
 
 class FormatEtaTest(unittest.TestCase):

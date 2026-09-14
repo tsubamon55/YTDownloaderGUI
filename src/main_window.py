@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QObject, QSettings, QTimer
+from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
 
@@ -283,12 +283,26 @@ class MainWindow(Ui_MainWindow):
         if thumbnail_bytes:
             pixmap = QPixmap()
             if pixmap.loadFromData(thumbnail_bytes):
-                self.thumbnail_label.setPixmap(pixmap)
+                self.thumbnail_label.setPixmap(self._fit_thumbnail_pixmap(pixmap))
 
         self.status_label.setText(f"動画{video_count}件・音声{audio_count}件を検出しました")
         self.spinner.stop()
         self.info_ready = True
         self.download_btn.setEnabled(True)
+
+    def _fit_thumbnail_pixmap(self, pixmap: QPixmap) -> QPixmap:
+        """thumbnail_labelの表示枠に合わせて、アスペクト比を保ったまま
+        スムーズに縮小し、はみ出た部分を中央基準で切り出す(単純な引き伸ばし
+        によるぼやけ・歪みを避けるため)"""
+        target_size = self.thumbnail_label.size()
+        scaled = pixmap.scaled(
+            target_size,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - target_size.width()) // 2)
+        y = max(0, (scaled.height() - target_size.height()) // 2)
+        return scaled.copy(x, y, target_size.width(), target_size.height())
 
     def on_formats_error(self, message: str, worker: FormatListWorker | None = None, auto: bool = False) -> None:
         if worker is not None and worker is not self.format_worker:

@@ -20,9 +20,41 @@ class FormatListWorker(QThread):
     finished_ok = pyqtSignal(list, str, bytes, object)
     finished_error = pyqtSignal(str)
 
+    # 存在しない解像度への推測URL(yt-dlpが実在確認せずに組み立てたもの)に
+    # 当たった場合に備え、上位候補を複数試す。多すぎるとタイムアウトが
+    # 積み重なるため妥当な件数に制限する。
+    MAX_THUMBNAIL_CANDIDATES = 5
+
     def __init__(self, url: str):
         super().__init__()
         self.url = url
+
+    @staticmethod
+    def _thumbnail_url_candidates(info: dict) -> list[str]:
+        """画質が高い順にサムネイルURL候補を返す(重複除去済み)"""
+        candidates = []
+        seen = set()
+
+        thumbnail_url = info.get("thumbnail")
+        if thumbnail_url:
+            candidates.append(thumbnail_url)
+            seen.add(thumbnail_url)
+
+        def sort_key(t):
+            return (
+                t.get("preference") if t.get("preference") is not None else -1,
+                t.get("width") if t.get("width") is not None else -1,
+                t.get("height") if t.get("height") is not None else -1,
+            )
+
+        thumbnails = info.get("thumbnails") or []
+        for t in sorted(thumbnails, key=sort_key, reverse=True):
+            url = t.get("url")
+            if url and url not in seen:
+                seen.add(url)
+                candidates.append(url)
+
+        return candidates
 
     def run(self):
         try:
@@ -48,14 +80,17 @@ class FormatListWorker(QThread):
 
             title = info.get("title") or ""
             thumbnail_bytes = b""
-            thumbnail_url = info.get("thumbnail")
-            if thumbnail_url:
+            candidates = self._thumbnail_url_candidates(info)[: self.MAX_THUMBNAIL_CANDIDATES]
+            for candidate_url in candidates:
                 try:
-                    with urllib.request.urlopen(thumbnail_url, timeout=10) as resp:
-                        thumbnail_bytes = resp.read()
+                    with urllib.request.urlopen(candidate_url, timeout=10) as resp:
+                        data = resp.read()
+                    if data:
+                        thumbnail_bytes = data
+                        break
                 except Exception as e:
-                    log_debug(f"FormatListWorker: サムネイル取得に失敗 ({e!r})")
-                    thumbnail_bytes = b""
+                    log_debug(f"FormatListWorker: サムネイル取得に失敗 ({candidate_url!r}: {e!r})")
+                    continue
 
             self.finished_ok.emit(formats, title, thumbnail_bytes, info.get("duration"))
         except Exception as e:
