@@ -393,5 +393,68 @@ class ProgressAndFinishHandlersTest(MainWindowTestCase):
         self.window.cancel_download()  # 例外にならないことを確認
 
 
+class SignalWiringTest(MainWindowTestCase):
+    """MainWindow._connect_signalsがウィジェットのシグナルを正しいハンドラへ接続していることを、
+    ハンドラを直接呼ぶのではなく実際のウィジェット操作(click/setChecked/setText等)を経由して検証する。
+    (main_window_ui.Ui_MainWindowとmain_window.MainWindowの分割により、ウィジェット生成と
+    シグナル接続が別ファイルに分かれたため、配線の取り違えを検知できるテストを別途用意する)"""
+
+    def test_paste_button_click_pastes_clipboard_url(self):
+        with patch.object(QApplication, "clipboard") as clipboard_getter:
+            mock_clipboard = MagicMock()
+            mock_clipboard.text.return_value = "https://example.com/watch?v=abc"
+            clipboard_getter.return_value = mock_clipboard
+            self.window.paste_btn.click()
+        self.assertEqual(self.window.url_edit.text(), "https://example.com/watch?v=abc")
+
+    def test_url_edit_text_changed_triggers_handler(self):
+        self.window.title_label.setText("Existing Title")
+        self.window.url_edit.setText("not a url")
+        self.assertEqual(self.window.title_label.text(), "")
+        self.assertEqual(self.window.status_label.text(), IDLE_STATUS_TEXT)
+
+    def test_format_combo_change_triggers_note_update(self):
+        self.window.detail_toggle_btn.setChecked(False)
+        with patch.object(main_window_module, "compute_simple_format_note", return_value="") as note_mock:
+            self.window.format_combo.setCurrentIndex(1)
+        note_mock.assert_called()
+
+    def test_browse_button_click_updates_out_dir(self):
+        with patch.object(main_window_module, "QFileDialog") as file_dialog_mock:
+            file_dialog_mock.getExistingDirectory.return_value = "C:/chosen"
+            self.window.browse_btn.click()
+        self.assertEqual(self.window.out_edit.text(), "C:/chosen")
+
+    def test_download_button_click_triggers_start_download(self):
+        self.window.url_edit.setText("")
+        self.window.out_edit.setText("C:/out")
+        self.window.download_btn.setEnabled(True)
+        with patch.object(QMessageBox, "warning") as warning_mock:
+            self.window.download_btn.click()
+        warning_mock.assert_called_once()
+
+    def test_cancel_button_click_cancels_worker(self):
+        worker = MagicMock()
+        self.window.worker = worker
+        self.window.cancel_btn.setEnabled(True)
+        self.window.cancel_btn.click()
+        worker.cancel.assert_called_once()
+        self.assertEqual(self.window.status_label.text(), "キャンセル中...")
+
+    def test_open_folder_button_click_triggers_open(self):
+        self.window.last_output_dir = "C:/out"
+        self.window.open_folder_btn.setEnabled(True)
+        with patch.object(main_window_module.os.path, "isdir", return_value=True), \
+             patch.object(self.window, "find_open_explorer_window", return_value=None), \
+             patch.object(main_window_module.os, "startfile") as startfile_mock:
+            self.window.open_folder_btn.click()
+        startfile_mock.assert_called_once_with("C:/out")
+
+    def test_log_toggle_button_shows_log_view(self):
+        self.window.log_toggle_btn.setChecked(True)
+        self.assertTrue(self.window.log_view.isVisible())
+        self.assertEqual(self.window.log_toggle_btn.text(), "ログ ▴")
+
+
 if __name__ == "__main__":
     unittest.main()
