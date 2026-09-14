@@ -229,6 +229,19 @@ class Ui_MainWindow(QMainWindow):
         clip_slider_row = QHBoxLayout()
         clip_slider_row.setSpacing(8)
         clip_slider_row.addStretch(1)
+        # 動画の長さラベルをスライダーの右に置くと、その分だけスライダー自体が
+        # コンテナ中央より左に寄って見えるため、同じ幅の透明スペーサーを左側にも
+        # 置いてスライダー単体が中央に来るよう相殺する
+        self.clip_duration_label = QLabel("")
+        self.clip_duration_label.setStyleSheet("color: #808080;")
+        # 空文字列から「動画の長さ: ...」に変わると幅が広がり、左右均等のstretchが
+        # 詰められてスライダーごと左にずれてしまうため、想定最大幅を先取りして固定する
+        duration_metrics = self.clip_duration_label.fontMetrics()
+        duration_label_width = duration_metrics.horizontalAdvance("動画の長さ: 99:59:59")
+        self.clip_duration_label.setFixedWidth(duration_label_width)
+        left_spacer = QWidget()
+        left_spacer.setFixedWidth(duration_label_width)
+        clip_slider_row.addWidget(left_spacer)
         self.clip_range_slider = RangeSlider()
         self.clip_range_slider.setEnabled(False)
         self.clip_range_slider.setFixedWidth(320)
@@ -237,8 +250,6 @@ class Ui_MainWindow(QMainWindow):
         # 「合計がいくつか」を示す目盛りの役割としてスライダーの右に固定表示する
         # (開始・終了欄はユーザーが選んだ値であり、動画全体の長さとは意味が異なるため
         # 隣接させると混同しやすい。範囲そのものを表すスライダーに添えるほうが自然)
-        self.clip_duration_label = QLabel("")
-        self.clip_duration_label.setStyleSheet("color: #808080;")
         clip_slider_row.addWidget(self.clip_duration_label)
         clip_slider_row.addStretch(1)
         clip_layout.addLayout(clip_slider_row)

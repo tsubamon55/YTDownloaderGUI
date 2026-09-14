@@ -111,16 +111,35 @@ class MainWindow(Ui_MainWindow):
         self._info_fetch_timer.stop()
         self.info_ready = False
         self.download_btn.setEnabled(False)
+        # URLが削除・変更・別のものに貼り替えられた場合、直前の動画に対する選択
+        # (フォーマット・mp3変換・クリップ範囲・進捗バー等)が次の動画にそのまま
+        # 引き継がれてしまわないよう、都度すべての入力内容をリセットする
+        self.title_label.setText("")
+        self.thumbnail_label.clear()
+        self._reset_format_state()
+        self._reset_video_state()
+        self.progress_bar.reset()
+        self.status_label.setText(IDLE_STATUS_TEXT)
+
         stripped = text.strip()
         if stripped.startswith("http://") or stripped.startswith("https://"):
             self._info_fetch_timer.start()
-        else:
-            self.title_label.setText("")
-            self.thumbnail_label.clear()
-            self.status_label.setText(IDLE_STATUS_TEXT)
-            # URLが空/不正な間、古い動画の長さに基づいたクリップスライダーが
-            # 操作可能なまま残ってしまわないようにリセットする
-            self._reset_video_state()
+
+    def _reset_format_state(self) -> None:
+        """動画/音声フォーマットの選択・mp3変換・関連の注記表示を初期化する。
+        古い動画で選んだフォーマットやmp3変換の要否が次の動画に引き継がれるのを
+        防ぐため、URLが変わった時・再取得を始める前に必ず呼ぶ"""
+        self.video_format_combo.clear()
+        self.audio_format_combo.clear()
+        self.video_format_combo.setEnabled(False)
+        self.audio_format_combo.setEnabled(False)
+        self.available_formats = []
+        self.mp3_checkbox.setChecked(False)
+        self.mp3_checkbox.setEnabled(False)
+        self.mp3_label.setEnabled(False)
+        self.merge_note_label.setText("")
+        self.simple_format_note_label.setText("")
+        self.simple_format_note_label.setVisible(False)
 
     def _reset_video_state(self) -> None:
         """動画の長さ・ストーリーボード関連の状態を初期化し、クリップ範囲の入力を
@@ -169,17 +188,11 @@ class MainWindow(Ui_MainWindow):
         if not url:
             return
 
-        self.video_format_combo.clear()
-        self.audio_format_combo.clear()
-        self.video_format_combo.setEnabled(False)
-        self.audio_format_combo.setEnabled(False)
         self.title_label.setText("")
         self.thumbnail_label.clear()
         self.info_ready = False
-        self.available_formats = []
+        self._reset_format_state()
         self._reset_video_state()
-        self.simple_format_note_label.setText("")
-        self.simple_format_note_label.setVisible(False)
         self.download_btn.setEnabled(False)
         self.status_label.setText("動画情報を取得中...")
         self.spinner.start()
@@ -617,13 +630,9 @@ class MainWindow(Ui_MainWindow):
 
     def on_finished_ok(self) -> None:
         self.spinner.stop()
+        # url_edit.clear()がtextChangedを発火させ、on_url_changed内のリセット処理で
+        # フォーマット選択・mp3変換・クリップ範囲・進捗バー等の入力内容が一括で初期化される
         self.url_edit.clear()
-        self.video_format_combo.clear()
-        self.audio_format_combo.clear()
-        self.available_formats = []
-        self._reset_video_state()
-        self.simple_format_note_label.setText("")
-        self.simple_format_note_label.setVisible(False)
         self.set_inputs_enabled(True)
         self.download_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
