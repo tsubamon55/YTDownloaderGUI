@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import yt_dlp
+from yt_dlp.postprocessor import FFmpegPostProcessor
+
 from workers import DownloadWorker
 
 
@@ -268,6 +271,51 @@ class BuildFormatSelectorTest(unittest.TestCase):
         worker = make_worker(format_spec="b", exclude_mismatched=True)
         selector = worker._build_format_selector()
         self.assertTrue(callable(selector))
+
+
+class BuildDownloadRangesTest(unittest.TestCase):
+    def test_returns_none_when_no_clip_range_specified(self):
+        worker = make_worker()
+        self.assertIsNone(worker._build_download_ranges())
+
+    def test_returns_range_covering_start_to_end(self):
+        worker = make_worker(start_time=10.0, end_time=20.0)
+        ranges = worker._build_download_ranges()({}, None)
+        self.assertEqual(list(ranges), [{"start_time": 10.0, "end_time": 20.0}])
+
+    def test_missing_start_defaults_to_zero(self):
+        worker = make_worker(end_time=20.0)
+        ranges = worker._build_download_ranges()({}, None)
+        self.assertEqual(list(ranges), [{"start_time": 0, "end_time": 20.0}])
+
+    def test_missing_end_defaults_to_infinity(self):
+        worker = make_worker(start_time=10.0)
+        ranges = worker._build_download_ranges()({}, None)
+        self.assertEqual(list(ranges), [{"start_time": 10.0, "end_time": float("inf")}])
+
+
+class RunRegistersFfmpegLocationTest(unittest.TestCase):
+    """FFmpegFD.available()等の内部チェックはFFmpegPostProcessor()を無引数生成し
+    ydl_optsではなくcontextvarを見るため、run()がそれを設定しているか検証する
+    (未設定だと、クリップ区間指定時にffmpeg未検出と誤判定されダウンロードが失敗する)"""
+
+    def tearDown(self):
+        FFmpegPostProcessor._ffmpeg_location.set(None)
+
+    def test_run_sets_ffmpeg_location_contextvar(self):
+        worker = make_worker()
+        with patch("workers.get_ffmpeg_location", return_value="C:/bundled/ffmpeg"), \
+             patch.object(yt_dlp, "YoutubeDL", side_effect=RuntimeError("stop before network access")):
+            worker.run()
+        self.assertEqual(FFmpegPostProcessor._ffmpeg_location.get(), "C:/bundled/ffmpeg")
+
+    def test_run_does_not_touch_contextvar_when_ffmpeg_not_found(self):
+        FFmpegPostProcessor._ffmpeg_location.set("C:/previous/ffmpeg")
+        worker = make_worker()
+        with patch("workers.get_ffmpeg_location", return_value=None), \
+             patch.object(yt_dlp, "YoutubeDL", side_effect=RuntimeError("stop before network access")):
+            worker.run()
+        self.assertEqual(FFmpegPostProcessor._ffmpeg_location.get(), "C:/previous/ffmpeg")
 
 
 if __name__ == "__main__":

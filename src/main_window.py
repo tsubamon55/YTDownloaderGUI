@@ -12,6 +12,7 @@ from PyQt6.QtCore import QSettings, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
+from clip_range import format_clip_time, parse_clip_time, resolve_clip_range
 from format_engine import (
     compute_simple_format_note,
     mismatched_selected_formats,
@@ -28,7 +29,9 @@ from formats import (
 )
 from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow
 from paths import get_downloads_folder, get_ffmpeg_location, log_debug
-from workers import DownloadWorker, FormatListWorker
+from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
+from widgets import ScrubPreviewPopup
+from workers import DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
 
 class MainWindow(Ui_MainWindow):
@@ -40,6 +43,11 @@ class MainWindow(Ui_MainWindow):
         self.last_output_dir: str | None = None
         self.info_ready = False
         self.available_formats: list = []
+        self.video_duration: float | None = None
+        self.storyboard_format: dict | None = None
+        self._storyboard_cache: dict[str, QPixmap] = {}
+        self._storyboard_workers: set[StoryboardFragmentWorker] = set()
+        self._pending_storyboard_urls: set[str] = set()
 
         self._info_fetch_timer = QTimer(self)
         self._info_fetch_timer.setSingleShot(True)
@@ -69,6 +77,11 @@ class MainWindow(Ui_MainWindow):
         self.cancel_btn.clicked.connect(self.cancel_download)
         self.open_folder_btn.clicked.connect(self.open_output_folder)
         self.log_toggle_btn.toggled.connect(self.on_log_toggle)
+        self.clip_toggle_btn.toggled.connect(self.on_clip_toggled)
+        self.clip_range_slider.rangeChanged.connect(self.on_clip_slider_changed)
+        self.clip_range_slider.previewRequested.connect(self.on_clip_preview_requested)
+        self.clip_start_edit.textChanged.connect(self.on_clip_text_changed)
+        self.clip_end_edit.textChanged.connect(self.on_clip_text_changed)
 
     def _sync_window_height(self) -> None:
         """現在表示中のウィジェットに合わせてウィンドウの高さだけを追従させる"""
@@ -87,6 +100,11 @@ class MainWindow(Ui_MainWindow):
     def on_log_toggle(self, checked: bool) -> None:
         self.log_view.setVisible(checked)
         self.log_toggle_btn.setText("ログ ▴" if checked else "ログ ▾")
+        self._sync_window_height()
+
+    def on_clip_toggled(self, checked: bool) -> None:
+        self.clip_toggle_btn.setText("▴" if checked else "▾")
+        self.clip_container.setVisible(checked)
         self._sync_window_height()
 
     def on_url_changed(self, text: str) -> None:
@@ -142,6 +160,11 @@ class MainWindow(Ui_MainWindow):
         self.thumbnail_label.clear()
         self.info_ready = False
         self.available_formats = []
+        self.video_duration = None
+        self.storyboard_format = None
+        self._storyboard_cache = {}
+        self.clip_range_slider.setEnabled(False)
+        self.clip_duration_label.setText("")
         self.simple_format_note_label.setText("")
         self.simple_format_note_label.setVisible(False)
         self.download_btn.setEnabled(False)
@@ -151,7 +174,9 @@ class MainWindow(Ui_MainWindow):
         worker = FormatListWorker(url)
         self.format_worker = worker
         worker.finished_ok.connect(
-            lambda formats, title, thumb, w=worker: self.on_formats_fetched(formats, title, thumb, w, auto)
+            lambda formats, title, thumb, duration, w=worker: self.on_formats_fetched(
+                formats, title, thumb, duration, w, auto
+            )
         )
         worker.finished_error.connect(
             lambda message, w=worker: self.on_formats_error(message, w, auto)
@@ -163,6 +188,7 @@ class MainWindow(Ui_MainWindow):
         formats: list[dict],
         title: str,
         thumbnail_bytes: bytes,
+        duration: float | None,
         worker: FormatListWorker,
         auto: bool = False,
     ) -> None:
@@ -172,6 +198,11 @@ class MainWindow(Ui_MainWindow):
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
         self.available_formats = formats
+        self.video_duration = duration
+        self.storyboard_format = select_storyboard_format(
+            formats, ScrubPreviewPopup.PREVIEW_SIZE.width(), ScrubPreviewPopup.PREVIEW_SIZE.height()
+        )
+        self._update_clip_slider_range()
 
         self.video_format_combo.addItem("なし", userData=None)
         self.audio_format_combo.addItem("なし", userData=None)
@@ -227,6 +258,113 @@ class MainWindow(Ui_MainWindow):
         else:
             self.status_label.setText("フォーマット取得に失敗しました")
             QMessageBox.critical(self, "フォーマット取得エラー", message)
+
+    def _update_clip_slider_range(self) -> None:
+        """動画の長さが判明した時点で、スライダーの範囲を0〜動画の長さに合わせる。
+        長さが不明(ライブ配信等)な場合はスライダー自体を無効化する。"""
+        duration = self.video_duration
+        if not duration or duration <= 0:
+            self.clip_range_slider.setEnabled(False)
+            self.clip_duration_label.setText("")
+            return
+
+        total = int(duration)
+        self.clip_range_slider.setEnabled(True)
+        self.clip_range_slider.setRange(0, total)
+        self.clip_range_slider.setValues(0, total)
+        self.clip_duration_label.setText(f"動画の長さ: {format_clip_time(duration)}")
+
+    def on_clip_slider_changed(self, low: int, high: int) -> None:
+        """スライダー操作の結果をテキスト入力欄へ反映する。端まで動かした場合は
+        「指定なし(先頭から/末尾まで)」を表す空文字列にする"""
+        total = int(self.video_duration) if self.video_duration else 0
+        self.clip_start_edit.blockSignals(True)
+        self.clip_end_edit.blockSignals(True)
+        self.clip_start_edit.setText("" if low <= 0 else format_clip_time(low))
+        self.clip_end_edit.setText("" if high >= total else format_clip_time(high))
+        self.clip_start_edit.blockSignals(False)
+        self.clip_end_edit.blockSignals(False)
+
+    def on_clip_text_changed(self, *_: Any) -> None:
+        """テキスト入力欄の内容をスライダーへ反映する。解析できない入力(入力途中を含む)は
+        無視し、スライダーの表示は直前の値のまま保つ"""
+        if not self.video_duration or self.video_duration <= 0:
+            return
+
+        total = int(self.video_duration)
+        current_low, current_high = self.clip_range_slider.values()
+
+        try:
+            start = parse_clip_time(self.clip_start_edit.text())
+            low = 0 if start is None else int(start)
+        except ValueError:
+            low = current_low  # 入力途中など解析できない間はスライダーを動かさない
+
+        try:
+            end = parse_clip_time(self.clip_end_edit.text())
+            high = total if end is None else int(end)
+        except ValueError:
+            high = current_high
+
+        self.clip_range_slider.setValues(low, high)
+
+    def on_clip_preview_requested(self, which: str, value: int) -> None:
+        """スライダードラッグ中、そのハンドルが指す時刻のサムネイル(ストーリーボード)を
+        取得してポップアップへ反映する。取得できるまで/できない場合は数字のみ表示される"""
+        if not self.storyboard_format or not self.video_duration:
+            return
+
+        tile = storyboard_tile_for_time(self.storyboard_format, self.video_duration, value)
+        if tile is None:
+            return
+
+        cached = self._storyboard_cache.get(tile.fragment_url)
+        if cached is not None:
+            self._apply_storyboard_tile(which, cached, tile)
+            return
+
+        if tile.fragment_url in self._pending_storyboard_urls:
+            return
+
+        self._pending_storyboard_urls.add(tile.fragment_url)
+        worker = StoryboardFragmentWorker(tile.fragment_url)
+        self._storyboard_workers.add(worker)
+        worker.finished_ok.connect(
+            lambda data, w=worker: self._on_storyboard_fragment_fetched(w, data, which)
+        )
+        worker.finished_error.connect(lambda message, w=worker: self._on_storyboard_fragment_failed(w))
+        worker.start()
+
+    def _apply_storyboard_tile(self, which: str, sprite: QPixmap, tile: StoryboardTile) -> None:
+        cropped = sprite.copy(tile.x, tile.y, tile.width, tile.height)
+        self.clip_range_slider.set_preview_pixmap(which, cropped)
+
+    def _on_storyboard_fragment_fetched(self, worker: StoryboardFragmentWorker, data: bytes, which: str) -> None:
+        self._storyboard_workers.discard(worker)
+        self._pending_storyboard_urls.discard(worker.url)
+
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        self._storyboard_cache[worker.url] = pixmap
+
+        # 取得完了までの間にドラッグが進んでいる可能性があるため、リクエスト時点の値ではなく
+        # 現在のスライダー値で切り出し位置を求め直す。既にドラッグが終わっている/別のハンドルに
+        # 移っている、あるいは別のフラグメントが必要になっている場合は反映しない
+        if self.storyboard_format is None or not self.video_duration:
+            return
+        if self.clip_range_slider.active_handle != which:
+            return
+        low, high = self.clip_range_slider.values()
+        current_value = low if which == "low" else high
+        tile = storyboard_tile_for_time(self.storyboard_format, self.video_duration, current_value)
+        if tile is None or tile.fragment_url != worker.url:
+            return
+        self._apply_storyboard_tile(which, pixmap, tile)
+
+    def _on_storyboard_fragment_failed(self, worker: StoryboardFragmentWorker) -> None:
+        self._storyboard_workers.discard(worker)
+        self._pending_storyboard_urls.discard(worker.url)
 
     def on_detail_selection_changed(self, *_: Any) -> None:
         if not self.detail_toggle_btn.isChecked():
@@ -313,6 +451,9 @@ class MainWindow(Ui_MainWindow):
             widget.setEnabled(enabled)
         if enabled:
             self.on_detail_toggled(self.detail_toggle_btn.isChecked())
+            # video_format_combo等と同様、動画の長さが判明していない間は無効のままにしたいため、
+            # 一括enable後に補正する(値は変更せず有効/無効のみ再判定する)
+            self.clip_range_slider.setEnabled(bool(self.video_duration and self.video_duration > 0))
 
     def append_log(self, msg: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -384,6 +525,12 @@ class MainWindow(Ui_MainWindow):
             QMessageBox.warning(self, "入力エラー", str(e))
             return
 
+        try:
+            clip_start, clip_end = resolve_clip_range(self.clip_start_edit.text(), self.clip_end_edit.text())
+        except ValueError as e:
+            QMessageBox.warning(self, "入力エラー", str(e))
+            return
+
         if self.detail_toggle_btn.isChecked():
             mismatched_fmts = mismatched_selected_formats(
                 self.video_format_combo.currentData(), self.audio_format_combo.currentData()
@@ -425,6 +572,7 @@ class MainWindow(Ui_MainWindow):
         self.worker = DownloadWorker(
             url, out_dir, format_spec, postprocessors, format_sort,
             exclude_mismatched=not self.detail_toggle_btn.isChecked(),
+            start_time=clip_start, end_time=clip_end,
         )
         self.worker.progress.connect(self.on_progress)
         self.worker.log.connect(self.append_log)
@@ -444,9 +592,15 @@ class MainWindow(Ui_MainWindow):
     def on_finished_ok(self) -> None:
         self.spinner.stop()
         self.url_edit.clear()
+        self.clip_start_edit.clear()
+        self.clip_end_edit.clear()
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
         self.available_formats = []
+        self.video_duration = None
+        self.storyboard_format = None
+        self._storyboard_cache = {}
+        self.clip_duration_label.setText("")
         self.simple_format_note_label.setText("")
         self.simple_format_note_label.setVisible(False)
         self.set_inputs_enabled(True)

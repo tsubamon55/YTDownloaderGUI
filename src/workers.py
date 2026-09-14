@@ -7,6 +7,7 @@ import urllib.request
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import yt_dlp
+from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from formats import format_size, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug
@@ -14,7 +15,8 @@ from yt_dlp_selection import make_filtering_format_selector
 
 
 class FormatListWorker(QThread):
-    finished_ok = pyqtSignal(list, str, bytes)
+    # 4番目の要素(動画の長さ・秒)はNoneを取り得るためobject型で宣言する
+    finished_ok = pyqtSignal(list, str, bytes, object)
     finished_error = pyqtSignal(str)
 
     def __init__(self, url: str):
@@ -54,7 +56,27 @@ class FormatListWorker(QThread):
                     log_debug(f"FormatListWorker: サムネイル取得に失敗 ({e!r})")
                     thumbnail_bytes = b""
 
-            self.finished_ok.emit(formats, title, thumbnail_bytes)
+            self.finished_ok.emit(formats, title, thumbnail_bytes, info.get("duration"))
+        except Exception as e:
+            self.finished_error.emit(str(e))
+
+
+class StoryboardFragmentWorker(QThread):
+    """クリップ範囲スライダーのドラッグ中プレビュー用に、ストーリーボード
+    (シークバー用サムネイル格子)の1枚のスプライト画像を取得する"""
+
+    finished_ok = pyqtSignal(bytes)
+    finished_error = pyqtSignal(str)
+
+    def __init__(self, url: str):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            with urllib.request.urlopen(self.url, timeout=10) as resp:
+                data = resp.read()
+            self.finished_ok.emit(data)
         except Exception as e:
             self.finished_error.emit(str(e))
 
@@ -73,6 +95,8 @@ class DownloadWorker(QThread):
         postprocessors: list | None = None,
         format_sort: list | None = None,
         exclude_mismatched: bool = False,
+        start_time: float | None = None,
+        end_time: float | None = None,
     ):
         super().__init__()
         self.url = url
@@ -81,6 +105,8 @@ class DownloadWorker(QThread):
         self.postprocessors = postprocessors or []
         self.format_sort = format_sort
         self.exclude_mismatched = exclude_mismatched
+        self.start_time = start_time
+        self.end_time = end_time
         self._is_cancelled = False
         self._logged_format_ids: set[str] = set()
         self._final_filepath: str | None = None
@@ -281,12 +307,30 @@ class DownloadWorker(QThread):
             return self.format_spec
         return make_filtering_format_selector(self.format_spec, is_codec_container_mismatch)
 
+    def _build_download_ranges(self):
+        """クリップ範囲(開始・終了時刻)が指定されている場合、その区間のみをダウンロード
+        対象とするyt-dlpのdownload_rangesコールバックを返す。指定がなければNone"""
+        if self.start_time is None and self.end_time is None:
+            return None
+        start = self.start_time if self.start_time is not None else 0
+        end = self.end_time if self.end_time is not None else float("inf")
+        return yt_dlp.utils.download_range_func(None, [(start, end)])
+
     def run(self):
         self._start_time = time.monotonic()
         try:
             ffmpeg_location = get_ffmpeg_location()
+            if ffmpeg_location:
+                # yt-dlpは一部の内部チェック(例: クリップ区間指定時のffmpeg利用可否判定)で
+                # ydl_optsのffmpeg_locationを見ずFFmpegPostProcessor()を無引数生成するため、
+                # そちらが参照するcontextvarにも明示的に設定しておく
+                FFmpegPostProcessor._ffmpeg_location.set(ffmpeg_location)
 
             self.log.emit(f"開始: {self.url}")
+            if self.start_time is not None or self.end_time is not None:
+                start_text = self._format_eta(self.start_time) if self.start_time is not None else "先頭"
+                end_text = self._format_eta(self.end_time) if self.end_time is not None else "末尾"
+                self.log.emit(f"クリップ範囲: {start_text} 〜 {end_text}")
 
             format_selector = self._build_format_selector()
             probe_opts = {
@@ -322,6 +366,11 @@ class DownloadWorker(QThread):
 
             if self.format_sort:
                 ydl_opts["format_sort"] = self.format_sort
+
+            download_ranges = self._build_download_ranges()
+            if download_ranges is not None:
+                ydl_opts["download_ranges"] = download_ranges
+                ydl_opts["force_keyframes_at_cuts"] = True
 
             if ffmpeg_location:
                 ydl_opts["ffmpeg_location"] = ffmpeg_location

@@ -41,6 +41,9 @@ class SetupUiTest(unittest.TestCase):
     def test_detail_container_starts_hidden(self):
         self.assertFalse(self.window.detail_container.isVisible())
 
+    def test_clip_container_starts_hidden(self):
+        self.assertFalse(self.window.clip_container.isVisible())
+
     def test_video_and_audio_combos_start_disabled(self):
         self.assertFalse(self.window.video_format_combo.isEnabled())
         self.assertFalse(self.window.audio_format_combo.isEnabled())
@@ -68,6 +71,10 @@ class SetupUiTest(unittest.TestCase):
             self.window.audio_format_combo,
             self.window.mp3_checkbox,
             self.window.mp3_label,
+            self.window.clip_toggle_btn,
+            self.window.clip_start_edit,
+            self.window.clip_end_edit,
+            self.window.clip_range_slider,
         }
         self.assertEqual(set(self.window.input_widgets), expected)
 

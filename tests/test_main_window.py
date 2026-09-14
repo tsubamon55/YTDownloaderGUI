@@ -15,6 +15,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from PyQt6.QtCore import QBuffer, QIODevice
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 import main_window as main_window_module
@@ -49,6 +51,29 @@ def make_audio(format_id="140", ext="m4a", acodec="mp4a.40.2", abr=128, filesize
         "filesize": filesize,
         "protocol": protocol,
     }
+
+
+def make_storyboard(format_id="sb3", width=48, height=27, rows=10, columns=10, fps=100 / 635,
+                     fragment_urls=("https://example.com/sb3/M0.jpg",)):
+    return {
+        "format_id": format_id,
+        "format_note": "storyboard",
+        "vcodec": "none",
+        "acodec": "none",
+        "width": width,
+        "height": height,
+        "rows": rows,
+        "columns": columns,
+        "fps": fps,
+        "fragments": [{"url": url} for url in fragment_urls],
+    }
+
+
+def encode_pixmap_png(pixmap: QPixmap) -> bytes:
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(buffer, "PNG")
+    return bytes(buffer.data())
 
 
 class MainWindowTestCase(unittest.TestCase):
@@ -110,7 +135,7 @@ class OnFormatsFetchedTest(MainWindowTestCase):
         worker = MagicMock()
         self.window.format_worker = worker
 
-        self.window.on_formats_fetched(formats, "Sample Title", b"", worker, auto=False)
+        self.window.on_formats_fetched(formats, "Sample Title", b"", 125.0, worker, auto=False)
 
         # 各コンボには「なし」+実フォーマットの2件
         self.assertEqual(self.window.video_format_combo.count(), 2)
@@ -119,13 +144,15 @@ class OnFormatsFetchedTest(MainWindowTestCase):
         self.assertEqual(self.window.status_label.text(), "動画1件・音声1件を検出しました")
         self.assertTrue(self.window.info_ready)
         self.assertTrue(self.window.download_btn.isEnabled())
+        self.assertTrue(self.window.clip_range_slider.isEnabled())
+        self.assertEqual(self.window.clip_range_slider.values(), (0, 125))
 
     def test_stale_worker_result_is_ignored(self):
         stale_worker = MagicMock()
         current_worker = MagicMock()
         self.window.format_worker = current_worker
 
-        self.window.on_formats_fetched([make_video()], "Should Not Apply", b"", stale_worker, auto=False)
+        self.window.on_formats_fetched([make_video()], "Should Not Apply", b"", 60.0, stale_worker, auto=False)
 
         self.assertEqual(self.window.title_label.text(), "")
         self.assertFalse(self.window.info_ready)
@@ -136,7 +163,7 @@ class OnFormatsFetchedTest(MainWindowTestCase):
         worker = MagicMock()
         self.window.format_worker = worker
 
-        self.window.on_formats_fetched([mismatched, matched], "T", b"", worker, auto=False)
+        self.window.on_formats_fetched([mismatched, matched], "T", b"", 60.0, worker, auto=False)
 
         # index 0 は「なし」、1件目の実データが先着(=互換フォーマット)であるべき
         self.assertEqual(self.window.video_format_combo.itemData(1)["format_id"], "137")
@@ -160,6 +187,173 @@ class OnFormatsErrorTest(MainWindowTestCase):
         self.window.status_label.setText("初期値")
         self.window.on_formats_error("network error", worker=MagicMock(), auto=True)
         self.assertEqual(self.window.status_label.text(), "初期値")
+
+
+class OnClipToggledTest(MainWindowTestCase):
+    def test_checked_shows_clip_container(self):
+        self.window.clip_toggle_btn.setChecked(True)
+        self.assertTrue(self.window.clip_container.isVisible())
+        self.assertEqual(self.window.clip_toggle_btn.text(), "▴")
+
+    def test_unchecked_hides_clip_container(self):
+        self.window.clip_toggle_btn.setChecked(True)
+        self.window.clip_toggle_btn.setChecked(False)
+        self.assertFalse(self.window.clip_container.isVisible())
+        self.assertEqual(self.window.clip_toggle_btn.text(), "▾")
+
+    def test_starts_collapsed(self):
+        self.assertFalse(self.window.clip_container.isVisible())
+        self.assertFalse(self.window.clip_toggle_btn.isChecked())
+
+
+class ClipSliderSyncTest(MainWindowTestCase):
+    def test_update_clip_slider_range_enables_and_sets_full_range(self):
+        self.window.video_duration = 125.0
+        self.window._update_clip_slider_range()
+        self.assertTrue(self.window.clip_range_slider.isEnabled())
+        self.assertEqual(self.window.clip_range_slider.values(), (0, 125))
+        self.assertIn("2:05", self.window.clip_duration_label.text())
+
+    def test_update_clip_slider_range_disables_when_duration_unknown(self):
+        self.window.video_duration = None
+        self.window._update_clip_slider_range()
+        self.assertFalse(self.window.clip_range_slider.isEnabled())
+        self.assertEqual(self.window.clip_duration_label.text(), "")
+
+    def test_slider_drag_updates_text_fields(self):
+        self.window.video_duration = 125.0
+        self.window._update_clip_slider_range()
+        self.window.on_clip_slider_changed(60, 100)
+        self.assertEqual(self.window.clip_start_edit.text(), "1:00")
+        self.assertEqual(self.window.clip_end_edit.text(), "1:40")
+
+    def test_slider_drag_to_full_range_clears_text_fields(self):
+        self.window.video_duration = 125.0
+        self.window._update_clip_slider_range()
+        self.window.on_clip_slider_changed(0, 125)
+        self.assertEqual(self.window.clip_start_edit.text(), "")
+        self.assertEqual(self.window.clip_end_edit.text(), "")
+
+    def test_text_edit_updates_slider(self):
+        self.window.video_duration = 125.0
+        self.window._update_clip_slider_range()
+        self.window.clip_start_edit.setText("1:00")
+        self.window.clip_end_edit.setText("2:00")
+        self.assertEqual(self.window.clip_range_slider.values(), (60, 120))
+
+    def test_invalid_text_does_not_move_slider(self):
+        self.window.video_duration = 125.0
+        self.window._update_clip_slider_range()
+        self.window.clip_start_edit.setText("1:00")
+        self.window.clip_start_edit.setText("not a time")
+        # 解析できない間は開始側を直前の値(60)のまま保つ
+        self.assertEqual(self.window.clip_range_slider.values(), (60, 125))
+
+
+class OnClipPreviewRequestedTest(MainWindowTestCase):
+    def setUp(self):
+        super().setUp()
+        self.window.video_duration = 635.0
+
+    def test_does_nothing_without_storyboard_format(self):
+        self.window.storyboard_format = None
+        with patch.object(main_window_module, "StoryboardFragmentWorker") as worker_cls:
+            self.window.on_clip_preview_requested("low", 10)
+        worker_cls.assert_not_called()
+
+    def test_cache_hit_applies_immediately_without_network(self):
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+        sprite = QPixmap(480, 270)
+        sprite.fill()
+        self.window._storyboard_cache[storyboard["fragments"][0]["url"]] = sprite
+
+        with patch.object(main_window_module, "StoryboardFragmentWorker") as worker_cls:
+            self.window.on_clip_preview_requested("low", 10)
+
+        worker_cls.assert_not_called()
+
+    def test_cache_miss_starts_worker_for_fragment_url(self):
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+
+        with patch.object(main_window_module, "StoryboardFragmentWorker") as worker_cls:
+            worker_instance = MagicMock()
+            worker_cls.return_value = worker_instance
+            self.window.on_clip_preview_requested("low", 10)
+
+        worker_cls.assert_called_once_with(storyboard["fragments"][0]["url"])
+        worker_instance.start.assert_called_once()
+        self.assertIn(storyboard["fragments"][0]["url"], self.window._pending_storyboard_urls)
+
+    def test_duplicate_request_for_pending_fragment_is_skipped(self):
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+        self.window._pending_storyboard_urls.add(storyboard["fragments"][0]["url"])
+
+        with patch.object(main_window_module, "StoryboardFragmentWorker") as worker_cls:
+            self.window.on_clip_preview_requested("low", 10)
+
+        worker_cls.assert_not_called()
+
+    def test_fetch_failure_clears_pending_state(self):
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+        url = storyboard["fragments"][0]["url"]
+        worker = MagicMock()
+        worker.url = url
+        self.window._pending_storyboard_urls.add(url)
+        self.window._storyboard_workers.add(worker)
+
+        self.window._on_storyboard_fragment_failed(worker)
+
+        self.assertNotIn(url, self.window._pending_storyboard_urls)
+        self.assertNotIn(worker, self.window._storyboard_workers)
+
+    def test_fetch_success_caches_and_applies_when_handle_still_active(self):
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+        url = storyboard["fragments"][0]["url"]
+        worker = MagicMock()
+        worker.url = url
+        self.window._pending_storyboard_urls.add(url)
+        self.window._storyboard_workers.add(worker)
+        self.window.clip_range_slider.setRange(0, 635)
+        self.window.clip_range_slider.setValues(10, 600)
+        self.window.clip_range_slider._active_handle = "low"
+
+        sprite = QPixmap(480, 270)
+        sprite.fill()
+        data = encode_pixmap_png(sprite)
+
+        with patch.object(self.window.clip_range_slider, "set_preview_pixmap") as set_pixmap_mock:
+            self.window._on_storyboard_fragment_fetched(worker, data, "low")
+
+        self.assertNotIn(url, self.window._pending_storyboard_urls)
+        self.assertIn(url, self.window._storyboard_cache)
+        set_pixmap_mock.assert_called_once()
+        applied_which, applied_pixmap = set_pixmap_mock.call_args[0]
+        self.assertEqual(applied_which, "low")
+        self.assertEqual((applied_pixmap.width(), applied_pixmap.height()), (48, 27))
+
+    def test_fetch_success_ignored_when_handle_no_longer_active(self):
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+        url = storyboard["fragments"][0]["url"]
+        worker = MagicMock()
+        worker.url = url
+        self.window.clip_range_slider._active_handle = "high"  # 既に別のハンドルに切り替わっている
+
+        sprite = QPixmap(480, 270)
+        sprite.fill()
+        data = encode_pixmap_png(sprite)
+
+        with patch.object(self.window.clip_range_slider, "set_preview_pixmap") as set_pixmap_mock:
+            self.window._on_storyboard_fragment_fetched(worker, data, "low")
+
+        set_pixmap_mock.assert_not_called()
+        # 取得結果自体は次回以降のために引き続きキャッシュされる
+        self.assertIn(url, self.window._storyboard_cache)
 
 
 class OnDetailSelectionChangedTest(MainWindowTestCase):
@@ -273,6 +467,34 @@ class StartDownloadValidationTest(MainWindowTestCase):
         worker_instance.start.assert_called_once()
         self.assertFalse(self.window.download_btn.isEnabled())
         self.assertTrue(self.window.cancel_btn.isEnabled())
+
+    def test_clip_range_is_passed_to_worker(self):
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("C:/out")
+        self.window.clip_start_edit.setText("1:00")
+        self.window.clip_end_edit.setText("2:00")
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            worker_cls.return_value = MagicMock()
+            self.window.start_download()
+
+        _, kwargs = worker_cls.call_args
+        self.assertEqual(kwargs["start_time"], 60.0)
+        self.assertEqual(kwargs["end_time"], 120.0)
+
+    def test_invalid_clip_range_shows_warning_and_stops(self):
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("C:/out")
+        self.window.clip_start_edit.setText("2:00")
+        self.window.clip_end_edit.setText("1:00")
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(QMessageBox, "warning") as warning_mock, \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            self.window.start_download()
+
+        warning_mock.assert_called_once()
+        worker_cls.assert_not_called()
 
     def test_mismatched_detail_selection_cancelled_by_user_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")

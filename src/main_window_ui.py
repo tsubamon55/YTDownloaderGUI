@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from formats import FORMAT_COLUMN_WIDTHS, FORMAT_OPTION_TOOLTIPS, FORMAT_OPTIONS
-from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, SpinnerWidget
+from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, RangeSlider, SpinnerWidget
 
 IDLE_STATUS_TEXT = "待機中"
 
@@ -57,6 +57,12 @@ class Ui_MainWindow(QMainWindow):
     merge_note_label: QLabel
     mp3_checkbox: QCheckBox
     mp3_label: QLabel
+    clip_toggle_btn: QPushButton
+    clip_container: QWidget
+    clip_start_edit: QLineEdit
+    clip_end_edit: QLineEdit
+    clip_range_slider: RangeSlider
+    clip_duration_label: QLabel
     out_edit: QLineEdit
     browse_btn: QPushButton
     download_btn: QPushButton
@@ -198,6 +204,60 @@ class Ui_MainWindow(QMainWindow):
         layout.addWidget(self.detail_container)
         self.detail_container.setVisible(False)
 
+        # --- クリップ範囲(任意) ---
+        # 詳細設定と同様、大半のユーザーは使わない任意機能のため既定では折りたたんでおく。
+        # 「形式:」行と同じく黒ラベル+青い開閉ボタンの構成にすることで、詳細設定・ログの
+        # トグルボタンとの統一感を保つ(ボタン単独の行にすると浮いて見えるため黒ラベルを添える)
+        clip_header_row = QHBoxLayout()
+        clip_header_row.addWidget(QLabel("クリップ範囲(任意):"))
+        self.clip_toggle_btn = QPushButton("▾")
+        self.clip_toggle_btn.setCheckable(True)
+        self.clip_toggle_btn.setFlat(True)
+        self.clip_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.clip_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        # 文字(▾/▴)だけだとクリック領域が20x16程度しかなく押しづらいため、
+        # 見た目のグリフは小さいままクリック領域だけ広げる
+        self.clip_toggle_btn.setMinimumSize(32, 24)
+        clip_header_row.addWidget(self.clip_toggle_btn)
+        clip_header_row.addStretch()
+        self.clip_duration_label = QLabel("")
+        self.clip_duration_label.setStyleSheet("color: #808080;")
+        clip_header_row.addWidget(self.clip_duration_label)
+        layout.addLayout(clip_header_row)
+
+        self.clip_container = QWidget()
+        clip_layout = QVBoxLayout(self.clip_container)
+        clip_layout.setContentsMargins(0, 4, 0, 0)
+        clip_layout.setSpacing(6)
+
+        # start_edit/end_editをスライダーの両端に離して置くと視線が左右に散るため、
+        # 「スライダー→中央に寄せた開始〜終了」の2段に積んで一体感を持たせる
+        self.clip_range_slider = RangeSlider()
+        self.clip_range_slider.setEnabled(False)
+        clip_layout.addWidget(self.clip_range_slider)
+
+        clip_values_row = QHBoxLayout()
+        clip_values_row.setSpacing(6)
+        clip_values_row.addStretch(1)
+        self.clip_start_edit = QLineEdit()
+        self.clip_start_edit.setPlaceholderText("開始 (例 1:23)")
+        self.clip_start_edit.setClearButtonEnabled(True)
+        self.clip_start_edit.setFixedWidth(90)
+        self.clip_start_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        clip_values_row.addWidget(self.clip_start_edit)
+        clip_values_row.addWidget(QLabel("〜"))
+        self.clip_end_edit = QLineEdit()
+        self.clip_end_edit.setPlaceholderText("終了 (例 4:56)")
+        self.clip_end_edit.setClearButtonEnabled(True)
+        self.clip_end_edit.setFixedWidth(90)
+        self.clip_end_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        clip_values_row.addWidget(self.clip_end_edit)
+        clip_values_row.addStretch(1)
+        clip_layout.addLayout(clip_values_row)
+
+        layout.addWidget(self.clip_container)
+        self.clip_container.setVisible(False)
+
         # --- 保存先 ---
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("保存先:"))
@@ -272,4 +332,8 @@ class Ui_MainWindow(QMainWindow):
             self.audio_format_combo,
             self.mp3_checkbox,
             self.mp3_label,
+            self.clip_toggle_btn,
+            self.clip_start_edit,
+            self.clip_end_edit,
+            self.clip_range_slider,
         ]
