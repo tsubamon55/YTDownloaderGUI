@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from clip_range import parse_clip_time, resolve_clip_range
+from clip_range import clip_range_label, parse_clip_time, resolve_clip_range
 
 
 class ParseClipTimeTest(unittest.TestCase):
@@ -65,6 +65,20 @@ class ResolveClipRangeTest(unittest.TestCase):
     def test_invalid_start_propagates(self):
         with self.assertRaises(ValueError):
             resolve_clip_range("abc", "1:00")
+
+
+class ClipRangeLabelTest(unittest.TestCase):
+    def test_both_none_returns_none(self):
+        self.assertIsNone(clip_range_label(None, None))
+
+    def test_both_specified(self):
+        self.assertEqual(clip_range_label(60.0, 120.0), "1:00-2:00")
+
+    def test_missing_start_leaves_start_side_empty(self):
+        self.assertEqual(clip_range_label(None, 120.0), "-2:00")
+
+    def test_missing_end_leaves_end_side_empty(self):
+        self.assertEqual(clip_range_label(60.0, None), "1:00-")
 
 
 if __name__ == "__main__":

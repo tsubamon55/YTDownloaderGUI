@@ -9,6 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
+from clip_range import clip_range_label
 from formats import format_size, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug
 from yt_dlp_selection import make_filtering_format_selector
@@ -277,6 +278,15 @@ class DownloadWorker(QThread):
             ext = "mkv"
         return ext
 
+    def _build_title(self, probe_info: dict) -> str:
+        """フル動画のダウンロードと保存先ファイルが混同されないよう、クリップ範囲を
+        指定した場合はタイトルに範囲を付記する(例: "Title [1:00-2:00]")"""
+        title = probe_info.get("title") or "video"
+        clip_label = clip_range_label(self.start_time, self.end_time)
+        if clip_label:
+            title = f"{title} [{clip_label}]"
+        return title
+
     def _resolve_unique_title(self, title: str, expected_ext: str | None) -> str:
         sanitized = yt_dlp.utils.sanitize_filename(title, restricted=False)
         if not os.path.isdir(self.out_dir):
@@ -344,7 +354,7 @@ class DownloadWorker(QThread):
             with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
                 probe_info = probe_ydl.extract_info(self.url, download=False)
             expected_ext = self._expected_ext(probe_info)
-            self._unique_title = self._resolve_unique_title(probe_info.get("title") or "video", expected_ext)
+            self._unique_title = self._resolve_unique_title(self._build_title(probe_info), expected_ext)
             self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
             self._init_component_weights(probe_info)
 

@@ -128,6 +128,28 @@ class ExpectedExtTest(unittest.TestCase):
         self.assertEqual(worker._expected_ext({"ext": "mp4"}), "mp4")
 
 
+class BuildTitleTest(unittest.TestCase):
+    def test_no_clip_range_returns_title_unchanged(self):
+        worker = make_worker()
+        self.assertEqual(worker._build_title({"title": "My Video"}), "My Video")
+
+    def test_missing_title_falls_back_to_video(self):
+        worker = make_worker()
+        self.assertEqual(worker._build_title({}), "video")
+
+    def test_clip_range_appends_label_to_distinguish_from_full_video(self):
+        worker = make_worker(start_time=60.0, end_time=120.0)
+        self.assertEqual(worker._build_title({"title": "My Video"}), "My Video [1:00-2:00]")
+
+    def test_open_ended_clip_range_leaves_end_side_empty(self):
+        worker = make_worker(start_time=60.0)
+        self.assertEqual(worker._build_title({"title": "My Video"}), "My Video [1:00-]")
+
+    def test_open_start_clip_range_leaves_start_side_empty(self):
+        worker = make_worker(end_time=120.0)
+        self.assertEqual(worker._build_title({"title": "My Video"}), "My Video [-2:00]")
+
+
 class ResolveUniqueTitleTest(unittest.TestCase):
     def test_no_conflict_returns_sanitized_title(self):
         with tempfile.TemporaryDirectory() as tmp:
