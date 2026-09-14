@@ -210,13 +210,13 @@ class OnClipToggledTest(MainWindowTestCase):
     def test_checked_shows_clip_container(self):
         self.window.clip_toggle_btn.setChecked(True)
         self.assertTrue(self.window.clip_container.isVisible())
-        self.assertEqual(self.window.clip_toggle_btn.text(), "▴")
+        self.assertEqual(self.window.clip_toggle_btn.text(), "クリップ範囲(任意) ▴")
 
     def test_unchecked_hides_clip_container(self):
         self.window.clip_toggle_btn.setChecked(True)
         self.window.clip_toggle_btn.setChecked(False)
         self.assertFalse(self.window.clip_container.isVisible())
-        self.assertEqual(self.window.clip_toggle_btn.text(), "▾")
+        self.assertEqual(self.window.clip_toggle_btn.text(), "クリップ範囲(任意) ▾")
 
     def test_starts_collapsed(self):
         self.assertFalse(self.window.clip_container.isVisible())

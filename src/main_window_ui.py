@@ -205,24 +205,16 @@ class Ui_MainWindow(QMainWindow):
         self.detail_container.setVisible(False)
 
         # --- クリップ範囲(任意) ---
-        # 詳細設定と同様、大半のユーザーは使わない任意機能のため既定では折りたたんでおく。
-        # 「形式:」行と同じく黒ラベル+青い開閉ボタンの構成にすることで、詳細設定・ログの
-        # トグルボタンとの統一感を保つ(ボタン単独の行にすると浮いて見えるため黒ラベルを添える)
+        # 詳細設定・ログと同様、大半のユーザーは使わない任意機能のため既定では折りたたんでおき、
+        # トグルボタンは詳細設定と同じく行の右端に寄せる
         clip_header_row = QHBoxLayout()
-        clip_header_row.addWidget(QLabel("クリップ範囲(任意):"))
-        self.clip_toggle_btn = QPushButton("▾")
+        clip_header_row.addStretch()
+        self.clip_toggle_btn = QPushButton("クリップ範囲(任意) ▾")
         self.clip_toggle_btn.setCheckable(True)
         self.clip_toggle_btn.setFlat(True)
         self.clip_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.clip_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
-        # 文字(▾/▴)だけだとクリック領域が20x16程度しかなく押しづらいため、
-        # 見た目のグリフは小さいままクリック領域だけ広げる
-        self.clip_toggle_btn.setMinimumSize(32, 24)
         clip_header_row.addWidget(self.clip_toggle_btn)
-        clip_header_row.addStretch()
-        self.clip_duration_label = QLabel("")
-        self.clip_duration_label.setStyleSheet("color: #808080;")
-        clip_header_row.addWidget(self.clip_duration_label)
         layout.addLayout(clip_header_row)
 
         self.clip_container = QWidget()
@@ -234,25 +226,40 @@ class Ui_MainWindow(QMainWindow):
         # 「スライダー→中央に寄せた開始〜終了」の2段に積んで一体感を持たせる。
         # スライダーをコンテナ全幅(728px程度)まで伸ばすと、下の開始〜終了欄(約210px)
         # に対して幅が広すぎて不自然に見えるため、最大幅を設けて中央寄せにする
+        clip_slider_row = QHBoxLayout()
+        clip_slider_row.setSpacing(8)
+        clip_slider_row.addStretch(1)
         self.clip_range_slider = RangeSlider()
         self.clip_range_slider.setEnabled(False)
-        # alignment指定でaddWidgetすると、伸縮ではなくsizeHint基準の配置になる。
-        # RangeSliderはsizeHintを持たないため、明示的にfixedWidthを与える必要がある
         self.clip_range_slider.setFixedWidth(320)
-        clip_layout.addWidget(self.clip_range_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+        clip_slider_row.addWidget(self.clip_range_slider)
+        # 動画の長さは開始・終了欄に入力すると(プレースホルダーが消えて)見えなくなるため、
+        # 「合計がいくつか」を示す目盛りの役割としてスライダーの右に固定表示する
+        # (開始・終了欄はユーザーが選んだ値であり、動画全体の長さとは意味が異なるため
+        # 隣接させると混同しやすい。範囲そのものを表すスライダーに添えるほうが自然)
+        self.clip_duration_label = QLabel("")
+        self.clip_duration_label.setStyleSheet("color: #808080;")
+        clip_slider_row.addWidget(self.clip_duration_label)
+        clip_slider_row.addStretch(1)
+        clip_layout.addLayout(clip_slider_row)
 
+        # プレースホルダーは入力すると消えてラベルの役目を失うため、
+        # 「開始:」「終了:」は恒久的に見えるQLabelとして左に添える
         clip_values_row = QHBoxLayout()
         clip_values_row.setSpacing(6)
         clip_values_row.addStretch(1)
+        clip_values_row.addWidget(QLabel("開始:"))
         self.clip_start_edit = QLineEdit()
-        self.clip_start_edit.setPlaceholderText("開始 (例 1:23)")
+        # 空欄時は「先頭(0:00)から」が実際のデフォルト動作なので、それをそのまま表示する
+        self.clip_start_edit.setPlaceholderText("0:00")
         self.clip_start_edit.setClearButtonEnabled(True)
         self.clip_start_edit.setFixedWidth(90)
         self.clip_start_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         clip_values_row.addWidget(self.clip_start_edit)
-        clip_values_row.addWidget(QLabel("〜"))
+        clip_values_row.addWidget(QLabel("終了:"))
         self.clip_end_edit = QLineEdit()
-        self.clip_end_edit.setPlaceholderText("終了 (例 4:56)")
+        # 動画の長さが判明するまでは空欄時の実際の値が分からないため、取得後に
+        # _update_clip_slider_range で動画の長さをプレースホルダーとして設定する
         self.clip_end_edit.setClearButtonEnabled(True)
         self.clip_end_edit.setFixedWidth(90)
         self.clip_end_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -103,7 +103,7 @@ class MainWindow(Ui_MainWindow):
         self._sync_window_height()
 
     def on_clip_toggled(self, checked: bool) -> None:
-        self.clip_toggle_btn.setText("▴" if checked else "▾")
+        self.clip_toggle_btn.setText("クリップ範囲(任意) ▴" if checked else "クリップ範囲(任意) ▾")
         self.clip_container.setVisible(checked)
         self._sync_window_height()
 
@@ -130,6 +130,7 @@ class MainWindow(Ui_MainWindow):
         self._storyboard_cache = {}
         self.clip_range_slider.setEnabled(False)
         self.clip_duration_label.setText("")
+        self.clip_end_edit.setPlaceholderText("")
 
     def on_detail_toggled(self, checked: bool) -> None:
         self.detail_toggle_btn.setText("簡易設定 ▴" if checked else "詳細設定 ▾")
@@ -274,6 +275,7 @@ class MainWindow(Ui_MainWindow):
         if not duration or duration <= 0:
             self.clip_range_slider.setEnabled(False)
             self.clip_duration_label.setText("")
+            self.clip_end_edit.setPlaceholderText("")
             return
 
         total = int(duration)
@@ -281,6 +283,8 @@ class MainWindow(Ui_MainWindow):
         self.clip_range_slider.setRange(0, total)
         self.clip_range_slider.setValues(0, total)
         self.clip_duration_label.setText(f"動画の長さ: {format_clip_time(duration)}")
+        # 空欄時は「末尾(動画の長さ)まで」が実際のデフォルト動作なので、それをそのまま表示する
+        self.clip_end_edit.setPlaceholderText(format_clip_time(duration))
 
     def on_clip_slider_changed(self, low: int, high: int) -> None:
         """スライダー操作の結果をテキスト入力欄へ反映する。端まで動かした場合は
