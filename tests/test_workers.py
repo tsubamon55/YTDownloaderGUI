@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -68,6 +68,103 @@ class ThumbnailUrlCandidatesTest(unittest.TestCase):
 
     def test_handles_missing_thumbnails(self):
         self.assertEqual(FormatListWorker._thumbnail_url_candidates({}), [])
+
+
+class FormatListWorkerRunTest(unittest.TestCase):
+    """run()が候補URLを順に試し、失敗した候補をスキップして次点に
+    フォールバックすることを検証する(存在しない推測URLに当たった際の対策)"""
+
+    @staticmethod
+    def _make_fake_ydl(info):
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        ydl.extract_info.return_value = info
+        return ydl
+
+    def test_falls_back_to_next_candidate_when_first_fails(self):
+        info = {
+            "formats": [],
+            "title": "Sample",
+            "duration": 12.0,
+            "thumbnail": "https://example.com/maxresdefault.webp",
+            "thumbnails": [
+                {"url": "https://example.com/maxresdefault.webp", "width": 1920, "height": 1080},
+                {"url": "https://example.com/hqdefault.jpg", "width": 480, "height": 360},
+            ],
+        }
+
+        def fake_urlopen(url, timeout=10):
+            if url == "https://example.com/maxresdefault.webp":
+                raise OSError("404")
+            resp = MagicMock()
+            resp.__enter__.return_value = resp
+            resp.__exit__.return_value = False
+            resp.read.return_value = b"fallback-bytes"
+            return resp
+
+        results = []
+        worker = FormatListWorker("https://example.com/watch?v=x")
+        worker.finished_ok.connect(lambda *args: results.append(args))
+
+        with patch("workers.yt_dlp.YoutubeDL", return_value=self._make_fake_ydl(info)), \
+             patch("workers.urllib.request.urlopen", side_effect=fake_urlopen):
+            worker.run()
+
+        self.assertEqual(len(results), 1)
+        _, _, thumbnail_bytes, _ = results[0]
+        self.assertEqual(thumbnail_bytes, b"fallback-bytes")
+
+    def test_stops_at_first_successful_candidate(self):
+        info = {
+            "formats": [],
+            "title": "Sample",
+            "duration": 12.0,
+            "thumbnail": "https://example.com/maxresdefault.webp",
+            "thumbnails": [
+                {"url": "https://example.com/maxresdefault.webp", "width": 1920, "height": 1080},
+                {"url": "https://example.com/hqdefault.jpg", "width": 480, "height": 360},
+            ],
+        }
+
+        attempted_urls = []
+
+        def fake_urlopen(url, timeout=10):
+            attempted_urls.append(url)
+            resp = MagicMock()
+            resp.__enter__.return_value = resp
+            resp.__exit__.return_value = False
+            resp.read.return_value = b"best-bytes"
+            return resp
+
+        worker = FormatListWorker("https://example.com/watch?v=x")
+
+        with patch("workers.yt_dlp.YoutubeDL", return_value=self._make_fake_ydl(info)), \
+             patch("workers.urllib.request.urlopen", side_effect=fake_urlopen):
+            worker.run()
+
+        self.assertEqual(attempted_urls, ["https://example.com/maxresdefault.webp"])
+
+    def test_all_candidates_failing_yields_empty_thumbnail(self):
+        info = {
+            "formats": [],
+            "title": "Sample",
+            "duration": None,
+            "thumbnail": "https://example.com/maxresdefault.webp",
+            "thumbnails": [],
+        }
+
+        results = []
+        worker = FormatListWorker("https://example.com/watch?v=x")
+        worker.finished_ok.connect(lambda *args: results.append(args))
+
+        with patch("workers.yt_dlp.YoutubeDL", return_value=self._make_fake_ydl(info)), \
+             patch("workers.urllib.request.urlopen", side_effect=OSError("network down")):
+            worker.run()
+
+        self.assertEqual(len(results), 1)
+        _, _, thumbnail_bytes, _ = results[0]
+        self.assertEqual(thumbnail_bytes, b"")
 
 
 class FormatEtaTest(unittest.TestCase):
@@ -344,25 +441,181 @@ class BuildFormatSelectorTest(unittest.TestCase):
         self.assertTrue(callable(selector))
 
 
-class BuildDownloadRangesTest(unittest.TestCase):
-    def test_returns_none_when_no_clip_range_specified(self):
+class SelectedVcodecTest(unittest.TestCase):
+    def test_single_format_returns_its_vcodec(self):
         worker = make_worker()
-        self.assertIsNone(worker._build_download_ranges())
+        self.assertEqual(worker._selected_vcodec({"vcodec": "avc1.640028"}), "avc1.640028")
 
-    def test_returns_range_covering_start_to_end(self):
-        worker = make_worker(start_time=10.0, end_time=20.0)
-        ranges = worker._build_download_ranges()({}, None)
-        self.assertEqual(list(ranges), [{"start_time": 10.0, "end_time": 20.0}])
+    def test_audio_only_format_returns_none(self):
+        worker = make_worker()
+        self.assertIsNone(worker._selected_vcodec({"vcodec": "none"}))
 
-    def test_missing_start_defaults_to_zero(self):
+    def test_requested_formats_picks_the_video_entry(self):
+        worker = make_worker()
+        probe_info = {
+            "requested_formats": [
+                {"format_id": "137", "vcodec": "avc1.640028", "acodec": "none"},
+                {"format_id": "140", "vcodec": "none", "acodec": "mp4a.40.2"},
+            ],
+        }
+        self.assertEqual(worker._selected_vcodec(probe_info), "avc1.640028")
+
+
+class TrimClipLocallyTest(unittest.TestCase):
+    """クリップ範囲はyt-dlpのdownload_ranges(常にffmpeg直結のFFmpegFDへ切り替わり、
+    進捗報告がないままYouTube側のスロットリングで無期限に停止しうる)には渡さず、
+    通常ダウンロード完了後にローカルファイルへffmpegで切り出す。その切り出し処理を検証する"""
+
+    @staticmethod
+    def _make_fake_ffpp():
+        """real_run_ffmpegの代わりに切り出し後ファイル(第2引数の出力パス)を実際に
+        作成するフェイク。os.replaceでの差し替えが成立するようにするため"""
+        ffpp = MagicMock()
+
+        def fake_run(input_specs, output_specs):
+            open(output_specs[0][0], "w").close()
+
+        ffpp.real_run_ffmpeg.side_effect = fake_run
+        return ffpp
+
+    def test_noop_when_final_filepath_missing(self):
         worker = make_worker(end_time=20.0)
-        ranges = worker._build_download_ranges()({}, None)
-        self.assertEqual(list(ranges), [{"start_time": 0, "end_time": 20.0}])
+        with patch("workers.FFmpegPostProcessor") as ffpp_cls:
+            worker._trim_clip_locally()
+        ffpp_cls.assert_not_called()
 
-    def test_missing_end_defaults_to_infinity(self):
-        worker = make_worker(start_time=10.0)
-        ranges = worker._build_download_ranges()({}, None)
-        self.assertEqual(list(ranges), [{"start_time": 10.0, "end_time": float("inf")}])
+    def test_noop_when_final_file_does_not_exist(self):
+        worker = make_worker(end_time=20.0)
+        worker._final_filepath = "C:/out/does_not_exist.mp4"
+        with patch("workers.FFmpegPostProcessor") as ffpp_cls:
+            worker._trim_clip_locally()
+        ffpp_cls.assert_not_called()
+
+    def test_runs_ffmpeg_with_input_side_seek_and_output_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=10.0, end_time=30.0)
+            worker._final_filepath = final_path
+
+            ffpp = self._make_fake_ffpp()
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally("avc1.640028")
+
+            ffpp.real_run_ffmpeg.assert_called_once()
+            (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            self.assertEqual(input_specs, [(final_path, ["-ss", "10.0"])])
+            [(trimmed_path, output_opts)] = output_specs
+            self.assertEqual(output_opts, ["-c:a", "copy", "-c:v", "libx264", "-crf", "18", "-t", "20.0"])
+            self.assertTrue(trimmed_path.startswith(os.path.join(tmp, "My Video")))
+
+    def test_open_start_uses_no_seek_and_end_as_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(end_time=30.0)
+            worker._final_filepath = final_path
+
+            ffpp = self._make_fake_ffpp()
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally("avc1.640028")
+
+            (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            self.assertEqual(input_specs, [(final_path, [])])
+            self.assertEqual(
+                output_specs,
+                [(output_specs[0][0], ["-c:a", "copy", "-c:v", "libx264", "-crf", "18", "-t", "30.0"])],
+            )
+
+    def test_open_end_omits_duration_arg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=10.0)
+            worker._final_filepath = final_path
+
+            ffpp = self._make_fake_ffpp()
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally("avc1.640028")
+
+            (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            self.assertEqual(input_specs, [(final_path, ["-ss", "10.0"])])
+            self.assertEqual(
+                output_specs,
+                [(output_specs[0][0], ["-c:a", "copy", "-c:v", "libx264", "-crf", "18"])],
+            )
+
+    def test_audio_always_stream_copied_regardless_of_video_codec(self):
+        """音声はキーフレーム制約がないため、映像コーデックの対応有無に関わらず
+        常に無劣化のストリームコピーになることを確認する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=10.0, end_time=30.0)
+            worker._final_filepath = final_path
+
+            ffpp = self._make_fake_ffpp()
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally(None)  # 音声のみダウンロード等、映像コーデック不明
+
+            (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            output_opts = output_specs[0][1]
+            self.assertEqual(output_opts[:2], ["-c:a", "copy"])
+            self.assertNotIn("-c:v", output_opts)
+
+    def test_vp9_uses_libvpx_vp9_encoder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.webm")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=10.0, end_time=30.0)
+            worker._final_filepath = final_path
+
+            ffpp = self._make_fake_ffpp()
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally("vp09.00.10.08")
+
+            (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            output_opts = output_specs[0][1]
+            self.assertIn("libvpx-vp9", output_opts)
+
+    def test_unrecognized_codec_omits_explicit_video_encoder(self):
+        """未対応コーデック(例: HEVC/AV1)はffmpegの既定エンコーダにフォールバックする
+        (音声は引き続きコピーされる)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=10.0, end_time=30.0)
+            worker._final_filepath = final_path
+
+            ffpp = self._make_fake_ffpp()
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally("hev1.1.6.L93.B0")
+
+            (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            output_opts = output_specs[0][1]
+            self.assertNotIn("-c:v", output_opts)
+            self.assertEqual(output_opts, ["-c:a", "copy", "-t", "20.0"])
+
+    def test_replaces_final_file_with_trimmed_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=10.0, end_time=30.0)
+            worker._final_filepath = final_path
+
+            def fake_run(input_specs, output_specs):
+                with open(output_specs[0][0], "w") as f:
+                    f.write("trimmed")
+
+            ffpp = MagicMock()
+            ffpp.real_run_ffmpeg.side_effect = fake_run
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally()
+
+            self.assertTrue(os.path.isfile(final_path))
+            with open(final_path) as f:
+                self.assertEqual(f.read(), "trimmed")
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
 
 
 class RunRegistersFfmpegLocationTest(unittest.TestCase):

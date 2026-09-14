@@ -279,6 +279,18 @@ class DownloadWorker(QThread):
         "mp3", "mkv", "mka", "ogg", "opus", "flac", "m4a", "mp4", "m4v", "mov",
     }
 
+    # クリップ切り出し時に正確な時刻へ合わせるため再エンコードする映像コーデックと、
+    # 元のコーデックに対して体感できる劣化がほぼ出ないCRF値の組(値が小さいほど高品質)。
+    # 未対応のコーデック(HEVC/AV1等)はffmpegの既定エンコーダ・画質設定にフォールバックする
+    _CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX = {
+        "avc1": ("libx264", "18"),
+        "h264": ("libx264", "18"),
+        "vp9": ("libvpx-vp9", "31"),
+        "vp09": ("libvpx-vp9", "31"),
+        "vp8": ("libvpx", "10"),
+        "vp08": ("libvpx", "10"),
+    }
+
     def _postprocessor_hook(self, d):
         status = d.get("status")
         name = d.get("postprocessor", "")
@@ -352,14 +364,56 @@ class DownloadWorker(QThread):
             return self.format_spec
         return make_filtering_format_selector(self.format_spec, is_codec_container_mismatch)
 
-    def _build_download_ranges(self):
-        """クリップ範囲(開始・終了時刻)が指定されている場合、その区間のみをダウンロード
-        対象とするyt-dlpのdownload_rangesコールバックを返す。指定がなければNone"""
-        if self.start_time is None and self.end_time is None:
-            return None
-        start = self.start_time if self.start_time is not None else 0
-        end = self.end_time if self.end_time is not None else float("inf")
-        return yt_dlp.utils.download_range_func(None, [(start, end)])
+    @staticmethod
+    def _selected_vcodec(probe_info: dict) -> str | None:
+        """実際にダウンロードした映像コーデックを返す(音声のみの場合はNone)。
+        映像+音声を別々にダウンロードした場合はrequested_formatsの中から探す"""
+        for fmt in probe_info.get("requested_formats") or [probe_info]:
+            vcodec = fmt.get("vcodec")
+            if vcodec and vcodec != "none":
+                return vcodec
+        return None
+
+    def _trim_clip_locally(self, vcodec: str | None = None) -> None:
+        """ダウンロード済みファイルをffmpegでローカルに切り出し、self._final_filepathを
+        切り出し後のファイルで置き換える。
+
+        yt-dlpのdownload_ranges機能はクリップ区間の有無に関わらずダウンローダを
+        ffmpeg直結のFFmpegFDへ強制的に切り替える(yt_dlp.downloader.get_suitable_downloader
+        の実装による)。この経路はyt-dlp本来のダウンローダが持つ再接続・スロットリング回避を
+        経由しないため、YouTube側のCDNスロットリングに引っかかると進捗が一切報告されないまま
+        無期限に停止することがある。そのため範囲指定はダウンローダには渡さず、まず動画全体を
+        通常のダウンローダで取得してから、完成したローカルファイルに対してここで切り出す。
+
+        音声は数十ms単位のフレームで独立して切り出せる(キーフレーム制約がない)ため、
+        コーデックを問わず常にストリームコピーする(劣化なし)。映像は正確な時刻に合わせる
+        ため再エンコードが避けられないので、体感できる劣化がほぼ出ない高めのCRFを使う。
+        """
+        if not self._final_filepath or not os.path.isfile(self._final_filepath):
+            return
+
+        self.log.emit("クリップ範囲を切り出し中...")
+        ffpp = FFmpegPostProcessor(downloader=None)
+        root, ext = os.path.splitext(self._final_filepath)
+        trimmed_path = f"{root}.clip{ext}"
+
+        # -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから
+        # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)
+        input_opts = ["-ss", str(self.start_time)] if self.start_time else []
+
+        output_opts = ["-c:a", "copy"]
+        codec_prefix = (vcodec or "").split(".")[0].lower()
+        video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix)
+        if video_encoder:
+            encoder_name, crf = video_encoder
+            output_opts += ["-c:v", encoder_name, "-crf", crf]
+        if self.end_time is not None:
+            output_opts += ["-t", str(self.end_time - (self.start_time or 0))]
+
+        ffpp.real_run_ffmpeg([(self._final_filepath, input_opts)], [(trimmed_path, output_opts)])
+
+        os.replace(trimmed_path, self._final_filepath)
+        self.log.emit("切り出し完了")
 
     def run(self):
         self._start_time = time.monotonic()
@@ -412,11 +466,6 @@ class DownloadWorker(QThread):
             if self.format_sort:
                 ydl_opts["format_sort"] = self.format_sort
 
-            download_ranges = self._build_download_ranges()
-            if download_ranges is not None:
-                ydl_opts["download_ranges"] = download_ranges
-                ydl_opts["force_keyframes_at_cuts"] = True
-
             if ffmpeg_location:
                 ydl_opts["ffmpeg_location"] = ffmpeg_location
 
@@ -427,6 +476,8 @@ class DownloadWorker(QThread):
                 self._cleanup_leftover_files()
                 self.finished_error.emit("キャンセルされました")
             else:
+                if self.start_time is not None or self.end_time is not None:
+                    self._trim_clip_locally(self._selected_vcodec(probe_info))
                 elapsed = time.monotonic() - self._start_time
                 if self._final_filepath and os.path.isfile(self._final_filepath):
                     size = format_size(os.path.getsize(self._final_filepath))
