@@ -116,6 +116,8 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.window.clip_range_slider.setEnabled(True)
         self.window.clip_range_slider.setRange(0, 635)
         self.window.clip_duration_label.setText("動画の長さ: 10:35")
+        self.window.clip_start_edit.setText("1:00")
+        self.window.clip_end_edit.setText("2:00")
 
         self.window.on_url_changed("")
 
@@ -124,6 +126,27 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.assertIsNone(self.window.storyboard_format)
         self.assertEqual(self.window._storyboard_cache, {})
         self.assertEqual(self.window.clip_duration_label.text(), "")
+        # 古い動画のクリップ範囲が新しい動画に持ち込まれないよう、テキストもクリアする
+        self.assertEqual(self.window.clip_start_edit.text(), "")
+        self.assertEqual(self.window.clip_end_edit.text(), "")
+
+
+class FetchFormatsTest(MainWindowTestCase):
+    def test_switching_to_new_url_clears_stale_clip_range_text(self):
+        # 前の動画に対して入力したクリップ範囲が、別の動画を取得し直した際に
+        # そのまま(長さの整合性を確認されずに)残ってしまわないことを確認する
+        self.window.video_duration = 635.0
+        self.window.clip_start_edit.setText("1:00")
+        self.window.clip_end_edit.setText("2:00")
+
+        with patch.object(main_window_module, "FormatListWorker") as worker_cls:
+            worker_cls.return_value = MagicMock()
+            self.window.url_edit.setText("https://example.com/watch?v=new")
+            self.window.fetch_formats()
+
+        self.assertEqual(self.window.clip_start_edit.text(), "")
+        self.assertEqual(self.window.clip_end_edit.text(), "")
+        self.assertIsNone(self.window.video_duration)
 
 
 class OnDetailToggledTest(MainWindowTestCase):
@@ -512,6 +535,62 @@ class StartDownloadValidationTest(MainWindowTestCase):
 
         warning_mock.assert_called_once()
         worker_cls.assert_not_called()
+
+    def test_clip_start_beyond_video_duration_shows_warning_and_stops(self):
+        # 前の動画(長さ不明時や別動画)の入力が残っていた等、動画より長い開始時刻を
+        # 指定した場合はダウンロード開始前に弾く
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("C:/out")
+        self.window.video_duration = 90.0
+        self.window.clip_start_edit.setText("2:00")  # 120秒 > 90秒
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(QMessageBox, "warning") as warning_mock, \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            self.window.start_download()
+
+        warning_mock.assert_called_once()
+        worker_cls.assert_not_called()
+
+    def test_clip_end_beyond_video_duration_shows_warning_and_stops(self):
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("C:/out")
+        self.window.video_duration = 90.0
+        self.window.clip_end_edit.setText("2:00")  # 120秒 > 90秒
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(QMessageBox, "warning") as warning_mock, \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            self.window.start_download()
+
+        warning_mock.assert_called_once()
+        worker_cls.assert_not_called()
+
+    def test_clip_end_equal_to_video_duration_is_allowed(self):
+        # 末尾(動画の長さそのもの)までを終了時刻に指定するのは正当な範囲
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("C:/out")
+        self.window.video_duration = 90.0
+        self.window.clip_end_edit.setText("1:30")  # 90秒 == 90秒
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            worker_cls.return_value = MagicMock()
+            self.window.start_download()
+
+        worker_cls.assert_called_once()
+
+    def test_clip_range_beyond_duration_skipped_when_duration_unknown(self):
+        # ライブ配信等、長さが不明な場合は範囲チェックできないためスキップされる
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("C:/out")
+        self.window.video_duration = None
+        self.window.clip_start_edit.setText("100:00:00")
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            worker_cls.return_value = MagicMock()
+            self.window.start_download()
+
+        worker_cls.assert_called_once()
 
     def test_mismatched_detail_selection_cancelled_by_user_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")

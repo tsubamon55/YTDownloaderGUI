@@ -123,14 +123,18 @@ class MainWindow(Ui_MainWindow):
             self._reset_video_state()
 
     def _reset_video_state(self) -> None:
-        """動画の長さ・ストーリーボード関連の状態を初期化し、クリップスライダーを
-        無効化する。URLが空/不正になった時、および新たな取得を始める前に呼ぶ"""
+        """動画の長さ・ストーリーボード関連の状態を初期化し、クリップ範囲の入力を
+        無効化・クリアする。URLが空/不正になった時、および新たな取得を始める前に呼ぶ。
+        古い動画のクリップ範囲(秒数)が新しい動画にそのまま持ち込まれてしまう
+        (長さを超えた範囲を指定してしまう)のを防ぐため、テキストも必ずクリアする"""
         self.video_duration = None
         self.storyboard_format = None
         self._storyboard_cache = {}
         self.clip_range_slider.setEnabled(False)
         self.clip_duration_label.setText("")
         self.clip_end_edit.setPlaceholderText("")
+        self.clip_start_edit.clear()
+        self.clip_end_edit.clear()
 
     def on_detail_toggled(self, checked: bool) -> None:
         self.detail_toggle_btn.setText("簡易設定 ▴" if checked else "詳細設定 ▾")
@@ -543,6 +547,16 @@ class MainWindow(Ui_MainWindow):
             QMessageBox.warning(self, "入力エラー", str(e))
             return
 
+        # resolve_clip_rangeは開始・終了の前後関係のみを見るため、動画の長さとの整合性は
+        # ここで確認する。長さが不明(ライブ配信等)な場合はチェックできないためスキップする
+        if self.video_duration:
+            if clip_start is not None and clip_start >= self.video_duration:
+                QMessageBox.warning(self, "入力エラー", "開始時刻が動画の長さを超えています")
+                return
+            if clip_end is not None and clip_end > self.video_duration:
+                QMessageBox.warning(self, "入力エラー", "終了時刻が動画の長さを超えています")
+                return
+
         if self.detail_toggle_btn.isChecked():
             mismatched_fmts = mismatched_selected_formats(
                 self.video_format_combo.currentData(), self.audio_format_combo.currentData()
@@ -604,8 +618,6 @@ class MainWindow(Ui_MainWindow):
     def on_finished_ok(self) -> None:
         self.spinner.stop()
         self.url_edit.clear()
-        self.clip_start_edit.clear()
-        self.clip_end_edit.clear()
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
         self.available_formats = []
