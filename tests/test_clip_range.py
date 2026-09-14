@@ -66,6 +66,15 @@ class ResolveClipRangeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_clip_range("abc", "1:00")
 
+    def test_end_zero_with_blank_start_raises(self):
+        """開始欄が空欄(=先頭から)の場合、終了時刻は0との比較になる。
+        "0"を指定すると長さ0の無意味なクリップになってしまうためエラーとする"""
+        with self.assertRaises(ValueError):
+            resolve_clip_range("", "0")
+
+    def test_end_after_zero_with_blank_start_is_valid(self):
+        self.assertEqual(resolve_clip_range("", "0:01"), (None, 1.0))
+
 
 class ClipRangeLabelTest(unittest.TestCase):
     def test_both_none_returns_none(self):

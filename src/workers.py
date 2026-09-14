@@ -24,6 +24,11 @@ class FormatListWorker(QThread):
     # 当たった場合に備え、上位候補を複数試す。多すぎるとタイムアウトが
     # 積み重なるため妥当な件数に制限する。
     MAX_THUMBNAIL_CANDIDATES = 5
+    # サムネイルはGoogleのCDN(i.ytimg.com)から数十〜数百KB程度の画像を取得するだけの
+    # 軽い処理で、正常時は1秒未満で応答が返る。通信が詰まった異常系で1候補あたり
+    # 待たされる時間を抑えるため、一般的なWeb APIの目安より短めに設定する
+    # (候補は複数回試すため、最悪ケースはこの秒数×MAX_THUMBNAIL_CANDIDATESになる)
+    THUMBNAIL_FETCH_TIMEOUT_SECONDS = 5
 
     def __init__(self, url: str):
         super().__init__()
@@ -83,7 +88,9 @@ class FormatListWorker(QThread):
             candidates = self._thumbnail_url_candidates(info)[: self.MAX_THUMBNAIL_CANDIDATES]
             for candidate_url in candidates:
                 try:
-                    with urllib.request.urlopen(candidate_url, timeout=10) as resp:
+                    with urllib.request.urlopen(
+                        candidate_url, timeout=self.THUMBNAIL_FETCH_TIMEOUT_SECONDS
+                    ) as resp:
                         data = resp.read()
                     if data:
                         thumbnail_bytes = data
@@ -365,16 +372,25 @@ class DownloadWorker(QThread):
         return make_filtering_format_selector(self.format_spec, is_codec_container_mismatch)
 
     @staticmethod
-    def _selected_vcodec(probe_info: dict) -> str | None:
-        """実際にダウンロードした映像コーデックを返す(音声のみの場合はNone)。
-        映像+音声を別々にダウンロードした場合はrequested_formatsの中から探す"""
-        for fmt in probe_info.get("requested_formats") or [probe_info]:
-            vcodec = fmt.get("vcodec")
-            if vcodec and vcodec != "none":
-                return vcodec
+    def _detect_vcodec(ffpp: FFmpegPostProcessor, filepath: str) -> str | None:
+        """ffprobeでファイルを直接調べ、実際に書き出された映像コーデックを返す
+        (音声のみの場合はNone)。
+
+        probe用に別途取得したextract_info()の結果を使うと、実ダウンロード時の
+        フォーマット選択との間に2回のネットワークリクエストの時間差があるため、
+        (フォーマットの有効期限切れ等で)実際にダウンロードされた内容とズレる
+        可能性がある。確定済みのローカルファイルを直接調べることでそのズレを避ける"""
+        try:
+            metadata = ffpp.get_metadata_object(filepath)
+        except Exception as e:
+            log_debug(f"_detect_vcodec: ffprobeでのコーデック検出に失敗 ({e!r})")
+            return None
+        for stream in metadata.get("streams", []):
+            if stream.get("codec_type") == "video":
+                return stream.get("codec_name")
         return None
 
-    def _trim_clip_locally(self, vcodec: str | None = None) -> None:
+    def _trim_clip_locally(self) -> None:
         """ダウンロード済みファイルをffmpegでローカルに切り出し、self._final_filepathを
         切り出し後のファイルで置き換える。
 
@@ -388,6 +404,9 @@ class DownloadWorker(QThread):
         音声は数十ms単位のフレームで独立して切り出せる(キーフレーム制約がない)ため、
         コーデックを問わず常にストリームコピーする(劣化なし)。映像は正確な時刻に合わせる
         ため再エンコードが避けられないので、体感できる劣化がほぼ出ない高めのCRFを使う。
+
+        切り出し自体に失敗しても、動画全体のダウンロードはすでに成功しているため、
+        ダウンロード全体を失敗扱いにはせず、切り出し前の全体ファイルをそのまま残す。
         """
         if not self._final_filepath or not os.path.isfile(self._final_filepath):
             return
@@ -397,23 +416,32 @@ class DownloadWorker(QThread):
         root, ext = os.path.splitext(self._final_filepath)
         trimmed_path = f"{root}.clip{ext}"
 
-        # -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから
-        # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)
-        input_opts = ["-ss", str(self.start_time)] if self.start_time else []
+        try:
+            vcodec = self._detect_vcodec(ffpp, self._final_filepath)
 
-        output_opts = ["-c:a", "copy"]
-        codec_prefix = (vcodec or "").split(".")[0].lower()
-        video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix)
-        if video_encoder:
-            encoder_name, crf = video_encoder
-            output_opts += ["-c:v", encoder_name, "-crf", crf]
-        if self.end_time is not None:
-            output_opts += ["-t", str(self.end_time - (self.start_time or 0))]
+            # -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから
+            # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)
+            input_opts = ["-ss", str(self.start_time)] if self.start_time else []
 
-        ffpp.real_run_ffmpeg([(self._final_filepath, input_opts)], [(trimmed_path, output_opts)])
+            output_opts = ["-c:a", "copy"]
+            codec_prefix = (vcodec or "").split(".")[0].lower()
+            video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix)
+            if video_encoder:
+                encoder_name, crf = video_encoder
+                output_opts += ["-c:v", encoder_name, "-crf", crf]
+            if self.end_time is not None:
+                output_opts += ["-t", str(self.end_time - (self.start_time or 0))]
 
-        os.replace(trimmed_path, self._final_filepath)
-        self.log.emit("切り出し完了")
+            ffpp.real_run_ffmpeg([(self._final_filepath, input_opts)], [(trimmed_path, output_opts)])
+            os.replace(trimmed_path, self._final_filepath)
+            self.log.emit("切り出し完了")
+        except Exception as e:
+            if os.path.isfile(trimmed_path):
+                try:
+                    os.remove(trimmed_path)
+                except OSError as cleanup_error:
+                    log_debug(f"_trim_clip_locally: 切り出し失敗後の一時ファイル削除に失敗 ({cleanup_error!r})")
+            self.log.emit(f"クリップ範囲の切り出しに失敗したため、動画全体を保存しました: {e}")
 
     def run(self):
         self._start_time = time.monotonic()
@@ -477,7 +505,7 @@ class DownloadWorker(QThread):
                 self.finished_error.emit("キャンセルされました")
             else:
                 if self.start_time is not None or self.end_time is not None:
-                    self._trim_clip_locally(self._selected_vcodec(probe_info))
+                    self._trim_clip_locally()
                 elapsed = time.monotonic() - self._start_time
                 if self._final_filepath and os.path.isfile(self._final_filepath):
                     size = format_size(os.path.getsize(self._final_filepath))

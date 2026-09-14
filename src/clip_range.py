@@ -63,10 +63,12 @@ def resolve_clip_range(start_text: str, end_text: str) -> tuple[float | None, fl
     """開始・終了時刻のテキストを検証し、(start_seconds, end_seconds) を返す。
 
     どちらも空欄の場合はクリップなしとして (None, None) を返す。
-    終了時刻が開始時刻以下の場合はValueErrorを送出する。
+    終了時刻が開始時刻以下の場合はValueErrorを送出する。開始時刻が未指定(先頭から)の
+    場合は0として比較するため、例えば開始欄が空欄のまま終了時刻に"0"を指定した場合も
+    (長さ0の無意味なクリップになってしまうため)エラーになる。
     """
     start = parse_clip_time(start_text)
     end = parse_clip_time(end_text)
-    if start is not None and end is not None and end <= start:
+    if end is not None and end <= (start if start is not None else 0.0):
         raise ValueError("終了時刻は開始時刻より後にしてください")
     return start, end
