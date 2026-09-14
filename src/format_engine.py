@@ -8,6 +8,7 @@ QtやQMessageBoxには一切依存しないため、単体テストがそのま�
 import copy
 from dataclasses import dataclass
 
+from config import CONFIG
 from formats import (
     BEST_AUDIO_COMPATIBLE_SORT,
     BEST_QUALITY_COMPATIBLE_SORT,
@@ -23,7 +24,7 @@ from yt_dlp_selection import select_formats
 MP3_POSTPROCESSOR = {
     "key": "FFmpegExtractAudio",
     "preferredcodec": "mp3",
-    "preferredquality": "192",
+    "preferredquality": CONFIG.mp3_quality,
 }
 
 

@@ -10,6 +10,7 @@ import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_range import clip_range_label
+from config import CONFIG
 from formats import format_size, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug
 from yt_dlp_selection import make_filtering_format_selector
@@ -22,13 +23,14 @@ class FormatListWorker(QThread):
 
     # 存在しない解像度への推測URL(yt-dlpが実在確認せずに組み立てたもの)に
     # 当たった場合に備え、上位候補を複数試す。多すぎるとタイムアウトが
-    # 積み重なるため妥当な件数に制限する。
-    MAX_THUMBNAIL_CANDIDATES = 5
+    # 積み重なるため妥当な件数に制限する。(config.jsonのthumbnail_max_candidatesで調整可能)
+    MAX_THUMBNAIL_CANDIDATES = CONFIG.thumbnail_max_candidates
     # サムネイルはGoogleのCDN(i.ytimg.com)から数十〜数百KB程度の画像を取得するだけの
     # 軽い処理で、正常時は1秒未満で応答が返る。通信が詰まった異常系で1候補あたり
     # 待たされる時間を抑えるため、一般的なWeb APIの目安より短めに設定する
-    # (候補は複数回試すため、最悪ケースはこの秒数×MAX_THUMBNAIL_CANDIDATESになる)
-    THUMBNAIL_FETCH_TIMEOUT_SECONDS = 5
+    # (候補は複数回試すため、最悪ケースはこの秒数×MAX_THUMBNAIL_CANDIDATESになる。
+    # config.jsonのthumbnail_fetch_timeout_secondsで調整可能)
+    THUMBNAIL_FETCH_TIMEOUT_SECONDS = CONFIG.thumbnail_fetch_timeout_seconds
 
     def __init__(self, url: str):
         super().__init__()
@@ -117,7 +119,7 @@ class StoryboardFragmentWorker(QThread):
 
     def run(self):
         try:
-            with urllib.request.urlopen(self.url, timeout=10) as resp:
+            with urllib.request.urlopen(self.url, timeout=CONFIG.storyboard_fetch_timeout_seconds) as resp:
                 data = resp.read()
             self.finished_ok.emit(data)
         except Exception as e:
@@ -289,14 +291,8 @@ class DownloadWorker(QThread):
     # クリップ切り出し時に正確な時刻へ合わせるため再エンコードする映像コーデックと、
     # 元のコーデックに対して体感できる劣化がほぼ出ないCRF値の組(値が小さいほど高品質)。
     # 未対応のコーデック(HEVC/AV1等)はffmpegの既定エンコーダ・画質設定にフォールバックする
-    _CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX = {
-        "avc1": ("libx264", "18"),
-        "h264": ("libx264", "18"),
-        "vp9": ("libvpx-vp9", "31"),
-        "vp09": ("libvpx-vp9", "31"),
-        "vp8": ("libvpx", "10"),
-        "vp08": ("libvpx", "10"),
-    }
+    # (config.jsonのclip_video_encoder_by_codec_prefixで調整可能)
+    _CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX = CONFIG.clip_video_encoder_by_codec_prefix
 
     def _postprocessor_hook(self, d):
         status = d.get("status")

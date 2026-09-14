@@ -28,7 +28,9 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "desktopicon"; Description: "デスクトップにアイコンを作成する"; GroupDescription: "追加のアイコン:"
 
 [Files]
-Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Excludes: "config.json"; Flags: ignoreversion recursesubdirs createallsubdirs
+; config.jsonはユーザーが編集している可能性があるため、更新時に上書きしない(初回インストール時のみ配置する)
+Source: "dist\{#MyAppName}\config.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "licenses\COPYING.GPLv3.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "licenses\FFMPEG_NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 

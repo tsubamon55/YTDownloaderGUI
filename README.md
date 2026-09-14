@@ -59,6 +59,22 @@ youtube-downloader/
 .venv\Scripts\python src\main.py
 ```
 
+## 設定ファイル (config.json)
+
+タイムアウトやmp3変換品質など、頻繁に変える必要はないが調整したい場合がある定数は、
+実行ファイルと同じフォルダ(開発時はプロジェクト直下)の `config.json` にまとめてあります。
+ファイルが無い/一部のキーが欠けている場合はコード内蔵の既定値が使われるため、
+変更したい項目だけを残して他を削除しても構いません。
+
+| キー | 既定値 | 内容 |
+| --- | --- | --- |
+| `thumbnail_max_candidates` | `5` | サムネイル取得時に試す候補URLの最大数 |
+| `thumbnail_fetch_timeout_seconds` | `5` | サムネイル1候補あたりの取得タイムアウト(秒) |
+| `storyboard_fetch_timeout_seconds` | `10` | クリップ範囲スライダーのプレビュー画像取得タイムアウト(秒) |
+| `info_fetch_debounce_ms` | `700` | URL入力後、自動でフォーマット取得を始めるまでの待ち時間(ミリ秒) |
+| `mp3_quality` | `"192"` | 「音声のみ (mp3)」選択時の変換ビットレート(kbps) |
+| `clip_video_encoder_by_codec_prefix` | (コード参照) | クリップ切り出し時の再エンコード設定(映像コーデック毎の `[エンコーダ, CRF値]`)。表に無いコーデックはffmpegの既定設定にフォールバックします |
+
 ## 配布用exeのビルド
 
 Python未インストールの環境でも動くexeを作成できます。ビルド設定は `YTDownloaderGUI.spec` にまとめてあるので、ソースコードを変更したら以下を実行するだけで再ビルドできます。

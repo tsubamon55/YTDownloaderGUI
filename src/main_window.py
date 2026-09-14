@@ -13,6 +13,7 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
 
 from clip_range import format_clip_time, parse_clip_time, resolve_clip_range
+from config import CONFIG
 from format_engine import (
     compute_simple_format_note,
     mismatched_selected_formats,
@@ -51,7 +52,7 @@ class MainWindow(Ui_MainWindow):
 
         self._info_fetch_timer = QTimer(self)
         self._info_fetch_timer.setSingleShot(True)
-        self._info_fetch_timer.setInterval(700)
+        self._info_fetch_timer.setInterval(CONFIG.info_fetch_debounce_ms)
         self._info_fetch_timer.timeout.connect(lambda: self.fetch_formats(auto=True))
 
         self.settings = QSettings("ytdlp-gui", "YTDownloaderGUI")
