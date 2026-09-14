@@ -329,9 +329,14 @@ class RangeSlider(QWidget):
         painter.setBrush(QColor(128, 128, 128, 90))
         painter.drawRoundedRect(groove_rect, 2, 2)
 
+        # disabled中(URL未入力等)は有効時と同じ見た目にならないよう、
+        # 選択バー・ハンドルをグレーにする(Qt標準ウィジェットと違い自前描画のため
+        # isEnabled()を明示的に見ないと自動でグレーアウトされない)
+        accent_color = QColor("#1a73e8") if self.isEnabled() else QColor(160, 160, 160)
+
         low_x, high_x = self._value_to_x(self._low), self._value_to_x(self._high)
         selected_rect = QRectF(low_x, mid_y - self._GROOVE_HEIGHT / 2, high_x - low_x, self._GROOVE_HEIGHT)
-        painter.setBrush(QColor("#1a73e8"))
+        painter.setBrush(accent_color)
         painter.drawRoundedRect(selected_rect, 2, 2)
 
         painter.setPen(QPen(QColor("#ffffff"), 1))

@@ -108,6 +108,23 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.window.on_url_changed("https://example.com/watch?v=abc")
         self.assertTrue(self.window._info_fetch_timer.isActive())
 
+    def test_clearing_url_after_video_loaded_resets_and_disables_clip_slider(self):
+        # 動画読み込み済みの状態を再現する
+        self.window.video_duration = 635.0
+        self.window.storyboard_format = make_storyboard()
+        self.window._storyboard_cache["https://example.com/x.jpg"] = QPixmap(10, 10)
+        self.window.clip_range_slider.setEnabled(True)
+        self.window.clip_range_slider.setRange(0, 635)
+        self.window.clip_duration_label.setText("動画の長さ: 10:35")
+
+        self.window.on_url_changed("")
+
+        self.assertFalse(self.window.clip_range_slider.isEnabled())
+        self.assertIsNone(self.window.video_duration)
+        self.assertIsNone(self.window.storyboard_format)
+        self.assertEqual(self.window._storyboard_cache, {})
+        self.assertEqual(self.window.clip_duration_label.text(), "")
+
 
 class OnDetailToggledTest(MainWindowTestCase):
     def test_checked_shows_detail_container_and_hides_simple(self):

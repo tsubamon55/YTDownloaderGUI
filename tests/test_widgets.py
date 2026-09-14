@@ -1,7 +1,9 @@
-"""widgets.py の RangeSlider に対する単体テスト(値域の計算・クランプ処理のみ)。
+"""widgets.py の RangeSlider に対する単体テスト。
 
-実際のマウスドラッグ描画はQtのイベントループ・ウィンドウ表示を要するため対象外とし、
-座標<->値の変換や範囲外入力のクランプなど、座標系に依存しない値の扱いだけを検証する。
+主眼は座標<->値の変換や範囲外入力のクランプなど、座標系に依存しない値の扱いだが、
+disabled時の見た目(グレーアウト)についてはgrab()で実際に描画した結果の画素色を
+検証する(DisabledAppearanceTest)。それ以外の実際のマウスドラッグ描画は
+Qtのイベントループ・ウィンドウ表示を要するため対象外とする。
 """
 
 import os
@@ -93,6 +95,32 @@ class DragTest(unittest.TestCase):
         low, high = slider.values()
         self.assertLessEqual(low, high)
         self.assertEqual(high, 30)
+
+
+class DisabledAppearanceTest(unittest.TestCase):
+    """disabled時(URL未入力等)は有効時と見分けられるよう選択バーがグレーアウトされ、
+    通常時の青色のままにならないことを実際の描画結果(画素色)で検証する"""
+
+    @staticmethod
+    def _selected_bar_color(slider: RangeSlider):
+        slider.resize(200, 24)
+        slider.setRange(0, 100)
+        slider.setValues(0, 100)
+        image = slider.grab().toImage()
+        return image.pixelColor(100, 12)  # ハンドルに被らない選択バー中央付近
+
+    def test_disabled_slider_is_grayed_out(self):
+        slider = RangeSlider()
+        slider.setEnabled(True)
+        enabled_color = self._selected_bar_color(slider)
+
+        slider.setEnabled(False)
+        disabled_color = self._selected_bar_color(slider)
+
+        self.assertNotEqual(enabled_color.name(), disabled_color.name())
+        # 無効時はグレー(R=G=B)であることも確認する
+        self.assertEqual(disabled_color.red(), disabled_color.green())
+        self.assertEqual(disabled_color.green(), disabled_color.blue())
 
 
 class DragPreviewTest(unittest.TestCase):

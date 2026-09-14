@@ -118,6 +118,18 @@ class MainWindow(Ui_MainWindow):
             self.title_label.setText("")
             self.thumbnail_label.clear()
             self.status_label.setText(IDLE_STATUS_TEXT)
+            # URLが空/不正な間、古い動画の長さに基づいたクリップスライダーが
+            # 操作可能なまま残ってしまわないようにリセットする
+            self._reset_video_state()
+
+    def _reset_video_state(self) -> None:
+        """動画の長さ・ストーリーボード関連の状態を初期化し、クリップスライダーを
+        無効化する。URLが空/不正になった時、および新たな取得を始める前に呼ぶ"""
+        self.video_duration = None
+        self.storyboard_format = None
+        self._storyboard_cache = {}
+        self.clip_range_slider.setEnabled(False)
+        self.clip_duration_label.setText("")
 
     def on_detail_toggled(self, checked: bool) -> None:
         self.detail_toggle_btn.setText("簡易設定 ▴" if checked else "詳細設定 ▾")
@@ -160,11 +172,7 @@ class MainWindow(Ui_MainWindow):
         self.thumbnail_label.clear()
         self.info_ready = False
         self.available_formats = []
-        self.video_duration = None
-        self.storyboard_format = None
-        self._storyboard_cache = {}
-        self.clip_range_slider.setEnabled(False)
-        self.clip_duration_label.setText("")
+        self._reset_video_state()
         self.simple_format_note_label.setText("")
         self.simple_format_note_label.setVisible(False)
         self.download_btn.setEnabled(False)
@@ -597,10 +605,7 @@ class MainWindow(Ui_MainWindow):
         self.video_format_combo.clear()
         self.audio_format_combo.clear()
         self.available_formats = []
-        self.video_duration = None
-        self.storyboard_format = None
-        self._storyboard_cache = {}
-        self.clip_duration_label.setText("")
+        self._reset_video_state()
         self.simple_format_note_label.setText("")
         self.simple_format_note_label.setVisible(False)
         self.set_inputs_enabled(True)

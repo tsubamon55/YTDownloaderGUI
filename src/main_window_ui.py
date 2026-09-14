@@ -231,10 +231,15 @@ class Ui_MainWindow(QMainWindow):
         clip_layout.setSpacing(6)
 
         # start_edit/end_editをスライダーの両端に離して置くと視線が左右に散るため、
-        # 「スライダー→中央に寄せた開始〜終了」の2段に積んで一体感を持たせる
+        # 「スライダー→中央に寄せた開始〜終了」の2段に積んで一体感を持たせる。
+        # スライダーをコンテナ全幅(728px程度)まで伸ばすと、下の開始〜終了欄(約210px)
+        # に対して幅が広すぎて不自然に見えるため、最大幅を設けて中央寄せにする
         self.clip_range_slider = RangeSlider()
         self.clip_range_slider.setEnabled(False)
-        clip_layout.addWidget(self.clip_range_slider)
+        # alignment指定でaddWidgetすると、伸縮ではなくsizeHint基準の配置になる。
+        # RangeSliderはsizeHintを持たないため、明示的にfixedWidthを与える必要がある
+        self.clip_range_slider.setFixedWidth(320)
+        clip_layout.addWidget(self.clip_range_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         clip_values_row = QHBoxLayout()
         clip_values_row.setSpacing(6)
