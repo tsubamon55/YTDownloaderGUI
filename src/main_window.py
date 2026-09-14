@@ -8,9 +8,9 @@ import os
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QSettings, QTimer
+from PyQt6.QtCore import QEvent, QObject, QSettings, QTimer
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
 
 from clip_range import format_clip_time, parse_clip_time, resolve_clip_range
 from format_engine import (
@@ -60,9 +60,21 @@ class MainWindow(Ui_MainWindow):
 
         self.setup_ui(saved_out_dir)
         self._connect_signals()
+        # 入力欄をクリックした後、ラベルや背景などフォーカスを持たない場所をクリックしても
+        # カーソル/フォーカス枠が残り続けるため、アプリ全体のクリックを監視して解除する
+        QApplication.instance().installEventFilter(self)
 
         self.auto_paste_from_clipboard()
         self._sync_window_height()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.MouseButtonPress:
+            focus_widget = QApplication.focusWidget()
+            if isinstance(focus_widget, QLineEdit) and focus_widget.window() is self:
+                clicked_widget = QApplication.widgetAt(event.globalPosition().toPoint())
+                if clicked_widget is not focus_widget:
+                    focus_widget.clearFocus()
+        return super().eventFilter(obj, event)
 
     def _connect_signals(self) -> None:
         """setup_uiが生成したウィジェットのシグナルを、このクラスが持つハンドラへ接続する"""
