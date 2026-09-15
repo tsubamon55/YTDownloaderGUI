@@ -599,7 +599,7 @@ class DetectVcodecTest(unittest.TestCase):
 
 
 class ProbeVideoStreamsTest(unittest.TestCase):
-    """_probe_video_streamsは、_detect_vcodecと_attached_pic_video_indicesの両方が
+    """_probe_video_streamsは、_detect_vcodecと_attached_pic_absolute_indicesの両方が
     使う生のffprobeメタデータを1回の呼び出しでまとめて取得する。失敗時は空の
     メタデータを返し、呼び出し元が通常のフォールバック動作を続けられるようにする"""
 
@@ -616,6 +616,168 @@ class ProbeVideoStreamsTest(unittest.TestCase):
         ffpp = MagicMock()
         ffpp.get_metadata_object.side_effect = RuntimeError("ffprobe not found")
         self.assertEqual(DownloadWorker._probe_video_streams(ffpp, "C:/out/video.mp4"), {})
+
+
+class MainVideoStreamAbsoluteIndexTest(unittest.TestCase):
+    def test_returns_index_of_first_non_attached_pic_video_stream(self):
+        metadata = {
+            "streams": [
+                {"codec_type": "audio"},
+                {"codec_type": "video", "disposition": {"attached_pic": 0}},
+            ],
+        }
+        self.assertEqual(DownloadWorker._main_video_stream_absolute_index(metadata), 1)
+
+    def test_skips_leading_attached_pic_stream(self):
+        """埋め込みサムネイルが本編映像より先(絶対インデックス0)に来る場合でも、
+        本編映像側の絶対インデックスを返すことを確認する"""
+        metadata = {
+            "streams": [
+                {"codec_type": "video", "disposition": {"attached_pic": 1}},
+                {"codec_type": "audio"},
+                {"codec_type": "video", "disposition": {"attached_pic": 0}},
+            ],
+        }
+        self.assertEqual(DownloadWorker._main_video_stream_absolute_index(metadata), 2)
+
+    def test_no_video_stream_returns_none(self):
+        metadata = {"streams": [{"codec_type": "audio"}]}
+        self.assertIsNone(DownloadWorker._main_video_stream_absolute_index(metadata))
+
+
+class AttachedPicAbsoluteIndicesTest(unittest.TestCase):
+    def test_returns_absolute_indices_of_attached_pic_streams(self):
+        metadata = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264"},
+                {"codec_type": "audio", "codec_name": "aac"},
+                {"codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+            ],
+        }
+        self.assertEqual(DownloadWorker._attached_pic_absolute_indices(metadata), [2])
+
+    def test_no_attached_pic_returns_empty_list(self):
+        metadata = {"streams": [{"codec_type": "video", "codec_name": "h264"}]}
+        self.assertEqual(DownloadWorker._attached_pic_absolute_indices(metadata), [])
+
+
+class ExtractAttachedPicsTest(unittest.TestCase):
+    """_extract_attached_picsは、attached_picストリームをシークを伴わない単発の
+    ffmpeg呼び出しで個別の画像ファイルへ抽出する。切り抜き本体の出力側シークが
+    低pts(通常0)の静止画コマを問答無用で切り捨ててしまう問題を避けるため、
+    切り抜きより前にこの関数で退避しておく"""
+
+    def test_extracts_each_attached_pic_with_codec_based_extension(self):
+        ffpp = MagicMock()
+        metadata = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264"},
+                {"codec_type": "audio", "codec_name": "aac"},
+                {"codec_type": "video", "codec_name": "png", "disposition": {"attached_pic": 1}},
+            ],
+        }
+        worker = make_worker()
+        paths = worker._extract_attached_pics(ffpp, "C:/out/video.mp4", metadata, [2])
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].endswith(".png"))
+        (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+        self.assertEqual(input_specs, [("C:/out/video.mp4", [])])
+        self.assertEqual(
+            output_specs, [(paths[0], ["-map", "0:2", "-c", "copy", "-f", "image2", "-update", "1"])]
+        )
+
+    def test_unknown_codec_defaults_to_jpg_extension(self):
+        ffpp = MagicMock()
+        metadata = {"streams": [{"codec_type": "video", "codec_name": "webp", "disposition": {"attached_pic": 1}}]}
+        worker = make_worker()
+        paths = worker._extract_attached_pics(ffpp, "C:/out/video.mp4", metadata, [0])
+        self.assertTrue(paths[0].endswith(".jpg"))
+
+    def test_extraction_failure_is_skipped_not_raised(self):
+        ffpp = MagicMock()
+        ffpp.real_run_ffmpeg.side_effect = RuntimeError("ffmpeg crashed")
+        metadata = {"streams": [{"codec_type": "video", "codec_name": "png", "disposition": {"attached_pic": 1}}]}
+        worker = make_worker()
+        paths = worker._extract_attached_pics(ffpp, "C:/out/video.mp4", metadata, [0])
+        self.assertEqual(paths, [])
+
+
+class ReattachThumbnailsTest(unittest.TestCase):
+    def test_maps_video_and_thumbnails_with_correct_disposition_index(self):
+        ffpp = MagicMock()
+
+        def fake_run(input_specs, output_specs):
+            open(output_specs[0][0], "w").close()
+
+        ffpp.real_run_ffmpeg.side_effect = fake_run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = os.path.join(tmp, "clip.mp4")
+            open(video_path, "w").close()
+            thumb_path = os.path.join(tmp, "clip.thumb2.png")
+            open(thumb_path, "w").close()
+
+            DownloadWorker._reattach_thumbnails(ffpp, video_path, 2, [thumb_path])
+
+            (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            self.assertEqual(input_specs, [(video_path, []), (thumb_path, [])])
+            self.assertEqual(
+                output_specs[0][1], ["-map", "0", "-map", "1", "-c", "copy", "-disposition:2", "attached_pic"]
+            )
+            self.assertTrue(os.path.isfile(video_path))
+
+
+class NearestKeyframeAtOrBeforeTest(unittest.TestCase):
+    """_nearest_keyframe_at_or_beforeは、入力側の高速-ssが実際に着地する時刻
+    (targetを超えない最も近いキーフレーム)を求める。_trim_clip_locallyはこれと
+    targetの差分だけを出力側の正確シークに使うことで、動画終盤の切り抜きで差分を
+    求めずtargetをそのまま2回指定してしまい入力範囲を飛び越える(出力が空になる)
+    のを防ぐ"""
+
+    @staticmethod
+    def _fake_ffpp(keyframe_times: list[float]):
+        ffpp = MagicMock()
+        ffpp.get_metadata_object.return_value = {
+            "frames": [{"key_frame": 1, "pts_time": str(t)} for t in keyframe_times]
+        }
+        return ffpp
+
+    def test_returns_largest_keyframe_at_or_before_target(self):
+        ffpp = self._fake_ffpp([0.0, 5.0, 10.0, 15.0, 20.0])
+        self.assertEqual(
+            DownloadWorker._nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 12.0), 10.0
+        )
+
+    def test_exact_match_returns_same_value(self):
+        ffpp = self._fake_ffpp([0.0, 5.0, 10.0])
+        self.assertEqual(
+            DownloadWorker._nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 10.0), 10.0
+        )
+
+    def test_target_before_first_keyframe_returns_zero(self):
+        ffpp = self._fake_ffpp([5.0, 10.0])
+        self.assertEqual(
+            DownloadWorker._nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 2.0), 0.0
+        )
+
+    def test_no_keyframes_returns_zero(self):
+        ffpp = self._fake_ffpp([])
+        self.assertEqual(
+            DownloadWorker._nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 12.0), 0.0
+        )
+
+    def test_ffprobe_failure_returns_zero(self):
+        ffpp = MagicMock()
+        ffpp.get_metadata_object.side_effect = RuntimeError("ffprobe not found")
+        self.assertEqual(
+            DownloadWorker._nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 12.0), 0.0
+        )
+
+    def test_selects_requested_stream_and_scans_keyframes_only(self):
+        ffpp = self._fake_ffpp([0.0])
+        DownloadWorker._nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 3, 12.0)
+        _, kwargs = ffpp.get_metadata_object.call_args
+        self.assertEqual(kwargs["opts"], ["-select_streams", "3", "-skip_frame", "nokey", "-show_frames"])
 
 
 class TrimClipLocallyTest(unittest.TestCase):
@@ -639,6 +801,70 @@ class TrimClipLocallyTest(unittest.TestCase):
         ffpp.real_run_ffmpeg.side_effect = fake_run
         return ffpp
 
+    @staticmethod
+    def _make_fake_ffpp_with_keyframes(vcodec: str, keyframe_times: list[float]):
+        """_make_fake_ffppと異なり、get_metadata_objectの応答をstreams向け問い合わせ
+        (streams/vcodec検出用)とframes向け問い合わせ(-show_framesを含む、
+        _nearest_keyframe_at_or_before用)とで出し分ける。入力側の高速シークが
+        実際に着地するキーフレーム時刻と、出力側の正確シークに使う差分が
+        正しく分割されることを検証するテスト専用"""
+        ffpp = MagicMock()
+
+        def fake_get_metadata_object(path, opts=()):
+            if "-show_frames" in opts:
+                return {"frames": [{"key_frame": 1, "pts_time": str(t)} for t in keyframe_times]}
+            return {"streams": [{"codec_type": "video", "codec_name": vcodec}]}
+
+        ffpp.get_metadata_object.side_effect = fake_get_metadata_object
+
+        def fake_run(input_specs, output_specs):
+            open(output_specs[0][0], "w").close()
+
+        ffpp.real_run_ffmpeg.side_effect = fake_run
+        return ffpp
+
+    def test_splits_seek_into_coarse_keyframe_seek_and_accurate_remainder(self):
+        """入力側の高速-ssはキーフレーム単位でしか正確に戻れないため、実際に着地する
+        キーフレーム時刻をffprobeで求め、その差分だけを出力側の正確シークに回すことを
+        確認する(音声等のストリームコピーもこの差分シークの対象になる)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=12.0, end_time=22.0)
+            worker._final_filepath = final_path
+
+            ffpp = self._make_fake_ffpp_with_keyframes("h264", [0.0, 5.0, 10.0, 15.0, 20.0])
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally()
+
+            (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            self.assertEqual(input_specs, [(final_path, ["-ss", "10.0"])])
+            output_opts = output_specs[0][1]
+            self.assertEqual(output_opts[:2], ["-ss", "2.0"])
+
+    def test_seek_near_end_of_video_does_not_duplicate_full_start_time(self):
+        """回帰防止: 以前は入力側・出力側の両方に同じstart_timeをそのまま指定して
+        いたため、動画終盤(残り時間が短い区間)を切り抜くと出力側のシークが
+        入力範囲を飛び越えてしまい、出力が0バイトになるバグがあった
+        (例: 全長283秒の動画で177秒地点から切り抜くと、177+177=354秒分探してしまい
+        何も出力されない)。差分だけを出力側に渡すことで、残り時間に関わらず
+        小さな値(ここでは2.0秒)に収まることを確認する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=177.0, end_time=187.0)
+            worker._final_filepath = final_path
+
+            keyframe_times = [float(t) for t in range(0, 283, 5)]  # 0,5,10,...,280 (GOP=5s)
+            ffpp = self._make_fake_ffpp_with_keyframes("h264", keyframe_times)
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally()
+
+            (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            self.assertEqual(input_specs, [(final_path, ["-ss", "175.0"])])
+            output_opts = output_specs[0][1]
+            self.assertEqual(output_opts[:2], ["-ss", "2.0"])
+
     def test_noop_when_final_filepath_missing(self):
         worker = make_worker(end_time=20.0)
         with patch("workers.FFmpegPostProcessor") as ffpp_cls:
@@ -660,7 +886,8 @@ class TrimClipLocallyTest(unittest.TestCase):
             worker._final_filepath = final_path
 
             ffpp = self._make_fake_ffpp("h264")
-            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp), \
+                 patch.object(DownloadWorker, "_nearest_keyframe_at_or_before", return_value=10.0):
                 worker._trim_clip_locally()
 
             ffpp.real_run_ffmpeg.assert_called_once()
@@ -669,7 +896,7 @@ class TrimClipLocallyTest(unittest.TestCase):
             [(trimmed_path, output_opts)] = output_specs
             self.assertEqual(
                 output_opts,
-                ["-ss", "10.0", "-map", "0", "-c:a", "copy", "-c:t", "copy",
+                ["-map", "0", "-c:a", "copy", "-c:t", "copy",
                  "-c:v:0", "libx264", "-crf", "18", "-t", "20.0"],
             )
             self.assertTrue(trimmed_path.startswith(os.path.join(tmp, "My Video")))
@@ -708,7 +935,8 @@ class TrimClipLocallyTest(unittest.TestCase):
             worker._final_filepath = final_path
 
             ffpp = self._make_fake_ffpp("h264")
-            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp), \
+                 patch.object(DownloadWorker, "_nearest_keyframe_at_or_before", return_value=10.0):
                 worker._trim_clip_locally()
 
             (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -718,7 +946,7 @@ class TrimClipLocallyTest(unittest.TestCase):
                 [
                     (
                         output_specs[0][0],
-                        ["-ss", "10.0", "-map", "0", "-c:a", "copy", "-c:t", "copy",
+                        ["-map", "0", "-c:a", "copy", "-c:t", "copy",
                          "-c:v:0", "libx264", "-crf", "18"],
                     )
                 ],
@@ -739,7 +967,7 @@ class TrimClipLocallyTest(unittest.TestCase):
 
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
             output_opts = output_specs[0][1]
-            self.assertEqual(output_opts[:6], ["-ss", "10.0", "-map", "0", "-c:a", "copy"])
+            self.assertEqual(output_opts[:4], ["-map", "0", "-c:a", "copy"])
             self.assertNotIn("-c:v:0", output_opts)
 
     def test_vp9_uses_libvpx_vp9_encoder(self):
@@ -757,9 +985,11 @@ class TrimClipLocallyTest(unittest.TestCase):
             output_opts = output_specs[0][1]
             self.assertIn("libvpx-vp9", output_opts)
 
-    def test_embedded_thumbnail_stream_is_preserved_and_not_reencoded(self):
-        """埋め込みサムネイル(attached_pic映像ストリーム)は本編映像の切り出し・
-        再エンコードに巻き込まれず、常にコピー+disposition維持で出力に残ることを確認する"""
+    def test_embedded_thumbnail_is_extracted_before_trim_and_reattached_after(self):
+        """埋め込みサムネイル(attached_pic映像ストリーム)は、切り抜き本体の
+        ffmpeg呼び出しには一切含めず(出力側の正確シークが低pts(通常0)の
+        静止画コマも問答無用で切り捨ててしまうため)、事前に画像として抽出し、
+        切り抜き完了後に(シークを伴わない)別passで単純に付け直すことを確認する"""
         with tempfile.TemporaryDirectory() as tmp:
             final_path = os.path.join(tmp, "My Video.mp4")
             open(final_path, "w").close()
@@ -779,19 +1009,42 @@ class TrimClipLocallyTest(unittest.TestCase):
                 open(output_specs[0][0], "w").close()
 
             ffpp.real_run_ffmpeg.side_effect = fake_run
-            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp), \
+                 patch.object(DownloadWorker, "_nearest_keyframe_at_or_before", return_value=10.0):
                 worker._trim_clip_locally()
 
-            (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
-            output_opts = output_specs[0][1]
+            calls = ffpp.real_run_ffmpeg.call_args_list
+            self.assertEqual(len(calls), 3)
+
+            # 1. 抽出: attached_pic(絶対インデックス2)だけをシーク無しで画像へ抽出する
+            extract_input_specs, extract_output_specs = calls[0].args
+            self.assertEqual(extract_input_specs, [(final_path, [])])
+            extract_thumb_path, extract_opts = extract_output_specs[0]
             self.assertEqual(
-                output_opts,
+                extract_opts, ["-map", "0:2", "-c", "copy", "-f", "image2", "-update", "1"]
+            )
+            self.assertTrue(extract_thumb_path.endswith(".jpg"))  # mjpeg -> jpg
+
+            # 2. 切り抜き本体: attached_picを-map -0:2で除外し、本編映像のみ再エンコードする
+            _, trim_output_specs = calls[1].args
+            trim_opts = trim_output_specs[0][1]
+            self.assertEqual(
+                trim_opts,
                 [
-                    "-ss", "10.0", "-map", "0", "-c:a", "copy", "-c:t", "copy",
+                    "-map", "0", "-map", "-0:2",
+                    "-c:a", "copy", "-c:t", "copy",
                     "-c:v:0", "libx264", "-crf", "18",
-                    "-c:v:1", "copy", "-disposition:v:1", "attached_pic",
                     "-t", "20.0",
                 ],
+            )
+
+            # 3. 再添付: シーク無しで動画+抽出済み画像をコピーのみでマージする
+            #    (映像+音声の2ストリームの後に付くため disposition:2)
+            reattach_input_specs, reattach_output_specs = calls[2].args
+            self.assertEqual(reattach_input_specs, [(final_path, []), (extract_thumb_path, [])])
+            reattach_opts = reattach_output_specs[0][1]
+            self.assertEqual(
+                reattach_opts, ["-map", "0", "-map", "1", "-c", "copy", "-disposition:2", "attached_pic"]
             )
 
     def test_unrecognized_codec_omits_explicit_video_encoder(self):
@@ -806,7 +1059,8 @@ class TrimClipLocallyTest(unittest.TestCase):
             worker._final_filepath = final_path
 
             ffpp = self._make_fake_ffpp("hevc")
-            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp), \
+                 patch.object(DownloadWorker, "_nearest_keyframe_at_or_before", return_value=10.0):
                 worker._trim_clip_locally()
 
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -815,7 +1069,7 @@ class TrimClipLocallyTest(unittest.TestCase):
             self.assertNotIn("-c", output_opts)
             self.assertEqual(
                 output_opts,
-                ["-ss", "10.0", "-map", "0", "-c:a", "copy", "-c:t", "copy", "-t", "20.0"],
+                ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-t", "20.0"],
             )
 
     def test_detection_failure_omits_explicit_video_encoder(self):
@@ -839,7 +1093,7 @@ class TrimClipLocallyTest(unittest.TestCase):
             self.assertNotIn("-c", output_opts)
             self.assertEqual(
                 output_opts,
-                ["-ss", "10.0", "-map", "0", "-c:a", "copy", "-c:t", "copy", "-t", "20.0"],
+                ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-t", "20.0"],
             )
 
     def test_ffmpeg_failure_does_not_raise_and_keeps_full_video(self):
