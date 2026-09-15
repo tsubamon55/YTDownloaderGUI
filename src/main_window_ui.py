@@ -235,39 +235,22 @@ class Ui_MainWindow(QMainWindow):
         detail_layout.setSpacing(6)
 
         # 現時点では詳細設定の中身は切り抜き範囲のみだが、トグル名自体からは
-        # 何が展開されるか分からないため、見出しラベルで内容を明示する
-        detail_layout.addWidget(QLabel("切り抜き範囲:"))
-
-        # start_edit/end_editをスライダーの両端に離して置くと視線が左右に散るため、
-        # 「スライダー→中央に寄せた開始〜終了」の2段に積んで一体感を持たせる。
-        # スライダーをコンテナ全幅(728px程度)まで伸ばすと、下の開始〜終了欄(約210px)
-        # に対して幅が広すぎて不自然に見えるため、最大幅を設けて中央寄せにする
-        clip_slider_row = QHBoxLayout()
-        clip_slider_row.setSpacing(8)
-        clip_slider_row.addStretch(1)
-        # 動画の長さラベルをスライダーの右に置くと、その分だけスライダー自体が
-        # コンテナ中央より左に寄って見えるため、同じ幅の透明スペーサーを左側にも
-        # 置いてスライダー単体が中央に来るよう相殺する
+        # 何が展開されるか分からないため、見出しラベルで内容を明示する。
+        # 動画の長さは同じ見出し行の右端に添え、スライダー行には含めない
+        # (含めるとスライダー自体を打ち消すためのスペーサーが必要になり、
+        # 結果としてスライダーが下の開始〜終了欄と揃わず不自然にずれて見えるため)
+        clip_heading_row = QHBoxLayout()
+        clip_heading_row.addWidget(QLabel("切り抜き範囲:"))
+        clip_heading_row.addStretch(1)
         self.clip_duration_label = QLabel("")
         self.clip_duration_label.setStyleSheet("color: #808080;")
-        # 空文字列から「動画の長さ: ...」に変わると幅が広がり、左右均等のstretchが
-        # 詰められてスライダーごと左にずれてしまうため、想定最大幅を先取りして固定する
-        duration_metrics = self.clip_duration_label.fontMetrics()
-        duration_label_width = duration_metrics.horizontalAdvance("動画の長さ: 99:59:59")
-        self.clip_duration_label.setFixedWidth(duration_label_width)
-        left_spacer = QWidget()
-        left_spacer.setFixedWidth(duration_label_width)
-        clip_slider_row.addWidget(left_spacer)
+        clip_heading_row.addWidget(self.clip_duration_label)
+        detail_layout.addLayout(clip_heading_row)
+
+        # 保存先欄・形式コンボ等の他の行と同じく、左端からコンテナ全幅まで
+        # 伸ばして揃える(ドラッグ操作の分解能も上がる)
         self.clip_range_slider = RangeSlider()
-        self.clip_range_slider.setFixedWidth(320)
-        clip_slider_row.addWidget(self.clip_range_slider)
-        # 動画の長さは開始・終了欄に入力すると(プレースホルダーが消えて)見えなくなるため、
-        # 「合計がいくつか」を示す目盛りの役割としてスライダーの右に固定表示する
-        # (開始・終了欄はユーザーが選んだ値であり、動画全体の長さとは意味が異なるため
-        # 隣接させると混同しやすい。範囲そのものを表すスライダーに添えるほうが自然)
-        clip_slider_row.addWidget(self.clip_duration_label)
-        clip_slider_row.addStretch(1)
-        detail_layout.addLayout(clip_slider_row)
+        detail_layout.addWidget(self.clip_range_slider)
 
         # プレースホルダーは入力すると消えてラベルの役目を失うため、
         # 「開始:」「終了:」は恒久的に見えるQLabelとして左に添える
