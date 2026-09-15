@@ -43,7 +43,11 @@ def is_network_error(exc: BaseException) -> bool:
         if current is None or id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, _NETWORK_ERROR_TYPES):
+        if isinstance(current, urllib.error.HTTPError):
+            # HTTPErrorはURLErrorのサブクラスだが、これはサーバーから正常にHTTP応答が
+            # 返ってきた場合(404/403/429等)であり、ネットワーク切断とは別の問題なので除外する
+            pass
+        elif isinstance(current, _NETWORK_ERROR_TYPES):
             return True
         # yt_dlp.utils.DownloadErrorはsys.exc_info()のタプルを保持しており、
         # 暗黙の例外チェーン(__context__)が働かないケースがあるため明示的にも辿る
@@ -205,15 +209,25 @@ class DownloadWorker(QThread):
     def cancel(self):
         self._is_cancelled = True
 
-    def _cleanup_leftover_files(self):
-        """キャンセル時にダウンロード先へ残った未完成ファイル(.part等)を削除する"""
+    def _cleanup_leftover_files(self, preserve_final: bool = False):
+        """キャンセル時・エラー時にダウンロード先へ残った未完成ファイル(.part等)を削除する。
+
+        preserve_final=Trueの場合、既に完成している最終出力ファイル(self._final_filepath)は
+        削除対象から除外する。本編の生成自体は成功し、その後のサムネイル埋め込み等の
+        後処理だけが失敗したケースで、完成済みファイルまで消してしまわないようにするため。
+        """
         if not self._unique_title or not os.path.isdir(self.out_dir):
             return
         prefix = f"{self._unique_title}."
+        keep_path = None
+        if preserve_final and self._final_filepath and os.path.isfile(self._final_filepath):
+            keep_path = os.path.normcase(os.path.abspath(self._final_filepath))
         for name in os.listdir(self.out_dir):
             if not name.startswith(prefix):
                 continue
             path = os.path.join(self.out_dir, name)
+            if keep_path and os.path.normcase(os.path.abspath(path)) == keep_path:
+                continue
             try:
                 os.remove(path)
                 self.log.emit(f"未完了ファイルを削除しました: {name}")
@@ -584,8 +598,10 @@ class DownloadWorker(QThread):
                 self.finished_ok.emit()
         except Exception as e:
             # キャンセル・ネットワーク切断・その他の失敗いずれの場合も、保存先に
-            # 中途半端な.part等のファイルが残らないよう必ず削除する
-            self._cleanup_leftover_files()
+            # 中途半端な.part等のファイルが残らないよう必ず削除する。ただし本編の
+            # ダウンロード/マージ自体は完了しており、後続の後処理だけが失敗した
+            # ケースでは、完成済みファイルは残す
+            self._cleanup_leftover_files(preserve_final=True)
             if not self._is_cancelled and is_network_error(e):
                 message = (
                     "ネットワーク接続が切断されたため、ダウンロードを中断しました。"
