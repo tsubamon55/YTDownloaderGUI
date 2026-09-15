@@ -1,12 +1,17 @@
 """バックグラウンド処理(フォーマット一覧取得・ダウンロード)を行うQThread群"""
 
+import http.client
 import os
+import socket
+import ssl
 import time
+import urllib.error
 import urllib.request
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import yt_dlp
+from yt_dlp.networking.exceptions import TransportError
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_range import clip_range_label
@@ -14,6 +19,40 @@ from config import CONFIG
 from formats import format_size, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug
 from yt_dlp_selection import make_filtering_format_selector
+
+# ネットワーク切断・タイムアウト等を表す例外型。yt-dlpは内部でurllib/http.client/sslの
+# 例外を捕まえてDownloadError等でラップし直すため、直接の型だけでなく原因チェーン
+# (__cause__/__context__、およびyt-dlp独自のexc_info属性)も辿って判定する
+_NETWORK_ERROR_TYPES = (
+    urllib.error.URLError,
+    socket.timeout,
+    TimeoutError,
+    ConnectionError,
+    http.client.HTTPException,
+    ssl.SSLError,
+    TransportError,
+)
+
+
+def is_network_error(exc: BaseException) -> bool:
+    """例外(またはその原因チェーン)にネットワーク関連の例外が含まれるかを調べる"""
+    seen: set[int] = set()
+    pending = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, _NETWORK_ERROR_TYPES):
+            return True
+        # yt_dlp.utils.DownloadErrorはsys.exc_info()のタプルを保持しており、
+        # 暗黙の例外チェーン(__context__)が働かないケースがあるため明示的にも辿る
+        exc_info = getattr(current, "exc_info", None)
+        if exc_info and len(exc_info) > 1:
+            pending.append(exc_info[1])
+        pending.append(current.__cause__)
+        pending.append(current.__context__)
+    return False
 
 
 class FormatListWorker(QThread):
@@ -510,7 +549,15 @@ class DownloadWorker(QThread):
                 self.log.emit("完了しました")
                 self.finished_ok.emit()
         except Exception as e:
-            self.log.emit(f"エラー: {e}")
-            if self._is_cancelled:
-                self._cleanup_leftover_files()
-            self.finished_error.emit(str(e))
+            # キャンセル・ネットワーク切断・その他の失敗いずれの場合も、保存先に
+            # 中途半端な.part等のファイルが残らないよう必ず削除する
+            self._cleanup_leftover_files()
+            if not self._is_cancelled and is_network_error(e):
+                message = (
+                    "ネットワーク接続が切断されたため、ダウンロードを中断しました。"
+                    f"接続を確認してから再度お試しください。(詳細: {e})"
+                )
+            else:
+                message = str(e)
+            self.log.emit(f"エラー: {message}")
+            self.finished_error.emit(message)

@@ -1,18 +1,23 @@
 """workers.py の DownloadWorker のうち、実ダウンロードやQtイベントループに
 依存しないロジック(進捗計算・ファイル名解決・後処理判定等)の単体テスト"""
 
+import http.client
 import os
+import socket
+import ssl
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import yt_dlp
+from yt_dlp.networking.exceptions import TransportError
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
-from workers import DownloadWorker, FormatListWorker
+from workers import DownloadWorker, FormatListWorker, is_network_error
 
 
 def make_worker(**kwargs):
@@ -746,6 +751,142 @@ class RunRegistersFfmpegLocationTest(unittest.TestCase):
              patch.object(yt_dlp, "YoutubeDL", side_effect=RuntimeError("stop before network access")):
             worker.run()
         self.assertEqual(FFmpegPostProcessor._ffmpeg_location.get(), "C:/previous/ffmpeg")
+
+
+class IsNetworkErrorTest(unittest.TestCase):
+    """is_network_error()が、直接の例外型だけでなくyt-dlpがラップし直した
+    DownloadError等の原因チェーンも辿ってネットワーク関連の例外を検出できることを確認する"""
+
+    def test_url_error_is_network_error(self):
+        self.assertTrue(is_network_error(urllib.error.URLError("no route to host")))
+
+    def test_socket_timeout_is_network_error(self):
+        self.assertTrue(is_network_error(socket.timeout("timed out")))
+
+    def test_connection_reset_is_network_error(self):
+        self.assertTrue(is_network_error(ConnectionResetError("接続がリセットされました")))
+
+    def test_ssl_error_is_network_error(self):
+        self.assertTrue(is_network_error(ssl.SSLError("decryption failed")))
+
+    def test_incomplete_read_is_network_error(self):
+        self.assertTrue(is_network_error(http.client.IncompleteRead(b"")))
+
+    def test_yt_dlp_transport_error_is_network_error(self):
+        self.assertTrue(is_network_error(TransportError("connection closed")))
+
+    def test_unrelated_error_is_not_network_error(self):
+        self.assertFalse(is_network_error(ValueError("invalid format spec")))
+
+    def test_download_error_wrapping_url_error_via_implicit_context(self):
+        """yt-dlpはexcept節の中でDownloadErrorを送出するため、明示的なfromが
+        無くても__context__に元のネットワーク例外が残ることを再現する"""
+        try:
+            try:
+                raise urllib.error.URLError("getaddrinfo failed")
+            except urllib.error.URLError:
+                raise yt_dlp.utils.DownloadError("Unable to download webpage")
+        except yt_dlp.utils.DownloadError as wrapped:
+            self.assertTrue(is_network_error(wrapped))
+
+    def test_download_error_wrapping_via_explicit_cause(self):
+        original = socket.timeout("timed out")
+        wrapped = yt_dlp.utils.DownloadError("timed out while downloading")
+        wrapped.__cause__ = original
+        self.assertTrue(is_network_error(wrapped))
+
+    def test_download_error_wrapping_via_exc_info_attribute(self):
+        """DownloadErrorはsys.exc_info()由来のexc_infoタプルも保持するため、
+        暗黙の例外チェーンが失われるケースに備えてそちらも辿る"""
+        original = ConnectionError("接続が切断されました")
+        wrapped = yt_dlp.utils.DownloadError("failed", exc_info=(type(original), original, None))
+        self.assertTrue(is_network_error(wrapped))
+
+    def test_download_error_without_network_cause_is_not_network_error(self):
+        wrapped = yt_dlp.utils.DownloadError("Unsupported URL")
+        self.assertFalse(is_network_error(wrapped))
+
+    def test_does_not_infinite_loop_on_self_referential_chain(self):
+        """__context__が自分自身を指すような壊れた例外チェーンでも無限ループしない"""
+        exc = ValueError("boom")
+        exc.__context__ = exc
+        self.assertFalse(is_network_error(exc))
+
+
+class RunErrorHandlingTest(unittest.TestCase):
+    """run()が失敗した際、キャンセル・ネットワーク切断・その他のいずれの原因でも
+    未完成ファイルを必ず削除すること、およびネットワーク切断時は分かりやすい
+    日本語メッセージへ変換されることを検証する"""
+
+    @staticmethod
+    def _make_ydl_factory(probe_info, download_side_effect):
+        def factory(opts):
+            ydl = MagicMock()
+            ydl.__enter__.return_value = ydl
+            ydl.__exit__.return_value = False
+            ydl.extract_info.return_value = probe_info
+            ydl.download.side_effect = download_side_effect
+            return ydl
+        return factory
+
+    def _run_with(self, tmp, download_side_effect, worker=None):
+        probe_info = {"title": "My Video", "ext": "mp4"}
+        worker = worker or make_worker(out_dir=tmp)
+        open(os.path.join(tmp, "My Video.mp4.part"), "w").close()
+
+        errors = []
+        logs = []
+        worker.finished_error.connect(lambda msg: errors.append(msg))
+        worker.log.connect(lambda msg: logs.append(msg))
+
+        with patch("workers.get_ffmpeg_location", return_value=None), \
+             patch("workers.yt_dlp.YoutubeDL", side_effect=self._make_ydl_factory(probe_info, download_side_effect)):
+            worker.run()
+
+        return errors, logs
+
+    def test_network_error_removes_leftover_part_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors, _ = self._run_with(tmp, urllib.error.URLError("no route to host"))
+            self.assertEqual(len(errors), 1)
+            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+
+    def test_network_error_message_is_user_friendly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors, _ = self._run_with(tmp, socket.timeout("timed out"))
+            self.assertEqual(len(errors), 1)
+            self.assertIn("ネットワーク接続が切断されたため", errors[0])
+
+    def test_non_network_error_still_removes_leftover_part_file(self):
+        """ネットワーク切断に限らず、失敗理由を問わず未完成ファイルを削除する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            errors, _ = self._run_with(tmp, RuntimeError("unsupported format"))
+            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertEqual(errors, ["unsupported format"])
+
+    def test_non_network_error_message_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors, _ = self._run_with(tmp, RuntimeError("unsupported format"))
+            self.assertEqual(errors, ["unsupported format"])
+
+    def test_cancelled_download_removes_leftover_part_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            worker._is_cancelled = True
+            errors, _ = self._run_with(
+                tmp, yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました"), worker=worker,
+            )
+            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertEqual(errors, ["ユーザーによりキャンセルされました"])
+
+    def test_cancellation_takes_priority_over_network_wording(self):
+        """キャンセル中に(たまたま)ネットワーク系の例外が飛んできても、
+        メッセージをネットワーク切断用の文言で上書きしない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            worker._is_cancelled = True
+            errors, _ = self._run_with(tmp, socket.timeout("timed out"), worker=worker)
+            self.assertEqual(errors, ["timed out"])
 
 
 if __name__ == "__main__":
