@@ -198,7 +198,7 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.window.video_duration = 635.0
         self.window.storyboard_format = make_storyboard()
         self.window._storyboard_cache["https://example.com/x.jpg"] = QPixmap(10, 10)
-        self.window.clip_container.setEnabled(True)
+        self.window.detail_container.setEnabled(True)
         self.window.clip_range_slider.setRange(0, 635)
         self.window.clip_range_slider.setValues(60, 600)
         self.window.clip_duration_label.setText("動画の長さ: 10:35")
@@ -336,21 +336,21 @@ class OnFormatsErrorTest(MainWindowTestCase):
         self.assertEqual(self.window.status_label.text(), "初期値")
 
 
-class OnClipToggledTest(MainWindowTestCase):
-    def test_checked_shows_clip_container(self):
-        self.window.clip_toggle_btn.setChecked(True)
-        self.assertTrue(self.window.clip_container.isVisible())
-        self.assertEqual(self.window.clip_toggle_btn.text(), "クリップ範囲(任意) ▴")
+class OnDetailToggledTest(MainWindowTestCase):
+    def test_checked_shows_detail_container(self):
+        self.window.detail_toggle_btn.setChecked(True)
+        self.assertTrue(self.window.detail_container.isVisible())
+        self.assertEqual(self.window.detail_toggle_btn.text(), "詳細設定 ▴")
 
-    def test_unchecked_hides_clip_container(self):
-        self.window.clip_toggle_btn.setChecked(True)
-        self.window.clip_toggle_btn.setChecked(False)
-        self.assertFalse(self.window.clip_container.isVisible())
-        self.assertEqual(self.window.clip_toggle_btn.text(), "クリップ範囲(任意) ▾")
+    def test_unchecked_hides_detail_container(self):
+        self.window.detail_toggle_btn.setChecked(True)
+        self.window.detail_toggle_btn.setChecked(False)
+        self.assertFalse(self.window.detail_container.isVisible())
+        self.assertEqual(self.window.detail_toggle_btn.text(), "詳細設定 ▾")
 
     def test_starts_collapsed(self):
-        self.assertFalse(self.window.clip_container.isVisible())
-        self.assertFalse(self.window.clip_toggle_btn.isChecked())
+        self.assertFalse(self.window.detail_container.isVisible())
+        self.assertFalse(self.window.detail_toggle_btn.isChecked())
 
 
 class ClipSliderSyncTest(MainWindowTestCase):

@@ -407,7 +407,7 @@ class DownloadWorker(QThread):
         if not self._final_filepath or not os.path.isfile(self._final_filepath):
             return
 
-        self.log.emit("クリップ範囲を切り出し中...")
+        self.log.emit("切り抜き範囲を切り出し中...")
         ffpp = FFmpegPostProcessor(downloader=None)
         root, ext = os.path.splitext(self._final_filepath)
         trimmed_path = f"{root}.clip{ext}"
@@ -437,7 +437,7 @@ class DownloadWorker(QThread):
                     os.remove(trimmed_path)
                 except OSError as cleanup_error:
                     log_debug(f"_trim_clip_locally: 切り出し失敗後の一時ファイル削除に失敗 ({cleanup_error!r})")
-            self.log.emit(f"クリップ範囲の切り出しに失敗したため、動画全体を保存しました: {e}")
+            self.log.emit(f"切り抜き範囲の切り出しに失敗したため、動画全体を保存しました: {e}")
 
     def run(self):
         self._start_time = time.monotonic()
@@ -453,7 +453,7 @@ class DownloadWorker(QThread):
             if self.start_time is not None or self.end_time is not None:
                 start_text = self._format_eta(self.start_time) if self.start_time is not None else "先頭"
                 end_text = self._format_eta(self.end_time) if self.end_time is not None else "末尾"
-                self.log.emit(f"クリップ範囲: {start_text} 〜 {end_text}")
+                self.log.emit(f"切り抜き範囲: {start_text} 〜 {end_text}")
 
             format_selector = self._build_format_selector()
             probe_opts = {

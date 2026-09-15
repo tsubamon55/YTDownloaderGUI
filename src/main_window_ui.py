@@ -57,8 +57,8 @@ class Ui_MainWindow(QMainWindow):
     merge_note_label: QLabel
     mp3_checkbox: QCheckBox
     mp3_label: QLabel
-    clip_toggle_btn: QPushButton
-    clip_container: QWidget
+    detail_toggle_btn: QPushButton
+    detail_container: QWidget
     clip_start_edit: QLineEdit
     clip_end_edit: QLineEdit
     clip_range_slider: RangeSlider
@@ -213,26 +213,30 @@ class Ui_MainWindow(QMainWindow):
         out_row.addWidget(self.browse_btn)
         layout.addLayout(out_row)
 
-        # --- クリップ範囲(任意) ---
+        # --- 詳細設定(任意) ---
         # 手動設定・ログと同様、大半のユーザーは使わない任意機能のため既定では折りたたんでおき、
         # トグルボタンは手動設定と同じく行の右端に寄せる
-        clip_header_row = QHBoxLayout()
-        clip_header_row.addStretch()
-        self.clip_toggle_btn = QPushButton("クリップ範囲(任意) ▾")
-        self.clip_toggle_btn.setCheckable(True)
-        self.clip_toggle_btn.setFlat(True)
-        self.clip_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.clip_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
-        clip_header_row.addWidget(self.clip_toggle_btn)
-        layout.addLayout(clip_header_row)
+        detail_header_row = QHBoxLayout()
+        detail_header_row.addStretch()
+        self.detail_toggle_btn = QPushButton("詳細設定 ▾")
+        self.detail_toggle_btn.setCheckable(True)
+        self.detail_toggle_btn.setFlat(True)
+        self.detail_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.detail_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        detail_header_row.addWidget(self.detail_toggle_btn)
+        layout.addLayout(detail_header_row)
 
-        self.clip_container = QWidget()
+        self.detail_container = QWidget()
         # 動画情報の取得前はスライダー・開始/終了欄・長さラベルをまとめて無効化しておく
-        # (トグルボタン自体はclip_containerの外にあるため開閉操作には影響しない)
-        self.clip_container.setEnabled(False)
-        clip_layout = QVBoxLayout(self.clip_container)
-        clip_layout.setContentsMargins(0, 4, 0, 0)
-        clip_layout.setSpacing(6)
+        # (トグルボタン自体はdetail_containerの外にあるため開閉操作には影響しない)
+        self.detail_container.setEnabled(False)
+        detail_layout = QVBoxLayout(self.detail_container)
+        detail_layout.setContentsMargins(0, 4, 0, 0)
+        detail_layout.setSpacing(6)
+
+        # 現時点では詳細設定の中身は切り抜き範囲のみだが、トグル名自体からは
+        # 何が展開されるか分からないため、見出しラベルで内容を明示する
+        detail_layout.addWidget(QLabel("切り抜き範囲:"))
 
         # start_edit/end_editをスライダーの両端に離して置くと視線が左右に散るため、
         # 「スライダー→中央に寄せた開始〜終了」の2段に積んで一体感を持たせる。
@@ -263,7 +267,7 @@ class Ui_MainWindow(QMainWindow):
         # 隣接させると混同しやすい。範囲そのものを表すスライダーに添えるほうが自然)
         clip_slider_row.addWidget(self.clip_duration_label)
         clip_slider_row.addStretch(1)
-        clip_layout.addLayout(clip_slider_row)
+        detail_layout.addLayout(clip_slider_row)
 
         # プレースホルダーは入力すると消えてラベルの役目を失うため、
         # 「開始:」「終了:」は恒久的に見えるQLabelとして左に添える
@@ -287,10 +291,10 @@ class Ui_MainWindow(QMainWindow):
         self.clip_end_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         clip_values_row.addWidget(self.clip_end_edit)
         clip_values_row.addStretch(1)
-        clip_layout.addLayout(clip_values_row)
+        detail_layout.addLayout(clip_values_row)
 
-        layout.addWidget(self.clip_container)
-        self.clip_container.setVisible(False)
+        layout.addWidget(self.detail_container)
+        self.detail_container.setVisible(False)
 
         # --- ダウンロード ---
         btn_row = QHBoxLayout()
@@ -357,6 +361,6 @@ class Ui_MainWindow(QMainWindow):
             self.audio_format_combo,
             self.mp3_checkbox,
             self.mp3_label,
-            self.clip_toggle_btn,
-            self.clip_container,
+            self.detail_toggle_btn,
+            self.detail_container,
         ]
