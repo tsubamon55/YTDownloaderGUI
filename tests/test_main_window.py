@@ -237,22 +237,22 @@ class FetchFormatsTest(MainWindowTestCase):
         self.assertIsNone(self.window.video_duration)
 
 
-class OnDetailToggledTest(MainWindowTestCase):
-    def test_checked_shows_detail_container_and_hides_simple(self):
-        self.window.detail_toggle_btn.setChecked(True)
-        self.assertTrue(self.window.detail_container.isVisible())
-        self.assertFalse(self.window.simple_format_container.isVisible())
-        self.assertEqual(self.window.detail_toggle_btn.text(), "簡易設定 ▴")
+class OnManualToggledTest(MainWindowTestCase):
+    def test_checked_shows_manual_container_and_hides_auto(self):
+        self.window.manual_toggle_btn.setChecked(True)
+        self.assertTrue(self.window.manual_container.isVisible())
+        self.assertFalse(self.window.auto_format_container.isVisible())
+        self.assertEqual(self.window.manual_toggle_btn.text(), "自動設定 ▴")
 
-    def test_unchecked_shows_simple_and_hides_detail(self):
-        self.window.detail_toggle_btn.setChecked(True)
-        self.window.detail_toggle_btn.setChecked(False)
-        self.assertFalse(self.window.detail_container.isVisible())
-        self.assertTrue(self.window.simple_format_container.isVisible())
-        self.assertEqual(self.window.detail_toggle_btn.text(), "詳細設定 ▾")
+    def test_unchecked_shows_auto_and_hides_manual(self):
+        self.window.manual_toggle_btn.setChecked(True)
+        self.window.manual_toggle_btn.setChecked(False)
+        self.assertFalse(self.window.manual_container.isVisible())
+        self.assertTrue(self.window.auto_format_container.isVisible())
+        self.assertEqual(self.window.manual_toggle_btn.text(), "手動設定 ▾")
 
     def test_combos_disabled_when_no_formats_fetched_yet(self):
-        self.window.detail_toggle_btn.setChecked(True)
+        self.window.manual_toggle_btn.setChecked(True)
         self.assertFalse(self.window.video_format_combo.isEnabled())
         self.assertFalse(self.window.audio_format_combo.isEnabled())
 
@@ -503,10 +503,10 @@ class OnClipPreviewRequestedTest(MainWindowTestCase):
         self.assertIn(url, self.window._storyboard_cache)
 
 
-class OnDetailSelectionChangedTest(MainWindowTestCase):
+class OnManualSelectionChangedTest(MainWindowTestCase):
     def setUp(self):
         super().setUp()
-        self.window.detail_toggle_btn.setChecked(True)
+        self.window.manual_toggle_btn.setChecked(True)
         self.window.video_format_combo.addItem("なし", userData=None)
         self.window.video_format_combo.addItem("video", userData=make_video())
         self.window.audio_format_combo.addItem("なし", userData=None)
@@ -535,26 +535,26 @@ class OnDetailSelectionChangedTest(MainWindowTestCase):
         self.window.audio_format_combo.setCurrentIndex(0)
         self.assertEqual(self.window.merge_note_label.text(), "")
 
-    def test_simple_mode_disables_mp3_and_clears_note(self):
-        self.window.detail_toggle_btn.setChecked(False)
+    def test_auto_mode_disables_mp3_and_clears_note(self):
+        self.window.manual_toggle_btn.setChecked(False)
         self.assertFalse(self.window.mp3_checkbox.isEnabled())
         self.assertEqual(self.window.merge_note_label.text(), "")
 
 
 class ResolveFormatSpecTest(MainWindowTestCase):
-    def test_simple_mode_uses_combo_label(self):
-        self.window.detail_toggle_btn.setChecked(False)
+    def test_auto_mode_uses_combo_label(self):
+        self.window.manual_toggle_btn.setChecked(False)
         self.window.format_combo.setCurrentText("動画 (最高画質 mp4)")
         spec, postprocessors, _ = self.window.resolve_format_spec()
         self.assertIn("avc1", spec)
 
-    def test_detail_mode_without_selection_raises(self):
-        self.window.detail_toggle_btn.setChecked(True)
+    def test_manual_mode_without_selection_raises(self):
+        self.window.manual_toggle_btn.setChecked(True)
         with self.assertRaises(ValueError):
             self.window.resolve_format_spec()
 
-    def test_detail_mode_with_video_and_audio_merges_ids(self):
-        self.window.detail_toggle_btn.setChecked(True)
+    def test_manual_mode_with_video_and_audio_merges_ids(self):
+        self.window.manual_toggle_btn.setChecked(True)
         self.window.video_format_combo.addItem("v", userData=make_video(format_id="137"))
         self.window.audio_format_combo.addItem("a", userData=make_audio(format_id="140"))
         self.window.video_format_combo.setCurrentIndex(self.window.video_format_combo.count() - 1)
@@ -589,10 +589,10 @@ class StartDownloadValidationTest(MainWindowTestCase):
         critical_mock.assert_called_once()
         self.assertIsNone(self.window.worker)
 
-    def test_detail_mode_value_error_shows_warning(self):
+    def test_manual_mode_value_error_shows_warning(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
         self.window.out_edit.setText("C:/out")
-        self.window.detail_toggle_btn.setChecked(True)  # 動画・音声とも未選択のためValueErrorになる
+        self.window.manual_toggle_btn.setChecked(True)  # 動画・音声とも未選択のためValueErrorになる
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
              patch.object(QMessageBox, "warning") as warning_mock:
             self.window.start_download()
@@ -699,10 +699,10 @@ class StartDownloadValidationTest(MainWindowTestCase):
 
         worker_cls.assert_called_once()
 
-    def test_mismatched_detail_selection_cancelled_by_user_stops(self):
+    def test_mismatched_manual_selection_cancelled_by_user_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
         self.window.out_edit.setText("C:/out")
-        self.window.detail_toggle_btn.setChecked(True)
+        self.window.manual_toggle_btn.setChecked(True)
         mismatched = make_video(format_id="399", ext="mp4", vcodec="vp9")
         self.window.video_format_combo.addItem("v", userData=mismatched)
         self.window.video_format_combo.setCurrentIndex(self.window.video_format_combo.count() - 1)
@@ -839,8 +839,8 @@ class SignalWiringTest(MainWindowTestCase):
         self.assertEqual(self.window.status_label.text(), IDLE_STATUS_TEXT)
 
     def test_format_combo_change_triggers_note_update(self):
-        self.window.detail_toggle_btn.setChecked(False)
-        with patch.object(main_window_module, "compute_simple_format_note", return_value="") as note_mock:
+        self.window.manual_toggle_btn.setChecked(False)
+        with patch.object(main_window_module, "compute_auto_format_note", return_value="") as note_mock:
             self.window.format_combo.setCurrentIndex(1)
         note_mock.assert_called()
 

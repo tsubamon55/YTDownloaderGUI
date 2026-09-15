@@ -360,8 +360,8 @@ class DownloadWorker(QThread):
             counter += 1
 
     def _build_format_selector(self):
-        """簡易設定ではコンテナ/コーデックが一致しない非推奨フォーマットを候補から
-        完全に除外した上でformat_specを解決する。詳細設定でユーザーが明示的にIDを
+        """自動設定ではコンテナ/コーデックが一致しない非推奨フォーマットを候補から
+        完全に除外した上でformat_specを解決する。手動設定でユーザーが明示的にIDを
         指定した場合はexclude_mismatched=Falseとなり、そのまま尊重する。"""
         if not self.exclude_mismatched:
             return self.format_spec

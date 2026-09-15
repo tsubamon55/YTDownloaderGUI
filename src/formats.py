@@ -28,7 +28,7 @@ FORMAT_OPTION_TOOLTIPS = {
 }
 
 def format_spec_1080p(format_label: str, portrait: bool) -> str:
-    """簡易設定の「最高画質」系オプションで、1080p相当に画質を制限する代替セレクタを作る。
+    """自動設定の「最高画質」系オプションで、1080p相当に画質を制限する代替セレクタを作る。
 
     縦型動画はwidth/heightがlandscapeと逆転する(例: 1080pの縦動画は1080x1920)。
     yt-dlpのフォーマットフィルタは width/height を独立に比較するだけで
@@ -54,7 +54,7 @@ def format_spec_1080p(format_label: str, portrait: bool) -> str:
         "/b"
     )
 
-# 簡易設定で解像度確認ダイアログの対象となる「最高画質」系オプション
+# 自動設定で解像度確認ダイアログの対象となる「最高画質」系オプション
 HIGH_RESOLUTION_CHECK_LABELS = ("動画 (最高画質 mp4)", "動画 (最高画質)")
 
 # 解像度を最優先しつつ、同じ解像度の中では最も互換性の高いコーデック(h264/aac)を選ぶ
@@ -150,7 +150,7 @@ def is_codec_container_mismatch(fmt: dict) -> bool:
 
 
 def filter_mismatched_formats(formats: list[dict]) -> list[dict]:
-    """簡易設定の選択候補からコンテナ/コーデック不一致のフォーマットを完全に除外する"""
+    """自動設定の選択候補からコンテナ/コーデック不一致のフォーマットを完全に除外する"""
     return [f for f in formats if not is_codec_container_mismatch(f)]
 
 

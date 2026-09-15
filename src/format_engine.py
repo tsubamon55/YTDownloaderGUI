@@ -29,7 +29,7 @@ MP3_POSTPROCESSOR = {
 
 
 def resolve_format_spec(
-    detail_mode: bool,
+    manual_mode: bool,
     video_fmt: dict | None,
     audio_fmt: dict | None,
     mp3_checked: bool,
@@ -38,9 +38,9 @@ def resolve_format_spec(
     """UIの選択状態からyt-dlpに渡すformat_spec/postprocessors/format_sortを決定する。
 
     戻り値: (format_spec, postprocessors, format_sort)
-    詳細設定で動画・音声のどちらも未選択の場合はValueErrorを送出する。
+    手動設定で動画・音声のどちらも未選択の場合はValueErrorを送出する。
     """
-    if detail_mode:
+    if manual_mode:
         if video_fmt is None and audio_fmt is None:
             raise ValueError("動画または音声のフォーマットを選択してください")
 
@@ -122,8 +122,8 @@ def selection_resolution(selected: dict | None) -> tuple[int, int] | None:
     return None
 
 
-def compute_simple_format_note(available_formats: list, format_label: str) -> str:
-    """簡易設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
+def compute_auto_format_note(available_formats: list, format_label: str) -> str:
+    """自動設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
     解像度が落ちる場合のみ、その旨を伝える注記文を返す。落ちない場合は空文字。"""
     if not available_formats or format_label != "動画 (最高画質 mp4)":
         return ""
@@ -164,7 +164,7 @@ def plan_high_resolution_confirmation(
     format_spec: str,
     format_sort: list | None,
 ) -> HighResolutionPlan:
-    """簡易設定の最高画質が1920x1080を超える場合に確認が必要かどうかと、
+    """自動設定の最高画質が1920x1080を超える場合に確認が必要かどうかと、
     確認する場合に表示するメッセージ・1080p版のformat_specを判定する。
     縦型動画では width/height が landscape と逆転するため、長辺・短辺で判定する。"""
     best_selected = select_best_format(available_formats, format_spec, format_sort)
@@ -207,5 +207,5 @@ def plan_high_resolution_confirmation(
 
 
 def mismatched_selected_formats(*formats: dict | None) -> list[dict]:
-    """詳細設定で選択中のフォーマットのうち、コンテナ/コーデックが一致しない非推奨のものを返す"""
+    """手動設定で選択中のフォーマットのうち、コンテナ/コーデックが一致しない非推奨のものを返す"""
     return [fmt for fmt in formats if fmt is not None and is_codec_container_mismatch(fmt)]

@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
 from clip_range import format_clip_time, parse_clip_time, resolve_clip_range
 from config import CONFIG
 from format_engine import (
-    compute_simple_format_note,
+    compute_auto_format_note,
     mismatched_selected_formats,
     plan_high_resolution_confirmation,
     resolve_format_spec as resolve_format_spec_logic,
@@ -81,10 +81,10 @@ class MainWindow(Ui_MainWindow):
         """setup_uiが生成したウィジェットのシグナルを、このクラスが持つハンドラへ接続する"""
         self.url_edit.textChanged.connect(self.on_url_changed)
         self.paste_btn.clicked.connect(self.paste_from_clipboard)
-        self.format_combo.currentIndexChanged.connect(self.update_simple_format_note)
-        self.detail_toggle_btn.toggled.connect(self.on_detail_toggled)
-        self.video_format_combo.currentIndexChanged.connect(self.on_detail_selection_changed)
-        self.audio_format_combo.currentIndexChanged.connect(self.on_detail_selection_changed)
+        self.format_combo.currentIndexChanged.connect(self.update_auto_format_note)
+        self.manual_toggle_btn.toggled.connect(self.on_manual_toggled)
+        self.video_format_combo.currentIndexChanged.connect(self.on_manual_selection_changed)
+        self.audio_format_combo.currentIndexChanged.connect(self.on_manual_selection_changed)
         self.browse_btn.clicked.connect(self.browse_folder)
         self.download_btn.clicked.connect(self.start_download)
         self.cancel_btn.clicked.connect(self.cancel_download)
@@ -151,8 +151,8 @@ class MainWindow(Ui_MainWindow):
         self.mp3_checkbox.setEnabled(False)
         self.mp3_label.setEnabled(False)
         self.merge_note_label.setText("")
-        self.simple_format_note_label.setText("")
-        self.simple_format_note_label.setVisible(False)
+        self.auto_format_note_label.setText("")
+        self.auto_format_note_label.setVisible(False)
 
     def _reset_video_state(self) -> None:
         """動画の長さ・ストーリーボード関連の状態を初期化し、クリップ範囲の入力を
@@ -172,18 +172,18 @@ class MainWindow(Ui_MainWindow):
         self.clip_start_edit.clear()
         self.clip_end_edit.clear()
 
-    def on_detail_toggled(self, checked: bool) -> None:
-        self.detail_toggle_btn.setText("簡易設定 ▴" if checked else "詳細設定 ▾")
-        self.simple_format_container.setVisible(not checked)
-        # simple_format_container が非表示の間は代わりにスペーサーへ伸縮を持たせる
+    def on_manual_toggled(self, checked: bool) -> None:
+        self.manual_toggle_btn.setText("自動設定 ▴" if checked else "手動設定 ▾")
+        self.auto_format_container.setVisible(not checked)
+        # auto_format_container が非表示の間は代わりにスペーサーへ伸縮を持たせる
         self.format_row.setStretch(1, 1 if checked else 0)
-        self.detail_container.setVisible(checked)
+        self.manual_container.setVisible(checked)
         self._sync_window_height()
         has_items = self.video_format_combo.count() > 0
         self.video_format_combo.setEnabled(checked and has_items)
         self.audio_format_combo.setEnabled(checked and has_items)
-        self.on_detail_selection_changed()
-        self.update_simple_format_note()
+        self.on_manual_selection_changed()
+        self.update_auto_format_note()
 
         url = self.url_edit.text().strip()
         is_fetching = self.format_worker is not None and self.format_worker.isRunning()
@@ -275,10 +275,10 @@ class MainWindow(Ui_MainWindow):
             combo.setItemData(row, format_columns(fmt), FORMAT_COLUMN_ROLE)
             combo.setItemData(row, is_codec_container_mismatch(fmt), FORMAT_MISMATCH_ROLE)
 
-        self.video_format_combo.setEnabled(self.detail_toggle_btn.isChecked())
-        self.audio_format_combo.setEnabled(self.detail_toggle_btn.isChecked())
-        self.on_detail_selection_changed()
-        self.update_simple_format_note()
+        self.video_format_combo.setEnabled(self.manual_toggle_btn.isChecked())
+        self.audio_format_combo.setEnabled(self.manual_toggle_btn.isChecked())
+        self.on_manual_selection_changed()
+        self.update_auto_format_note()
 
         self.title_label.setText(title)
         if thumbnail_bytes:
@@ -426,8 +426,8 @@ class MainWindow(Ui_MainWindow):
         self._storyboard_workers.discard(worker)
         self._pending_storyboard_urls.discard(worker.url)
 
-    def on_detail_selection_changed(self, *_: Any) -> None:
-        if not self.detail_toggle_btn.isChecked():
+    def on_manual_selection_changed(self, *_: Any) -> None:
+        if not self.manual_toggle_btn.isChecked():
             self.mp3_checkbox.setEnabled(False)
             self.mp3_label.setEnabled(False)
             self.merge_note_label.setText("")
@@ -449,19 +449,19 @@ class MainWindow(Ui_MainWindow):
         else:
             self.merge_note_label.setText("")
 
-    def update_simple_format_note(self, *_: Any) -> None:
-        """簡易設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
+    def update_auto_format_note(self, *_: Any) -> None:
+        """自動設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
         解像度が落ちる場合のみ、非モーダルな注記で分かるようにする。
         注記がない間はラベル自体を隠し、空欄による不自然な余白が残らないようにする"""
-        note = self._compute_simple_format_note()
-        self.simple_format_note_label.setText(note)
-        self.simple_format_note_label.setVisible(bool(note))
+        note = self._compute_auto_format_note()
+        self.auto_format_note_label.setText(note)
+        self.auto_format_note_label.setVisible(bool(note))
         self._sync_window_height()
 
-    def _compute_simple_format_note(self) -> str:
-        if self.detail_toggle_btn.isChecked():
+    def _compute_auto_format_note(self) -> str:
+        if self.manual_toggle_btn.isChecked():
             return ""
-        return compute_simple_format_note(self.available_formats, self.format_combo.currentText())
+        return compute_auto_format_note(self.available_formats, self.format_combo.currentText())
 
     def browse_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択", self.out_edit.text())
@@ -510,7 +510,7 @@ class MainWindow(Ui_MainWindow):
         for widget in self.input_widgets:
             widget.setEnabled(enabled)
         if enabled:
-            self.on_detail_toggled(self.detail_toggle_btn.isChecked())
+            self.on_manual_toggled(self.manual_toggle_btn.isChecked())
             # video_format_combo等と同様、動画の長さが判明していない間は無効のままにしたいため、
             # 一括enable後に補正する(値は変更せず有効/無効のみ再判定する)
             self.clip_container.setEnabled(bool(self.video_duration and self.video_duration > 0))
@@ -520,11 +520,11 @@ class MainWindow(Ui_MainWindow):
         self.log_view.appendPlainText(f"[{timestamp}] {msg}")
 
     def resolve_format_spec(self) -> tuple[str, list, list | None]:
-        detail_mode = self.detail_toggle_btn.isChecked()
+        manual_mode = self.manual_toggle_btn.isChecked()
         return resolve_format_spec_logic(
-            detail_mode,
-            self.video_format_combo.currentData() if detail_mode else None,
-            self.audio_format_combo.currentData() if detail_mode else None,
+            manual_mode,
+            self.video_format_combo.currentData() if manual_mode else None,
+            self.audio_format_combo.currentData() if manual_mode else None,
             self.mp3_checkbox.isChecked(),
             self.format_combo.currentText(),
         )
@@ -532,7 +532,7 @@ class MainWindow(Ui_MainWindow):
     def confirm_high_resolution_download(
         self, format_label: str, format_spec: str, format_sort: list | None
     ) -> tuple[str | None, str | None]:
-        """簡易設定の最高画質が1920x1080を超える場合に確認する。
+        """自動設定の最高画質が1920x1080を超える場合に確認する。
         戻り値: (選択, 1080p選択時の代替format_spec)
         選択は "best"(最高画質のまま) / "1080p"(1080pに制限) / None(キャンセル)"""
         plan = plan_high_resolution_confirmation(self.available_formats, format_label, format_spec, format_sort)
@@ -601,7 +601,7 @@ class MainWindow(Ui_MainWindow):
                 QMessageBox.warning(self, "入力エラー", "終了時刻が動画の長さを超えています")
                 return
 
-        if self.detail_toggle_btn.isChecked():
+        if self.manual_toggle_btn.isChecked():
             mismatched_fmts = mismatched_selected_formats(
                 self.video_format_combo.currentData(), self.audio_format_combo.currentData()
             )
@@ -618,7 +618,7 @@ class MainWindow(Ui_MainWindow):
                 if reply != QMessageBox.StandardButton.Yes:
                     return
 
-        if not self.detail_toggle_btn.isChecked():
+        if not self.manual_toggle_btn.isChecked():
             format_label = self.format_combo.currentText()
             if format_label in HIGH_RESOLUTION_CHECK_LABELS:
                 choice, fallback_spec = self.confirm_high_resolution_download(format_label, format_spec, format_sort)
@@ -641,7 +641,7 @@ class MainWindow(Ui_MainWindow):
 
         self.worker = DownloadWorker(
             url, out_dir, format_spec, postprocessors, format_sort,
-            exclude_mismatched=not self.detail_toggle_btn.isChecked(),
+            exclude_mismatched=not self.manual_toggle_btn.isChecked(),
             start_time=clip_start, end_time=clip_end,
         )
         self.worker.progress.connect(self.on_progress)

@@ -7,7 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from format_engine import (
-    compute_simple_format_note,
+    compute_auto_format_note,
     estimate_selection_size,
     mismatched_selected_formats,
     plan_high_resolution_confirmation,
@@ -44,11 +44,11 @@ def make_audio(format_id, ext, acodec, abr=128, filesize=None, protocol="https")
 
 
 class ResolveFormatSpecTest(unittest.TestCase):
-    def test_detail_mode_requires_at_least_one_selection(self):
+    def test_manual_mode_requires_at_least_one_selection(self):
         with self.assertRaises(ValueError):
             resolve_format_spec(True, None, None, False, "動画 (最高画質 mp4)")
 
-    def test_detail_mode_video_and_audio_are_merged(self):
+    def test_manual_mode_video_and_audio_are_merged(self):
         video = {"format_id": "137"}
         audio = {"format_id": "140"}
         spec, postprocessors, sort = resolve_format_spec(True, video, audio, False, "")
@@ -56,30 +56,30 @@ class ResolveFormatSpecTest(unittest.TestCase):
         self.assertEqual(postprocessors, [])
         self.assertIsNone(sort)
 
-    def test_detail_mode_audio_only_without_mp3_has_no_postprocessor(self):
+    def test_manual_mode_audio_only_without_mp3_has_no_postprocessor(self):
         audio = {"format_id": "140"}
         spec, postprocessors, _ = resolve_format_spec(True, None, audio, False, "")
         self.assertEqual(spec, "140")
         self.assertEqual(postprocessors, [])
 
-    def test_detail_mode_audio_only_with_mp3_adds_postprocessor(self):
+    def test_manual_mode_audio_only_with_mp3_adds_postprocessor(self):
         audio = {"format_id": "140"}
         spec, postprocessors, _ = resolve_format_spec(True, None, audio, True, "")
         self.assertEqual(spec, "140")
         self.assertEqual(postprocessors[0]["preferredcodec"], "mp3")
 
-    def test_simple_mode_mp3_option(self):
+    def test_auto_mode_mp3_option(self):
         spec, postprocessors, sort = resolve_format_spec(False, None, None, False, "音声のみ (mp3)")
         self.assertEqual(spec, "ba/b")
         self.assertEqual(postprocessors[0]["preferredcodec"], "mp3")
         self.assertIsNone(sort)
 
-    def test_simple_mode_best_quality_uses_compatible_sort(self):
+    def test_auto_mode_best_quality_uses_compatible_sort(self):
         spec, postprocessors, sort = resolve_format_spec(False, None, None, False, "動画 (最高画質)")
         self.assertEqual(postprocessors, [])
         self.assertIsNotNone(sort)
 
-    def test_simple_mode_best_quality_mp4_has_no_special_sort(self):
+    def test_auto_mode_best_quality_mp4_has_no_special_sort(self):
         _, _, sort = resolve_format_spec(False, None, None, False, "動画 (最高画質 mp4)")
         self.assertIsNone(sort)
 
@@ -124,26 +124,26 @@ class EstimateAndResolutionTest(unittest.TestCase):
         self.assertEqual(selection_resolution(selected), (1280, 720))
 
 
-class ComputeSimpleFormatNoteTest(unittest.TestCase):
+class ComputeAutoFormatNoteTest(unittest.TestCase):
     def test_empty_when_no_formats_available(self):
-        self.assertEqual(compute_simple_format_note([], "動画 (最高画質 mp4)"), "")
+        self.assertEqual(compute_auto_format_note([], "動画 (最高画質 mp4)"), "")
 
     def test_empty_for_other_labels(self):
         formats = [make_video("137", "mp4", "avc1.640028", height=1080)]
-        self.assertEqual(compute_simple_format_note(formats, "動画 (最高画質)"), "")
+        self.assertEqual(compute_auto_format_note(formats, "動画 (最高画質)"), "")
 
     def test_notes_when_mp4_h264_loses_resolution(self):
         formats = [
             make_video("137", "mp4", "avc1.640028", height=720),
             make_video("399", "mp4", "av01.0.05M.08", height=1080),
         ]
-        note = compute_simple_format_note(formats, "動画 (最高画質 mp4)")
+        note = compute_auto_format_note(formats, "動画 (最高画質 mp4)")
         self.assertIn("720p", note)
         self.assertIn("1080p", note)
 
     def test_no_note_when_resolution_matches(self):
         formats = [make_video("137", "mp4", "avc1.640028", height=1080)]
-        self.assertEqual(compute_simple_format_note(formats, "動画 (最高画質 mp4)"), "")
+        self.assertEqual(compute_auto_format_note(formats, "動画 (最高画質 mp4)"), "")
 
 
 class PlanHighResolutionConfirmationTest(unittest.TestCase):

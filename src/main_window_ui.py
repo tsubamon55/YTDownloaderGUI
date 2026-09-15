@@ -44,12 +44,12 @@ class Ui_MainWindow(QMainWindow):
     paste_btn: QPushButton
     thumbnail_label: QLabel
     title_label: QLabel
-    simple_format_container: QWidget
+    auto_format_container: QWidget
     format_combo: QComboBox
     format_row: QHBoxLayout
-    detail_toggle_btn: QPushButton
-    simple_format_note_label: QLabel
-    detail_container: QWidget
+    manual_toggle_btn: QPushButton
+    auto_format_note_label: QLabel
+    manual_container: QWidget
     format_item_delegate: FormatItemDelegate
     format_header: FormatHeaderWidget
     video_format_combo: FormatComboBox
@@ -120,38 +120,38 @@ class Ui_MainWindow(QMainWindow):
 
         # --- フォーマット選択 ---
         format_row = QHBoxLayout()
-        self.simple_format_container = QWidget()
-        simple_layout = QHBoxLayout(self.simple_format_container)
-        simple_layout.setContentsMargins(0, 0, 0, 0)
-        simple_layout.addWidget(QLabel("形式:"))
+        self.auto_format_container = QWidget()
+        auto_layout = QHBoxLayout(self.auto_format_container)
+        auto_layout.setContentsMargins(0, 0, 0, 0)
+        auto_layout.addWidget(QLabel("形式:"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMAT_OPTIONS.keys())
         for i, label in enumerate(FORMAT_OPTIONS.keys()):
             tooltip = FORMAT_OPTION_TOOLTIPS.get(label)
             if tooltip:
                 self.format_combo.setItemData(i, tooltip, Qt.ItemDataRole.ToolTipRole)
-        simple_layout.addWidget(self.format_combo, stretch=1)
-        format_row.addWidget(self.simple_format_container, stretch=1)
-        # simple_format_container が非表示のときはこのスペーサーが余白を吸収し、
-        # detail_toggle_btn が引き伸ばされて中央寄りに見えるのを防ぐ
+        auto_layout.addWidget(self.format_combo, stretch=1)
+        format_row.addWidget(self.auto_format_container, stretch=1)
+        # auto_format_container が非表示のときはこのスペーサーが余白を吸収し、
+        # manual_toggle_btn が引き伸ばされて中央寄りに見えるのを防ぐ
         format_row.addStretch(0)
-        self.detail_toggle_btn = QPushButton("詳細設定 ▾")
-        self.detail_toggle_btn.setCheckable(True)
-        self.detail_toggle_btn.setFlat(True)
-        self.detail_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.detail_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
-        format_row.addWidget(self.detail_toggle_btn)
+        self.manual_toggle_btn = QPushButton("手動設定 ▾")
+        self.manual_toggle_btn.setCheckable(True)
+        self.manual_toggle_btn.setFlat(True)
+        self.manual_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.manual_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        format_row.addWidget(self.manual_toggle_btn)
         self.format_row = format_row
         layout.addLayout(format_row)
 
-        self.simple_format_note_label = QLabel("")
-        self.simple_format_note_label.setStyleSheet("color: #b06000;")
-        self.simple_format_note_label.setVisible(False)
-        layout.addWidget(self.simple_format_note_label)
+        self.auto_format_note_label = QLabel("")
+        self.auto_format_note_label.setStyleSheet("color: #b06000;")
+        self.auto_format_note_label.setVisible(False)
+        layout.addWidget(self.auto_format_note_label)
 
-        self.detail_container = QWidget()
-        detail_layout = QVBoxLayout(self.detail_container)
-        detail_layout.setContentsMargins(0, 2, 0, 0)
+        self.manual_container = QWidget()
+        manual_layout = QVBoxLayout(self.manual_container)
+        manual_layout.setContentsMargins(0, 2, 0, 0)
 
         self.format_item_delegate = FormatItemDelegate()
         format_combo_min_width = sum(FORMAT_COLUMN_WIDTHS) + 40
@@ -168,7 +168,7 @@ class Ui_MainWindow(QMainWindow):
         header_row.addWidget(header_spacer)
         self.format_header = FormatHeaderWidget()
         header_row.addWidget(self.format_header, stretch=1)
-        detail_layout.addLayout(header_row)
+        manual_layout.addLayout(header_row)
 
         video_row = QHBoxLayout()
         video_row.addWidget(video_label)
@@ -177,7 +177,7 @@ class Ui_MainWindow(QMainWindow):
         self.video_format_combo.setItemDelegate(self.format_item_delegate)
         self.video_format_combo.setMinimumWidth(format_combo_min_width)
         video_row.addWidget(self.video_format_combo, stretch=1)
-        detail_layout.addLayout(video_row)
+        manual_layout.addLayout(video_row)
 
         audio_row = QHBoxLayout()
         audio_row.addWidget(audio_label)
@@ -186,10 +186,10 @@ class Ui_MainWindow(QMainWindow):
         self.audio_format_combo.setItemDelegate(self.format_item_delegate)
         self.audio_format_combo.setMinimumWidth(format_combo_min_width)
         audio_row.addWidget(self.audio_format_combo, stretch=1)
-        detail_layout.addLayout(audio_row)
+        manual_layout.addLayout(audio_row)
 
         self.merge_note_label = QLabel("")
-        detail_layout.addWidget(self.merge_note_label)
+        manual_layout.addWidget(self.merge_note_label)
 
         mp3_checkbox_row = QHBoxLayout()
         self.mp3_checkbox = QCheckBox()
@@ -199,10 +199,10 @@ class Ui_MainWindow(QMainWindow):
         self.mp3_label.setEnabled(False)
         mp3_checkbox_row.addWidget(self.mp3_label)
         mp3_checkbox_row.addStretch()
-        detail_layout.addLayout(mp3_checkbox_row)
+        manual_layout.addLayout(mp3_checkbox_row)
 
-        layout.addWidget(self.detail_container)
-        self.detail_container.setVisible(False)
+        layout.addWidget(self.manual_container)
+        self.manual_container.setVisible(False)
 
         # --- 保存先 ---
         out_row = QHBoxLayout()
@@ -214,8 +214,8 @@ class Ui_MainWindow(QMainWindow):
         layout.addLayout(out_row)
 
         # --- クリップ範囲(任意) ---
-        # 詳細設定・ログと同様、大半のユーザーは使わない任意機能のため既定では折りたたんでおき、
-        # トグルボタンは詳細設定と同じく行の右端に寄せる
+        # 手動設定・ログと同様、大半のユーザーは使わない任意機能のため既定では折りたたんでおき、
+        # トグルボタンは手動設定と同じく行の右端に寄せる
         clip_header_row = QHBoxLayout()
         clip_header_row.addStretch()
         self.clip_toggle_btn = QPushButton("クリップ範囲(任意) ▾")
@@ -352,7 +352,7 @@ class Ui_MainWindow(QMainWindow):
             self.out_edit,
             self.browse_btn,
             self.format_combo,
-            self.detail_toggle_btn,
+            self.manual_toggle_btn,
             self.video_format_combo,
             self.audio_format_combo,
             self.mp3_checkbox,

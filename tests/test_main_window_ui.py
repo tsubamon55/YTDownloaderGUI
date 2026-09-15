@@ -38,8 +38,8 @@ class SetupUiTest(unittest.TestCase):
         self.assertEqual(self.window.format_combo.count(), len(FORMAT_OPTIONS))
         self.assertEqual(self.window.format_combo.itemText(0), next(iter(FORMAT_OPTIONS)))
 
-    def test_detail_container_starts_hidden(self):
-        self.assertFalse(self.window.detail_container.isVisible())
+    def test_manual_container_starts_hidden(self):
+        self.assertFalse(self.window.manual_container.isVisible())
 
     def test_clip_container_starts_hidden(self):
         self.assertFalse(self.window.clip_container.isVisible())
@@ -73,7 +73,7 @@ class SetupUiTest(unittest.TestCase):
             self.window.out_edit,
             self.window.browse_btn,
             self.window.format_combo,
-            self.window.detail_toggle_btn,
+            self.window.manual_toggle_btn,
             self.window.video_format_combo,
             self.window.audio_format_combo,
             self.window.mp3_checkbox,
