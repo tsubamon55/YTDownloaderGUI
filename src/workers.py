@@ -414,14 +414,17 @@ class DownloadWorker(QThread):
         probe用に別途取得したextract_info()の結果を使うと、実ダウンロード時の
         フォーマット選択との間に2回のネットワークリクエストの時間差があるため、
         (フォーマットの有効期限切れ等で)実際にダウンロードされた内容とズレる
-        可能性がある。確定済みのローカルファイルを直接調べることでそのズレを避ける"""
+        可能性がある。確定済みのローカルファイルを直接調べることでそのズレを避ける。
+
+        埋め込みサムネイルは別の映像ストリーム(disposition=attached_pic)として
+        検出されるため、本編映像のコーデックを正しく判定できるよう除外する"""
         try:
             metadata = ffpp.get_metadata_object(filepath)
         except Exception as e:
             log_debug(f"_detect_vcodec: ffprobeでのコーデック検出に失敗 ({e!r})")
             return None
         for stream in metadata.get("streams", []):
-            if stream.get("codec_type") == "video":
+            if stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic"):
                 return stream.get("codec_name")
         return None
 
@@ -458,12 +461,16 @@ class DownloadWorker(QThread):
             # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)
             input_opts = ["-ss", str(self.start_time)] if self.start_time else []
 
-            output_opts = ["-c:a", "copy"]
+            # -map 0で全ストリーム(本編映像・音声に加え、埋め込みサムネイルの
+            # attached_picストリームやmkvの添付ファイルなど)をコピー対象に含めた上で、
+            # 本編映像ストリーム(-c:v:0)だけを個別に再エンコードする。こうしないと
+            # デフォルトのストリーム選択で埋め込み済みサムネイルが出力から失われる
+            output_opts = ["-map", "0", "-c", "copy"]
             codec_prefix = (vcodec or "").split(".")[0].lower()
             video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix)
             if video_encoder:
                 encoder_name, crf = video_encoder
-                output_opts += ["-c:v", encoder_name, "-crf", crf]
+                output_opts += ["-c:v:0", encoder_name, "-crf", crf]
             if self.end_time is not None:
                 output_opts += ["-t", str(self.end_time - (self.start_time or 0))]
 
