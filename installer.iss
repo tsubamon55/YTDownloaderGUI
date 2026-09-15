@@ -3,7 +3,7 @@
 ; Then compile this script: iscc installer.iss
 
 #define MyAppName "YTDownloaderGUI"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppExeName "YTDownloaderGUI.exe"
 
 [Setup]
