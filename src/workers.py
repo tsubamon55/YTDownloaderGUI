@@ -428,6 +428,26 @@ class DownloadWorker(QThread):
                 return stream.get("codec_name")
         return None
 
+    @staticmethod
+    def _attached_pic_video_indices(ffpp: FFmpegPostProcessor, filepath: str) -> list[int]:
+        """ffprobeでファイルを直接調べ、埋め込みサムネイル(disposition=attached_pic)の
+        映像ストリームについて、-c:v:N指定に使う0始まりの映像相対インデックスを
+        全て返す(本編映像は除く。見つからない場合は空リスト)"""
+        try:
+            metadata = ffpp.get_metadata_object(filepath)
+        except Exception as e:
+            log_debug(f"_attached_pic_video_indices: ffprobeでの検出に失敗 ({e!r})")
+            return []
+        indices = []
+        video_index = 0
+        for stream in metadata.get("streams", []):
+            if stream.get("codec_type") != "video":
+                continue
+            if stream.get("disposition", {}).get("attached_pic"):
+                indices.append(video_index)
+            video_index += 1
+        return indices
+
     def _trim_clip_locally(self) -> None:
         """ダウンロード済みファイルをffmpegでローカルに切り出し、self._final_filepathを
         切り出し後のファイルで置き換える。
@@ -456,21 +476,28 @@ class DownloadWorker(QThread):
 
         try:
             vcodec = self._detect_vcodec(ffpp, self._final_filepath)
+            attached_pic_indices = self._attached_pic_video_indices(ffpp, self._final_filepath)
 
             # -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから
             # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)
             input_opts = ["-ss", str(self.start_time)] if self.start_time else []
 
             # -map 0で全ストリーム(本編映像・音声に加え、埋め込みサムネイルの
-            # attached_picストリームやmkvの添付ファイルなど)をコピー対象に含めた上で、
-            # 本編映像ストリーム(-c:v:0)だけを個別に再エンコードする。こうしないと
-            # デフォルトのストリーム選択で埋め込み済みサムネイルが出力から失われる
-            output_opts = ["-map", "0", "-c", "copy"]
+            # attached_picストリームやmkvの添付ファイルなど)を出力対象に含める。
+            # 音声・添付ファイルは常にコピーする。本編映像(-c:v:0)は、対応コーデックなら
+            # 専用エンコーダ+CRFで、非対応コーデック(HEVC/AV1等)は何も指定せずffmpeg既定の
+            # エンコーダにフォールバックさせる(ここを"-c copy"にすると非対応コーデック時に
+            # 本編映像までストリームコピーになり、キーフレーム単位でしか正確な時刻に合わせられず
+            # 音声とズレて見えてしまう)。埋め込みサムネイルの映像ストリームは対応コーデックに
+            # 関わらず常にコピーし、動画エンコーダに巻き込まれて壊れないようにする
+            output_opts = ["-map", "0", "-c:a", "copy", "-c:t", "copy"]
             codec_prefix = (vcodec or "").split(".")[0].lower()
             video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix)
             if video_encoder:
                 encoder_name, crf = video_encoder
                 output_opts += ["-c:v:0", encoder_name, "-crf", crf]
+            for idx in attached_pic_indices:
+                output_opts += [f"-c:v:{idx}", "copy", f"-disposition:v:{idx}", "attached_pic"]
             if self.end_time is not None:
                 output_opts += ["-t", str(self.end_time - (self.start_time or 0))]
 

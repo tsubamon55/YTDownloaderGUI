@@ -588,7 +588,7 @@ class TrimClipLocallyTest(unittest.TestCase):
             [(trimmed_path, output_opts)] = output_specs
             self.assertEqual(
                 output_opts,
-                ["-map", "0", "-c", "copy", "-c:v:0", "libx264", "-crf", "18", "-t", "20.0"],
+                ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-c:v:0", "libx264", "-crf", "18", "-t", "20.0"],
             )
             self.assertTrue(trimmed_path.startswith(os.path.join(tmp, "My Video")))
 
@@ -610,7 +610,10 @@ class TrimClipLocallyTest(unittest.TestCase):
                 [
                     (
                         output_specs[0][0],
-                        ["-map", "0", "-c", "copy", "-c:v:0", "libx264", "-crf", "18", "-t", "30.0"],
+                        [
+                            "-map", "0", "-c:a", "copy", "-c:t", "copy",
+                            "-c:v:0", "libx264", "-crf", "18", "-t", "30.0",
+                        ],
                     )
                 ],
             )
@@ -630,7 +633,12 @@ class TrimClipLocallyTest(unittest.TestCase):
             self.assertEqual(input_specs, [(final_path, ["-ss", "10.0"])])
             self.assertEqual(
                 output_specs,
-                [(output_specs[0][0], ["-map", "0", "-c", "copy", "-c:v:0", "libx264", "-crf", "18"])],
+                [
+                    (
+                        output_specs[0][0],
+                        ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-c:v:0", "libx264", "-crf", "18"],
+                    )
+                ],
             )
 
     def test_audio_always_stream_copied_regardless_of_video_codec(self):
@@ -648,7 +656,7 @@ class TrimClipLocallyTest(unittest.TestCase):
 
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
             output_opts = output_specs[0][1]
-            self.assertEqual(output_opts[:4], ["-map", "0", "-c", "copy"])
+            self.assertEqual(output_opts[:4], ["-map", "0", "-c:a", "copy"])
             self.assertNotIn("-c:v:0", output_opts)
 
     def test_vp9_uses_libvpx_vp9_encoder(self):
@@ -666,9 +674,48 @@ class TrimClipLocallyTest(unittest.TestCase):
             output_opts = output_specs[0][1]
             self.assertIn("libvpx-vp9", output_opts)
 
+    def test_embedded_thumbnail_stream_is_preserved_and_not_reencoded(self):
+        """埋め込みサムネイル(attached_pic映像ストリーム)は本編映像の切り出し・
+        再エンコードに巻き込まれず、常にコピー+disposition維持で出力に残ることを確認する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            open(final_path, "w").close()
+            worker = make_worker(start_time=10.0, end_time=30.0)
+            worker._final_filepath = final_path
+
+            ffpp = MagicMock()
+            ffpp.get_metadata_object.return_value = {
+                "streams": [
+                    {"codec_type": "video", "codec_name": "h264", "disposition": {"attached_pic": 0}},
+                    {"codec_type": "audio", "codec_name": "aac"},
+                    {"codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+                ],
+            }
+
+            def fake_run(input_specs, output_specs):
+                open(output_specs[0][0], "w").close()
+
+            ffpp.real_run_ffmpeg.side_effect = fake_run
+            with patch("workers.FFmpegPostProcessor", return_value=ffpp):
+                worker._trim_clip_locally()
+
+            (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
+            output_opts = output_specs[0][1]
+            self.assertEqual(
+                output_opts,
+                [
+                    "-map", "0", "-c:a", "copy", "-c:t", "copy",
+                    "-c:v:0", "libx264", "-crf", "18",
+                    "-c:v:1", "copy", "-disposition:v:1", "attached_pic",
+                    "-t", "20.0",
+                ],
+            )
+
     def test_unrecognized_codec_omits_explicit_video_encoder(self):
-        """未対応コーデック(例: HEVC/AV1)はffmpegの既定エンコーダにフォールバックする
-        (音声は引き続きコピーされる)"""
+        """未対応コーデック(例: HEVC/AV1)は"-c:v:0"を一切指定せずffmpegの既定エンコーダに
+        フォールバックする(音声は引き続きコピーされる)。ここで本編映像まで"-c copy"に
+        してしまうと、キーフレーム単位でしか正確な時刻に合わせられず音声とズレるため、
+        "-c:v"/"-c"自体を一切出さないことを確認する"""
         with tempfile.TemporaryDirectory() as tmp:
             final_path = os.path.join(tmp, "My Video.mp4")
             open(final_path, "w").close()
@@ -682,11 +729,13 @@ class TrimClipLocallyTest(unittest.TestCase):
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
             output_opts = output_specs[0][1]
             self.assertNotIn("-c:v:0", output_opts)
-            self.assertEqual(output_opts, ["-map", "0", "-c", "copy", "-t", "20.0"])
+            self.assertNotIn("-c", output_opts)
+            self.assertEqual(output_opts, ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-t", "20.0"])
 
     def test_detection_failure_omits_explicit_video_encoder(self):
         """ffprobeでのコーデック検出自体に失敗した場合も、既定エンコーダへ
-        フォールバックして処理を続行できることを確認する"""
+        フォールバックして処理を続行できることを確認する(本編映像を"-c copy"に
+        してしまわないことも合わせて確認する)"""
         with tempfile.TemporaryDirectory() as tmp:
             final_path = os.path.join(tmp, "My Video.mp4")
             open(final_path, "w").close()
@@ -701,7 +750,8 @@ class TrimClipLocallyTest(unittest.TestCase):
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
             output_opts = output_specs[0][1]
             self.assertNotIn("-c:v:0", output_opts)
-            self.assertEqual(output_opts, ["-map", "0", "-c", "copy", "-t", "20.0"])
+            self.assertNotIn("-c", output_opts)
+            self.assertEqual(output_opts, ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-t", "20.0"])
 
     def test_ffmpeg_failure_does_not_raise_and_keeps_full_video(self):
         """切り出し(ffmpeg)自体が失敗しても、既にダウンロード済みの動画全体は
