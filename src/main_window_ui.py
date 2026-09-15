@@ -204,6 +204,15 @@ class Ui_MainWindow(QMainWindow):
         layout.addWidget(self.detail_container)
         self.detail_container.setVisible(False)
 
+        # --- 保存先 ---
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("保存先:"))
+        self.out_edit = QLineEdit(saved_out_dir)
+        out_row.addWidget(self.out_edit, stretch=1)
+        self.browse_btn = QPushButton("参照...")
+        out_row.addWidget(self.browse_btn)
+        layout.addLayout(out_row)
+
         # --- クリップ範囲(任意) ---
         # 詳細設定・ログと同様、大半のユーザーは使わない任意機能のため既定では折りたたんでおき、
         # トグルボタンは詳細設定と同じく行の右端に寄せる
@@ -282,15 +291,6 @@ class Ui_MainWindow(QMainWindow):
 
         layout.addWidget(self.clip_container)
         self.clip_container.setVisible(False)
-
-        # --- 保存先 ---
-        out_row = QHBoxLayout()
-        out_row.addWidget(QLabel("保存先:"))
-        self.out_edit = QLineEdit(saved_out_dir)
-        out_row.addWidget(self.out_edit, stretch=1)
-        self.browse_btn = QPushButton("参照...")
-        out_row.addWidget(self.browse_btn)
-        layout.addLayout(out_row)
 
         # --- ダウンロード ---
         btn_row = QHBoxLayout()
