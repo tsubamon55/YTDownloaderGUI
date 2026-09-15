@@ -17,7 +17,7 @@ import yt_dlp
 from yt_dlp.networking.exceptions import TransportError
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
-from workers import DownloadWorker, FormatListWorker, is_network_error
+from workers import DownloadWorker, FormatListWorker, StoryboardFragmentWorker, describe_error, is_network_error
 
 
 def make_worker(**kwargs):
@@ -201,6 +201,77 @@ class FormatListWorkerRunTest(unittest.TestCase):
         self.assertEqual(len(results), 1)
         _, _, thumbnail_bytes, _ = results[0]
         self.assertEqual(thumbnail_bytes, b"")
+
+    def test_network_error_during_extract_info_yields_friendly_message(self):
+        """フォーマット一覧取得(extract_info)自体が通信エラーで失敗した場合も、
+        ダウンロード時と同じ親切なネットワークエラーメッセージになることを確認する"""
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        ydl.extract_info.side_effect = urllib.error.URLError("getaddrinfo failed")
+
+        errors = []
+        worker = FormatListWorker("https://example.com/watch?v=x")
+        worker.finished_error.connect(errors.append)
+
+        with patch("workers.yt_dlp.YoutubeDL", return_value=ydl):
+            worker.run()
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ネットワーク接続が切断されたため、動画情報の取得を中断しました", errors[0])
+
+    def test_non_network_error_during_extract_info_yields_raw_message(self):
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        ydl.extract_info.side_effect = ValueError("Unsupported URL")
+
+        errors = []
+        worker = FormatListWorker("https://example.com/watch?v=x")
+        worker.finished_error.connect(errors.append)
+
+        with patch("workers.yt_dlp.YoutubeDL", return_value=ydl):
+            worker.run()
+
+        self.assertEqual(errors, ["Unsupported URL"])
+
+
+class StoryboardFragmentWorkerRunTest(unittest.TestCase):
+    def test_success_emits_data(self):
+        resp = MagicMock()
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        resp.read.return_value = b"sprite-bytes"
+
+        results = []
+        worker = StoryboardFragmentWorker("https://example.com/storyboard.jpg")
+        worker.finished_ok.connect(results.append)
+
+        with patch("workers.urllib.request.urlopen", return_value=resp):
+            worker.run()
+
+        self.assertEqual(results, [b"sprite-bytes"])
+
+    def test_network_error_yields_friendly_message(self):
+        errors = []
+        worker = StoryboardFragmentWorker("https://example.com/storyboard.jpg")
+        worker.finished_error.connect(errors.append)
+
+        with patch("workers.urllib.request.urlopen", side_effect=socket.timeout("timed out")):
+            worker.run()
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ネットワーク接続が切断されたため、ストーリーボードの取得を中断しました", errors[0])
+
+
+class DescribeErrorTest(unittest.TestCase):
+    def test_network_error_includes_action_and_detail(self):
+        message = describe_error(urllib.error.URLError("no route to host"), "テスト処理")
+        self.assertIn("ネットワーク接続が切断されたため、テスト処理を中断しました", message)
+        self.assertIn("no route to host", message)
+
+    def test_non_network_error_returns_str(self):
+        self.assertEqual(describe_error(ValueError("bad value"), "テスト処理"), "bad value")
 
 
 class FormatEtaTest(unittest.TestCase):
@@ -478,38 +549,29 @@ class BuildFormatSelectorTest(unittest.TestCase):
 
 
 class DetectVcodecTest(unittest.TestCase):
-    """_detect_vcodecは、probe用のextract_info()(実ダウンロードとは別のネットワーク
-    リクエスト)ではなく、確定済みのローカルファイルをffprobeで直接調べる。
-    2回のリクエストの間にyt-dlp側の選択結果がズレて誤ったコーデック向けの
-    エンコード設定を適用してしまう事態を避けるため"""
+    """_detect_vcodecは、ffprobeで得たメタデータ(streams)から、実際に書き出された
+    本編映像のコーデックを判定する。probe用のextract_info()(実ダウンロードとは別の
+    ネットワークリクエスト)の結果をそのまま使うと、2回のリクエストの間にyt-dlp側の
+    選択結果がズレて誤ったコーデック向けのエンコード設定を適用してしまうため、
+    ffprobeで確定済みのローカルファイルを直接調べたメタデータを渡す"""
 
     def test_returns_video_stream_codec_name(self):
-        ffpp = MagicMock()
-        ffpp.get_metadata_object.return_value = {
+        metadata = {
             "streams": [
                 {"codec_type": "audio", "codec_name": "aac"},
                 {"codec_type": "video", "codec_name": "h264"},
             ],
         }
-        self.assertEqual(DownloadWorker._detect_vcodec(ffpp, "C:/out/video.mp4"), "h264")
+        self.assertEqual(DownloadWorker._detect_vcodec(metadata), "h264")
 
     def test_audio_only_file_returns_none(self):
-        ffpp = MagicMock()
-        ffpp.get_metadata_object.return_value = {
-            "streams": [{"codec_type": "audio", "codec_name": "aac"}],
-        }
-        self.assertIsNone(DownloadWorker._detect_vcodec(ffpp, "C:/out/audio.m4a"))
-
-    def test_ffprobe_failure_returns_none(self):
-        ffpp = MagicMock()
-        ffpp.get_metadata_object.side_effect = RuntimeError("ffprobe not found")
-        self.assertIsNone(DownloadWorker._detect_vcodec(ffpp, "C:/out/video.mp4"))
+        metadata = {"streams": [{"codec_type": "audio", "codec_name": "aac"}]}
+        self.assertIsNone(DownloadWorker._detect_vcodec(metadata))
 
     def test_skips_attached_pic_thumbnail_stream(self):
         """埋め込みサムネイルはdisposition=attached_picの映像ストリームとして
         検出されるため、本編映像のコーデック判定から除外されることを確認する"""
-        ffpp = MagicMock()
-        ffpp.get_metadata_object.return_value = {
+        metadata = {
             "streams": [
                 {
                     "codec_type": "video",
@@ -520,11 +582,10 @@ class DetectVcodecTest(unittest.TestCase):
                 {"codec_type": "video", "codec_name": "h264", "disposition": {"attached_pic": 0}},
             ],
         }
-        self.assertEqual(DownloadWorker._detect_vcodec(ffpp, "C:/out/video.mp4"), "h264")
+        self.assertEqual(DownloadWorker._detect_vcodec(metadata), "h264")
 
     def test_attached_pic_only_returns_none(self):
-        ffpp = MagicMock()
-        ffpp.get_metadata_object.return_value = {
+        metadata = {
             "streams": [
                 {
                     "codec_type": "video",
@@ -534,7 +595,27 @@ class DetectVcodecTest(unittest.TestCase):
                 {"codec_type": "audio", "codec_name": "aac"},
             ],
         }
-        self.assertIsNone(DownloadWorker._detect_vcodec(ffpp, "C:/out/audio.m4a"))
+        self.assertIsNone(DownloadWorker._detect_vcodec(metadata))
+
+
+class ProbeVideoStreamsTest(unittest.TestCase):
+    """_probe_video_streamsは、_detect_vcodecと_attached_pic_video_indicesの両方が
+    使う生のffprobeメタデータを1回の呼び出しでまとめて取得する。失敗時は空の
+    メタデータを返し、呼び出し元が通常のフォールバック動作を続けられるようにする"""
+
+    def test_returns_metadata_from_ffprobe(self):
+        ffpp = MagicMock()
+        ffpp.get_metadata_object.return_value = {"streams": [{"codec_type": "video"}]}
+        self.assertEqual(
+            DownloadWorker._probe_video_streams(ffpp, "C:/out/video.mp4"),
+            {"streams": [{"codec_type": "video"}]},
+        )
+        ffpp.get_metadata_object.assert_called_once_with("C:/out/video.mp4")
+
+    def test_ffprobe_failure_returns_empty_metadata(self):
+        ffpp = MagicMock()
+        ffpp.get_metadata_object.side_effect = RuntimeError("ffprobe not found")
+        self.assertEqual(DownloadWorker._probe_video_streams(ffpp, "C:/out/video.mp4"), {})
 
 
 class TrimClipLocallyTest(unittest.TestCase):
@@ -875,6 +956,19 @@ class IsNetworkErrorTest(unittest.TestCase):
     def test_unrelated_error_is_not_network_error(self):
         self.assertFalse(is_network_error(ValueError("invalid format spec")))
 
+    def test_broken_pipe_is_not_network_error(self):
+        """BrokenPipeErrorはConnectionErrorのサブクラスだが、ffmpeg等のサブプロセスとの
+        パイプが切れた場合(ディスク容量不足等、ネットワークと無関係のローカル要因)でも
+        発生するため、ネットワークエラーとは判定しないことを確認する"""
+        self.assertFalse(is_network_error(BrokenPipeError("pipe closed")))
+
+    def test_http_error_is_not_network_error(self):
+        """HTTPErrorはURLErrorのサブクラスだが、サーバーから正常にHTTP応答が
+        返ってきた場合(404/403/429等)であり、ネットワーク切断とは別の問題のため
+        ネットワークエラーとは判定しないことを確認する"""
+        http_error = urllib.error.HTTPError("http://example.com", 429, "Too Many Requests", {}, None)
+        self.assertFalse(is_network_error(http_error))
+
     def test_download_error_wrapping_url_error_via_implicit_context(self):
         """yt-dlpはexcept節の中でDownloadErrorを送出するため、明示的なfromが
         無くても__context__に元のネットワーク例外が残ることを再現する"""
@@ -895,7 +989,7 @@ class IsNetworkErrorTest(unittest.TestCase):
     def test_download_error_wrapping_via_exc_info_attribute(self):
         """DownloadErrorはsys.exc_info()由来のexc_infoタプルも保持するため、
         暗黙の例外チェーンが失われるケースに備えてそちらも辿る"""
-        original = ConnectionError("接続が切断されました")
+        original = ConnectionResetError("接続がリセットされました")
         wrapped = yt_dlp.utils.DownloadError("failed", exc_info=(type(original), original, None))
         self.assertTrue(is_network_error(wrapped))
 

@@ -22,12 +22,17 @@ from yt_dlp_selection import make_filtering_format_selector
 
 # ネットワーク切断・タイムアウト等を表す例外型。yt-dlpは内部でurllib/http.client/sslの
 # 例外を捕まえてDownloadError等でラップし直すため、直接の型だけでなく原因チェーン
-# (__cause__/__context__、およびyt-dlp独自のexc_info属性)も辿って判定する
+# (__cause__/__context__、およびyt-dlp独自のexc_info属性)も辿って判定する。
+# ConnectionErrorは意図的に含めない。そのサブクラスのBrokenPipeErrorは、ffmpeg
+# 等のサブプロセスとのパイプが切れた場合(ディスク容量不足やクラッシュ等、
+# ネットワークとは無関係のローカル要因)でも発生するため、丸ごと含めると誤診断になる
 _NETWORK_ERROR_TYPES = (
     urllib.error.URLError,
     socket.timeout,
     TimeoutError,
-    ConnectionError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    ConnectionRefusedError,
     http.client.HTTPException,
     ssl.SSLError,
     TransportError,
@@ -57,6 +62,18 @@ def is_network_error(exc: BaseException) -> bool:
         pending.append(current.__cause__)
         pending.append(current.__context__)
     return False
+
+
+def describe_error(exc: Exception, action: str) -> str:
+    """例外からユーザー向けのエラーメッセージを組み立てる。ネットワーク切断が
+    原因と判定できる場合は、原因を明示した文言にする(actionは「ダウンロード」
+    「動画情報の取得」等、中断された処理を表す名詞)"""
+    if is_network_error(exc):
+        return (
+            f"ネットワーク接続が切断されたため、{action}を中断しました。"
+            f"接続を確認してから再度お試しください。(詳細: {exc})"
+        )
+    return str(exc)
 
 
 class FormatListWorker(QThread):
@@ -146,7 +163,7 @@ class FormatListWorker(QThread):
 
             self.finished_ok.emit(formats, title, thumbnail_bytes, info.get("duration"))
         except Exception as e:
-            self.finished_error.emit(str(e))
+            self.finished_error.emit(describe_error(e, "動画情報の取得"))
 
 
 class StoryboardFragmentWorker(QThread):
@@ -166,7 +183,7 @@ class StoryboardFragmentWorker(QThread):
                 data = resp.read()
             self.finished_ok.emit(data)
         except Exception as e:
-            self.finished_error.emit(str(e))
+            self.finished_error.emit(describe_error(e, "ストーリーボードの取得"))
 
 
 class DownloadWorker(QThread):
@@ -421,37 +438,39 @@ class DownloadWorker(QThread):
         return make_filtering_format_selector(self.format_spec, is_codec_container_mismatch)
 
     @staticmethod
-    def _detect_vcodec(ffpp: FFmpegPostProcessor, filepath: str) -> str | None:
-        """ffprobeでファイルを直接調べ、実際に書き出された映像コーデックを返す
-        (音声のみの場合はNone)。
+    def _probe_video_streams(ffpp: FFmpegPostProcessor, filepath: str) -> dict:
+        """ffprobeでファイルを直接調べ、そのメタデータを返す(失敗時は空のメタデータ)。
 
         probe用に別途取得したextract_info()の結果を使うと、実ダウンロード時の
         フォーマット選択との間に2回のネットワークリクエストの時間差があるため、
         (フォーマットの有効期限切れ等で)実際にダウンロードされた内容とズレる
         可能性がある。確定済みのローカルファイルを直接調べることでそのズレを避ける。
 
+        _detect_vcodecと_attached_pic_video_indicesの両方で使う共通の生データを
+        1回のffprobe呼び出しで取得するためにまとめてある"""
+        try:
+            return ffpp.get_metadata_object(filepath)
+        except Exception as e:
+            log_debug(f"_probe_video_streams: ffprobeでの検出に失敗 ({e!r})")
+            return {}
+
+    @staticmethod
+    def _detect_vcodec(metadata: dict) -> str | None:
+        """ffprobeのメタデータから、実際に書き出された本編映像のコーデックを返す
+        (音声のみの場合はNone)。
+
         埋め込みサムネイルは別の映像ストリーム(disposition=attached_pic)として
         検出されるため、本編映像のコーデックを正しく判定できるよう除外する"""
-        try:
-            metadata = ffpp.get_metadata_object(filepath)
-        except Exception as e:
-            log_debug(f"_detect_vcodec: ffprobeでのコーデック検出に失敗 ({e!r})")
-            return None
         for stream in metadata.get("streams", []):
             if stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic"):
                 return stream.get("codec_name")
         return None
 
     @staticmethod
-    def _attached_pic_video_indices(ffpp: FFmpegPostProcessor, filepath: str) -> list[int]:
-        """ffprobeでファイルを直接調べ、埋め込みサムネイル(disposition=attached_pic)の
+    def _attached_pic_video_indices(metadata: dict) -> list[int]:
+        """ffprobeのメタデータから、埋め込みサムネイル(disposition=attached_pic)の
         映像ストリームについて、-c:v:N指定に使う0始まりの映像相対インデックスを
         全て返す(本編映像は除く。見つからない場合は空リスト)"""
-        try:
-            metadata = ffpp.get_metadata_object(filepath)
-        except Exception as e:
-            log_debug(f"_attached_pic_video_indices: ffprobeでの検出に失敗 ({e!r})")
-            return []
         indices = []
         video_index = 0
         for stream in metadata.get("streams", []):
@@ -489,8 +508,9 @@ class DownloadWorker(QThread):
         trimmed_path = f"{root}.clip{ext}"
 
         try:
-            vcodec = self._detect_vcodec(ffpp, self._final_filepath)
-            attached_pic_indices = self._attached_pic_video_indices(ffpp, self._final_filepath)
+            metadata = self._probe_video_streams(ffpp, self._final_filepath)
+            vcodec = self._detect_vcodec(metadata)
+            attached_pic_indices = self._attached_pic_video_indices(metadata)
 
             # -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから
             # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)。
@@ -610,12 +630,6 @@ class DownloadWorker(QThread):
             # ダウンロード/マージ自体は完了しており、後続の後処理だけが失敗した
             # ケースでは、完成済みファイルは残す
             self._cleanup_leftover_files(preserve_final=True)
-            if not self._is_cancelled and is_network_error(e):
-                message = (
-                    "ネットワーク接続が切断されたため、ダウンロードを中断しました。"
-                    f"接続を確認してから再度お試しください。(詳細: {e})"
-                )
-            else:
-                message = str(e)
+            message = str(e) if self._is_cancelled else describe_error(e, "ダウンロード")
             self.log.emit(f"エラー: {message}")
             self.finished_error.emit(message)
