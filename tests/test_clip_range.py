@@ -6,7 +6,13 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from clip_range import clip_range_label, parse_clip_time, resolve_clip_range
+from clip_range import (
+    auto_format_clip_input,
+    clip_range_label,
+    format_clip_digits,
+    parse_clip_time,
+    resolve_clip_range,
+)
 
 
 class ParseClipTimeTest(unittest.TestCase):
@@ -88,6 +94,57 @@ class ClipRangeLabelTest(unittest.TestCase):
 
     def test_missing_end_leaves_end_side_empty(self):
         self.assertEqual(clip_range_label(60.0, None), "1:00-")
+
+
+class FormatClipDigitsTest(unittest.TestCase):
+    def test_empty_stays_empty(self):
+        self.assertEqual(format_clip_digits(""), "")
+
+    def test_one_or_two_digits_stay_as_seconds_only(self):
+        self.assertEqual(format_clip_digits("5"), "5")
+        self.assertEqual(format_clip_digits("45"), "45")
+
+    def test_three_digits_becomes_minutes_seconds(self):
+        # "1"分"30"秒 (1桁の分)
+        self.assertEqual(format_clip_digits("130"), "1:30")
+
+    def test_four_digits_becomes_minutes_seconds(self):
+        self.assertEqual(format_clip_digits("1230"), "12:30")
+
+    def test_five_digits_becomes_hours_minutes_seconds(self):
+        self.assertEqual(format_clip_digits("10203"), "1:02:03")
+
+    def test_six_digits_becomes_hours_minutes_seconds(self):
+        self.assertEqual(format_clip_digits("120304"), "12:03:04")
+
+    def test_seventh_digit_drops_the_oldest_one(self):
+        # 7桁目を打つと、最も古い(先頭の)桁があふれて消える
+        self.assertEqual(format_clip_digits("1203045"), "20:30:45")
+
+
+class AutoFormatClipInputTest(unittest.TestCase):
+    def test_typing_digits_in_order_fills_from_the_right(self):
+        # "1" "3" "0" と1桁ずつ打っていくと、末尾(秒側)に積み上がっていき
+        # 最終的に "1:30" (1分30秒) になる。左詰めの2桁区切りだと "13:0" に
+        # なってしまい意味が変わるため、右詰め方式にしている
+        self.assertEqual(auto_format_clip_input("1"), "1")
+        self.assertEqual(auto_format_clip_input("13"), "13")
+        self.assertEqual(auto_format_clip_input("130"), "1:30")
+
+    def test_already_formatted_text_is_idempotent(self):
+        self.assertEqual(auto_format_clip_input("1:02:03"), "1:02:03")
+
+    def test_backspace_shifts_remaining_digits_back(self):
+        # "12:03:04" から末尾の数字を1つ消すと、桁が繰り上がる前の状態
+        # ("1:20:30" = "120304"から末尾の"4"を除いた"12030"の右詰め表示) に戻る
+        self.assertEqual(auto_format_clip_input("12:03:0"), "1:20:30")
+
+    def test_fractional_seconds_input_is_left_alone(self):
+        # "."など数字・コロン以外を含む場合は、端数秒などの手入力を尊重して何もしない
+        self.assertEqual(auto_format_clip_input("1:02.5"), "1:02.5")
+
+    def test_empty_stays_empty(self):
+        self.assertEqual(auto_format_clip_input(""), "")
 
 
 if __name__ == "__main__":

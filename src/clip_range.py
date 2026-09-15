@@ -59,6 +59,35 @@ def clip_range_label(start: float | None, end: float | None) -> str | None:
     return f"{start_label}-{end_label}"
 
 
+def format_clip_digits(digits: str) -> str:
+    """数字だけの文字列を、末尾から2桁ずつ区切って"HH:MM:SS"形式にする
+    (電卓・ストップウォッチ入力のように、新しく打った数字は常に末尾(秒側)に
+    積み上がっていく右詰め方式)。7桁目以降は最も古い(先頭の)桁があふれて消える。
+
+    例: "130" -> "1:30" (1分30秒), "10203" -> "1:02:03" (1時間2分3秒)
+    """
+    if len(digits) > 6:
+        digits = digits[-6:]
+    if len(digits) <= 2:
+        return digits
+    if len(digits) <= 4:
+        return f"{digits[:-2]}:{digits[-2:]}"
+    return f"{digits[:-4]}:{digits[-4:-2]}:{digits[-2:]}"
+
+
+def auto_format_clip_input(text: str) -> str:
+    """クリップ範囲欄の現在のテキストから、右詰め方式で振り直したコロン区切りの
+    表示を返す。数字とコロンだけで構成されている場合にのみ働き、そうでない場合
+    (端数秒を指定する"."など、自分で細かく書式を制御したい入力)はそのまま返す。
+    テキスト全体から数字だけを毎回抜き出して組み直すため、新しく数字を打った場合も
+    バックスペースで消した場合も、常に「末尾に数字が積み上がる」動作で一貫する。
+    """
+    if any(ch not in "0123456789:" for ch in text):
+        return text
+    digits = text.replace(":", "")
+    return format_clip_digits(digits)
+
+
 def resolve_clip_range(start_text: str, end_text: str) -> tuple[float | None, float | None]:
     """開始・終了時刻のテキストを検証し、(start_seconds, end_seconds) を返す。
 

@@ -12,7 +12,12 @@ from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
 
-from clip_range import format_clip_time, parse_clip_time, resolve_clip_range
+from clip_range import (
+    auto_format_clip_input,
+    format_clip_time,
+    parse_clip_time,
+    resolve_clip_range,
+)
 from config import CONFIG
 from format_engine import (
     compute_auto_format_note,
@@ -95,6 +100,12 @@ class MainWindow(Ui_MainWindow):
         self.clip_range_slider.previewRequested.connect(self.on_clip_preview_requested)
         self.clip_start_edit.textChanged.connect(self.on_clip_text_changed)
         self.clip_end_edit.textChanged.connect(self.on_clip_text_changed)
+        self.clip_start_edit.textEdited.connect(
+            lambda text: self.on_clip_text_edited(self.clip_start_edit, text)
+        )
+        self.clip_end_edit.textEdited.connect(
+            lambda text: self.on_clip_text_edited(self.clip_end_edit, text)
+        )
 
     def _sync_window_height(self) -> None:
         """現在表示中のウィジェットに合わせてウィンドウの高さだけを追従させる"""
@@ -344,6 +355,15 @@ class MainWindow(Ui_MainWindow):
         self.clip_end_edit.setText("" if high >= total else format_clip_time(high))
         self.clip_start_edit.blockSignals(False)
         self.clip_end_edit.blockSignals(False)
+
+    def on_clip_text_edited(self, edit: QLineEdit, text: str) -> None:
+        """ユーザーが切り抜き範囲欄に数字を入力した際、右詰め(ストップウォッチ入力)方式で
+        コロンを自動的に振り直す。(プログラム側からのsetText、例えばスライダー操作の反映では
+        発火しないシグナルなので、ユーザーの手入力のみを対象にできる)"""
+        formatted = auto_format_clip_input(text)
+        if formatted != text:
+            edit.setText(formatted)
+            edit.setCursorPosition(len(formatted))
 
     def on_clip_text_changed(self, *_: Any) -> None:
         """テキスト入力欄の内容をスライダーへ反映する。解析できない入力(入力途中を含む)は
