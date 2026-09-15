@@ -493,8 +493,16 @@ class DownloadWorker(QThread):
             attached_pic_indices = self._attached_pic_video_indices(ffpp, self._final_filepath)
 
             # -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから
-            # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)
+            # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)。
+            # ただしこの入力側シークはキーフレーム(mkv/webmではその位置に基づくクラスタ単位)
+            # までしか正確に戻れず、コンテナによっては本編映像の目標時刻より数秒前の
+            # 位置までしか進まない。本編映像は再エンコードのため後段で余剰分が破棄され
+            # 正確な時刻に合うが、ストリームコピーする音声はその破棄が効かず、シーク後の
+            # 位置からそのままコピーされてしまうため、本編映像より数秒早い音声が
+            # 出力されズレて聞こえる。そのため同じ時刻を-iの直後(=output_opts側)にも
+            # 重ねて指定し、コピーストリームも含めて目標時刻まで正確にシークさせる
             input_opts = ["-ss", str(self.start_time)] if self.start_time else []
+            accurate_seek_opts = ["-ss", str(self.start_time)] if self.start_time else []
 
             # -map 0で全ストリーム(本編映像・音声に加え、埋め込みサムネイルの
             # attached_picストリームやmkvの添付ファイルなど)を出力対象に含める。
@@ -504,7 +512,7 @@ class DownloadWorker(QThread):
             # 本編映像までストリームコピーになり、キーフレーム単位でしか正確な時刻に合わせられず
             # 音声とズレて見えてしまう)。埋め込みサムネイルの映像ストリームは対応コーデックに
             # 関わらず常にコピーし、動画エンコーダに巻き込まれて壊れないようにする
-            output_opts = ["-map", "0", "-c:a", "copy", "-c:t", "copy"]
+            output_opts = accurate_seek_opts + ["-map", "0", "-c:a", "copy", "-c:t", "copy"]
             codec_prefix = (vcodec or "").split(".")[0].lower()
             video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix)
             if video_encoder:
