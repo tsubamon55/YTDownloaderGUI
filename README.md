@@ -84,10 +84,10 @@ Python未インストールの環境でも動くexeを作成できます。ビ�
 .venv\Scripts\pyinstaller YTDownloaderGUI.spec --noconfirm
 ```
 
-`dist\YTDownloaderGUI\` フォルダ一式(`YTDownloaderGUI.exe` と `_internal`)が更新されます。
+`dist\YTDownloaderGUI\` フォルダ一式(`YTDownloaderGUI.exe` と、同階層に展開されるDLL・ライブラリ・`ffmpeg\`・`config.json`)が更新されます。
 フォルダ内にffmpegが同梱されているため、配布先のPCに追加のインストール作業は不要です。
 
-**注意:** `YTDownloaderGUI.exe` 単体だけをコピーして配布・実行すると `_internal` フォルダが見つからず起動時にエラーになります。フォルダごと配布するか、下記のインストーラーを使ってください。
+**注意:** `YTDownloaderGUI.exe` 単体だけをコピーして配布・実行すると、同階層にあるべきDLLやライブラリが見つからず起動時にエラーになります。フォルダごと配布するか、下記のインストーラーを使ってください。
 
 ## インストーラーのビルド
 
@@ -100,7 +100,7 @@ Python未インストールの環境でも動くexeを作成できます。ビ�
 
 `installer_output\YTDownloaderGUI-Setup-<バージョン>.exe` が生成されます。このインストーラーは管理者権限不要で `%LOCALAPPDATA%\Programs\YTDownloaderGUI` にインストールし、スタートメニュー/デスクトップにショートカットを作成します。
 
-バージョンを上げる場合は `installer.iss` 冒頭の `#define MyAppVersion "1.0.0"` を書き換えてから再ビルドしてください。
+バージョンを上げる場合は `installer.iss` 冒頭の `#define MyAppVersion` の値を書き換えてから再ビルドしてください。
 
 ## ライセンスに関する注意
 

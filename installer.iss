@@ -27,6 +27,11 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 [Tasks]
 Name: "desktopicon"; Description: "デスクトップにアイコンを作成する"; GroupDescription: "追加のアイコン:"
 
+[InstallDelete]
+; 1.0.0は同梱ファイルを{app}\_internalに置いていた。Inno Setupは新しいファイル一覧に無いファイルを
+; 消さないため、上書きインストール時に旧構成が丸ごと残ってしまうのを防ぐ
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Excludes: "config.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; config.jsonはユーザーが編集している可能性があるため、更新時に上書きしない(初回インストール時のみ配置する)
