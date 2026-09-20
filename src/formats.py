@@ -68,7 +68,10 @@ def format_size(num_bytes) -> str:
     if not num_bytes:
         return "不明"
     mb = num_bytes / (1024 * 1024)
-    if mb >= 1024:
+    # 単位の切り替えは表示丸めの後の値で判定する。丸める前の値で判定すると、
+    # 1024MB未満でも小数第1位への丸めで繰り上がる境界(1023.95MiB以上)が
+    # "1024.0MB"という桁のおかしい表示になってしまう
+    if round(mb, 1) >= 1024:
         return f"{mb / 1024:.2f}GB"
     return f"{mb:.1f}MB"
 

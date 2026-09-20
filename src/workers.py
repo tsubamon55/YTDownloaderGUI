@@ -2,6 +2,7 @@
 
 import http.client
 import os
+import re
 import socket
 import ssl
 import time
@@ -218,16 +219,53 @@ class DownloadWorker(QThread):
         self._start_time: float | None = None
         self._active_postprocessors: dict[str, int] = {}
         self._unique_title: str | None = None
+        self._preexisting_names: set[str] = set()
         self._component_ids: list[str | None] = []
         self._component_weights: list[float] = [1.0]
         self._completed_weight: float = 0.0
         self._current_component_index: int = 0
 
+    # yt-dlpが途中経過として作る未完成・中間ファイルの名前パターン。ダウンロード中の
+    # .part / .ytdl / .temp (分割取得時は .part-Frag12 のように連番が付く)と、
+    # 映像・音声を別々に取得したときの結合前ファイル(例: "My Video.f137.mp4")。
+    # これらは完成品ではないため、開始前から残っていても保護対象にはしない
+    _INCOMPLETE_NAME_PATTERN = re.compile(
+        r"\.(part|ytdl|temp)(-Frag\d+)?$|\.f\d+\.[^.]+$", re.IGNORECASE
+    )
+
     def cancel(self):
         self._is_cancelled = True
 
+    def _snapshot_preexisting_files(self):
+        """ダウンロード開始前から保存先に存在していた、同名(拡張子違いを含む)の
+        完成済みファイルを記録する。
+
+        _resolve_unique_titleは最終拡張子が特定できる場合「同じ拡張子」しか衝突と
+        みなさないため、例えば既に My Video.mp3 がある状態で同じ動画をmp4で落とすと
+        タイトルは (1) も付かず My Video のままになる。この状態で失敗すると
+        _cleanup_leftover_filesの前方一致が無関係な過去の完成ファイルまで巻き込んで
+        しまうため、ここで除外対象を控えておく。ただし .part 等の未完成ファイルは
+        前回の失敗の残骸であり今回も消してよいので、保護対象から外す。
+        """
+        self._preexisting_names = set()
+        if not self._unique_title or not os.path.isdir(self.out_dir):
+            return
+        prefix = f"{self._unique_title}."
+        try:
+            names = os.listdir(self.out_dir)
+        except OSError as e:
+            log_debug(f"_snapshot_preexisting_files: 保存先の一覧取得に失敗 ({e!r})")
+            return
+        self._preexisting_names = {
+            os.path.normcase(name)
+            for name in names
+            if name.startswith(prefix) and not self._INCOMPLETE_NAME_PATTERN.search(name)
+        }
+
     def _cleanup_leftover_files(self, preserve_final: bool = False):
-        """キャンセル時・エラー時にダウンロード先へ残った未完成ファイル(.part等)を削除する。
+        """キャンセル時・エラー時に、今回のダウンロードで保存先へ残った未完成ファイル
+        (.part等)を削除する。開始前から存在していたファイルは今回の生成物ではないため
+        削除しない(_snapshot_preexisting_files参照)。
 
         preserve_final=Trueの場合、既に完成している最終出力ファイル(self._final_filepath)は
         削除対象から除外する。本編の生成自体は成功し、その後のサムネイル埋め込み等の
@@ -241,6 +279,8 @@ class DownloadWorker(QThread):
             keep_path = os.path.normcase(os.path.abspath(self._final_filepath))
         for name in os.listdir(self.out_dir):
             if not name.startswith(prefix):
+                continue
+            if os.path.normcase(name) in self._preexisting_names:
                 continue
             path = os.path.join(self.out_dir, name)
             if keep_path and os.path.normcase(os.path.abspath(path)) == keep_path:
@@ -525,8 +565,18 @@ class DownloadWorker(QThread):
         output_opts += ["-c", "copy"]
         for i in range(len(thumbnail_paths)):
             output_opts += [f"-disposition:{video_stream_count + i}", "attached_pic"]
-        ffpp.real_run_ffmpeg(input_specs, [(merged_path, output_opts)])
-        os.replace(merged_path, video_path)
+        try:
+            ffpp.real_run_ffmpeg(input_specs, [(merged_path, output_opts)])
+            os.replace(merged_path, video_path)
+        finally:
+            # ffmpegが失敗した場合、部分的に書き込まれた中間ファイルが保存先に残る。
+            # この経路は呼び出し元で握りつぶされて成功扱い(finished_ok)になり
+            # _cleanup_leftover_filesも走らないため、ここで確実に後片付けする
+            if os.path.isfile(merged_path):
+                try:
+                    os.remove(merged_path)
+                except OSError as cleanup_error:
+                    log_debug(f"_reattach_thumbnails: 中間ファイルの削除に失敗 ({cleanup_error!r})")
 
     @staticmethod
     def _main_video_stream_absolute_index(metadata: dict) -> int | None:
@@ -714,6 +764,7 @@ class DownloadWorker(QThread):
             expected_ext = self._expected_ext(probe_info)
             self._unique_title = self._resolve_unique_title(self._build_title(probe_info), expected_ext)
             self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
+            self._snapshot_preexisting_files()
             self._init_component_weights(probe_info)
 
             ydl_opts = {
@@ -742,7 +793,12 @@ class DownloadWorker(QThread):
                 ydl.download([self.url])
 
             if self._is_cancelled:
-                self._cleanup_leftover_files()
+                # download()が例外を投げずに戻ってきた=本編のダウンロードも後処理も
+                # 完了している。後処理中にキャンセルを押した場合がこれにあたるため、
+                # 完成済みの最終ファイルは削除せずに残す(未完成の中間ファイルのみ削除)
+                self._cleanup_leftover_files(preserve_final=True)
+                if self._final_filepath and os.path.isfile(self._final_filepath):
+                    self.log.emit(f"完成済みのファイルは残しました: {self._final_filepath}")
                 self.finished_error.emit("キャンセルされました")
             else:
                 if self.start_time is not None or self.end_time is not None:

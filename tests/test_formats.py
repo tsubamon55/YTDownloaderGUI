@@ -60,6 +60,14 @@ class FormatSizeTest(unittest.TestCase):
     def test_gigabytes_at_or_above_1024mb(self):
         self.assertEqual(format_size(2 * 1024 * 1024 * 1024), "2.00GB")
 
+    def test_rounds_up_to_gb_instead_of_showing_1024mb(self):
+        """1024MB未満でも、小数第1位への丸めで繰り上がる境界(1023.95MiB以上)は
+        "1024.0MB"という桁のおかしい表示になるため、GB表記へ切り替える"""
+        self.assertEqual(format_size(1073699880), "1.00GB")  # = 1023.959...MiB
+
+    def test_just_below_rounding_boundary_stays_in_mb(self):
+        self.assertEqual(format_size(1073689000), "1023.9MB")  # = 1023.949...MiB
+
 
 class FormatCodecTest(unittest.TestCase):
     def test_known_video_and_audio_codec_labels(self):

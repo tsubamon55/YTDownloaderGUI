@@ -46,6 +46,14 @@ class ParseClipTimeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_clip_time("-5")
 
+    def test_nan_and_infinity_raise(self):
+        """float()は"nan"/"inf"も受理してしまうが、非負チェック(n < 0)はどちらにも
+        効かない。素通りさせるとformat_clip_timeのround()がValueError/OverflowErrorで
+        落ち、動画長との比較(NaNとの比較は常にFalse)も素通りしてしまう"""
+        for text in ("nan", "NaN", "inf", "Inf", "infinity", "1:nan", "inf:30"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_clip_time(text)
+
 
 class ResolveClipRangeTest(unittest.TestCase):
     def test_both_empty_returns_none_none(self):
@@ -80,6 +88,16 @@ class ResolveClipRangeTest(unittest.TestCase):
 
     def test_end_after_zero_with_blank_start_is_valid(self):
         self.assertEqual(resolve_clip_range("", "0:01"), (None, 1.0))
+
+
+class ResolveClipRangeNonFiniteTest(unittest.TestCase):
+    def test_nan_start_raises_instead_of_passing_through(self):
+        with self.assertRaises(ValueError):
+            resolve_clip_range("nan", "")
+
+    def test_infinite_end_raises_instead_of_passing_through(self):
+        with self.assertRaises(ValueError):
+            resolve_clip_range("", "inf")
 
 
 class ClipRangeLabelTest(unittest.TestCase):

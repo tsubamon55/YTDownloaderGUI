@@ -93,6 +93,41 @@ class LoadConfigTest(unittest.TestCase):
         self.assertEqual(loaded, config.AppConfig())
         self.assertEqual(len(logged), 1)
 
+    def test_wrong_value_type_falls_back_to_default_and_logs(self):
+        """キー名が正しくJSONとしても正当でも、値の型が違えば既定値のままにする。
+        そのまま通すと下流(スライス等)で原因の分からないTypeErrorになり、
+        config.jsonの型ミスがUIにもログにも現れなくなる"""
+        loaded, logged = self._load({"thumbnail_max_candidates": "3"})
+        self.assertEqual(loaded.thumbnail_max_candidates, config.AppConfig().thumbnail_max_candidates)
+        self.assertEqual(len(logged), 1)
+        self.assertIn("thumbnail_max_candidates", logged[0])
+
+    def test_dict_setting_given_non_dict_falls_back_to_default(self):
+        loaded, logged = self._load({"clip_video_encoder_by_codec_prefix": ["libx264", "18"]})
+        self.assertEqual(
+            loaded.clip_video_encoder_by_codec_prefix,
+            config.AppConfig().clip_video_encoder_by_codec_prefix,
+        )
+        self.assertEqual(len(logged), 1)
+
+    def test_string_setting_given_number_falls_back_to_default(self):
+        loaded, logged = self._load({"mp3_quality": 320})
+        self.assertEqual(loaded.mp3_quality, config.AppConfig().mp3_quality)
+        self.assertEqual(len(logged), 1)
+
+    def test_bool_is_not_accepted_as_int(self):
+        """boolはintのサブクラスだが、件数や時間の設定として意図した値ではない"""
+        loaded, logged = self._load({"info_fetch_debounce_ms": True})
+        self.assertEqual(loaded.info_fetch_debounce_ms, config.AppConfig().info_fetch_debounce_ms)
+        self.assertEqual(len(logged), 1)
+
+    def test_float_setting_accepts_json_integer(self):
+        """秒数のような実数設定は、JSONに整数で書かれていても受け入れる"""
+        loaded, logged = self._load({"thumbnail_fetch_timeout_seconds": 8})
+        self.assertEqual(loaded.thumbnail_fetch_timeout_seconds, 8.0)
+        self.assertIsInstance(loaded.thumbnail_fetch_timeout_seconds, float)
+        self.assertEqual(logged, [])
+
 
 if __name__ == "__main__":
     unittest.main()

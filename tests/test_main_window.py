@@ -615,6 +615,25 @@ class StartDownloadValidationTest(MainWindowTestCase):
         self.assertFalse(self.window.download_btn.isEnabled())
         self.assertTrue(self.window.cancel_btn.isEnabled())
 
+    def test_makedirs_failure_shows_input_error_and_stops(self):
+        """予約デバイス名(CON等)や同名ファイルが存在するパスを手入力した場合、
+        他の入力ミスと同じ「入力エラー」で案内する。try/exceptがないと
+        グローバルのexcepthookに捕まり「予期しないエラー」という技術的な文言になる"""
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("C:/out/CON")
+        with (
+            patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"),
+            patch.object(main_window_module.os, "makedirs", side_effect=OSError("Invalid argument")),
+            patch.object(QMessageBox, "warning") as warning_mock,
+            patch.object(main_window_module, "DownloadWorker") as worker_cls,
+        ):
+            self.window.start_download()
+
+        warning_mock.assert_called_once()
+        self.assertEqual(warning_mock.call_args[0][1], "入力エラー")
+        worker_cls.assert_not_called()
+        self.assertIsNone(self.window.worker)
+
     def test_clip_range_is_passed_to_worker(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
         self.window.out_edit.setText("C:/out")
@@ -879,6 +898,103 @@ class SignalWiringTest(MainWindowTestCase):
         self.window.log_toggle_btn.setChecked(True)
         self.assertTrue(self.window.log_view.isVisible())
         self.assertEqual(self.window.log_toggle_btn.text(), "ログ ▴")
+
+
+class CloseEventTest(MainWindowTestCase):
+    """終了時にワーカースレッドを止めて終了を待つこと。待たずに閉じると
+    QThreadがrun()のままインタプリタ終了処理に入り、yt-dlp/ffmpegが中途半端に
+    打ち切られて未完成ファイルが残る"""
+
+    @staticmethod
+    def _running_worker():
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        worker.wait.return_value = True
+        return worker
+
+    @staticmethod
+    def _event():
+        event = MagicMock()
+        event.accepted = True
+        return event
+
+    def test_no_worker_closes_immediately(self):
+        event = self._event()
+        self.window.closeEvent(event)
+        event.accept.assert_called_once()
+        event.ignore.assert_not_called()
+
+    def test_running_download_asks_and_cancels_then_waits(self):
+        worker = self._running_worker()
+        self.window.worker = worker
+        event = self._event()
+
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(event)
+
+        worker.cancel.assert_called_once()
+        worker.wait.assert_called_once()
+        event.accept.assert_called_once()
+        event.ignore.assert_not_called()
+
+    def test_declining_the_prompt_keeps_the_window_open(self):
+        worker = self._running_worker()
+        self.window.worker = worker
+        event = self._event()
+
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+            self.window.closeEvent(event)
+
+        event.ignore.assert_called_once()
+        event.accept.assert_not_called()
+        worker.cancel.assert_not_called()
+        worker.wait.assert_not_called()
+
+    def test_waits_for_background_fetch_workers_without_prompting(self):
+        """フォーマット取得・ストーリーボード取得はユーザー操作を伴わない短い処理なので、
+        確認ダイアログは出さずに終了だけ待つ"""
+        format_worker = self._running_worker()
+        storyboard_worker = self._running_worker()
+        self.window.format_worker = format_worker
+        self.window._storyboard_workers.add(storyboard_worker)
+        event = self._event()
+
+        with patch.object(QMessageBox, "question") as question_mock:
+            self.window.closeEvent(event)
+
+        question_mock.assert_not_called()
+        format_worker.wait.assert_called_once()
+        storyboard_worker.wait.assert_called_once()
+        event.accept.assert_called_once()
+
+    def test_timed_out_worker_is_logged_and_close_proceeds(self):
+        """cancel()は進捗フックの区切りでしか効かないため、後処理中は待ち切れない
+        ことがある。その場合もUIスレッドからできることはないので記録だけ残して閉じる"""
+        worker = self._running_worker()
+        worker.wait.return_value = False
+        self.window.worker = worker
+        event = self._event()
+
+        with (
+            patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            patch.object(main_window_module, "log_debug") as log_debug_mock,
+        ):
+            self.window.closeEvent(event)
+
+        log_debug_mock.assert_called_once()
+        event.accept.assert_called_once()
+
+    def test_finished_worker_is_not_waited_on(self):
+        worker = MagicMock()
+        worker.isRunning.return_value = False
+        self.window.worker = worker
+        event = self._event()
+
+        self.window.closeEvent(event)
+
+        worker.cancel.assert_not_called()
+        worker.wait.assert_not_called()
+        event.accept.assert_called_once()
 
 
 if __name__ == "__main__":

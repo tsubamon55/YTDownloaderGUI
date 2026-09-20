@@ -78,6 +78,48 @@ class InstallExceptionHookTest(unittest.TestCase):
                 except ValueError:
                     sys.excepthook(*sys.exc_info())  # 例外が伝播しなければOK
 
+    def test_dialog_says_logging_failed_when_log_cannot_be_written(self):
+        """ログが残っていないのに「記録しました」と案内すると、ユーザーがそのパスを
+        開いても何もなく、調査の際に誤った手がかりを与えてしまう"""
+        with tempfile.TemporaryDirectory() as tmp:
+            blocking_file = os.path.join(tmp, "blocked")
+            open(blocking_file, "w").close()
+            log_path = os.path.join(blocking_file, "crash.log")
+            with patch.object(main, "get_log_file_path", return_value=log_path):
+                main.install_exception_hook()
+
+            with (
+                patch.object(main.QApplication, "instance", return_value=object()),
+                patch.object(main.QMessageBox, "critical") as critical_mock,
+            ):
+                try:
+                    raise ValueError("boom")
+                except ValueError:
+                    sys.excepthook(*sys.exc_info())
+
+            body = critical_mock.call_args[0][2]
+            self.assertIn("記録には失敗しました", body)
+            self.assertNotIn("詳細はログに記録しました", body)
+
+    def test_dialog_points_to_log_when_write_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, "crash.log")
+            with patch.object(main, "get_log_file_path", return_value=log_path):
+                main.install_exception_hook()
+
+            with (
+                patch.object(main.QApplication, "instance", return_value=object()),
+                patch.object(main.QMessageBox, "critical") as critical_mock,
+            ):
+                try:
+                    raise ValueError("boom")
+                except ValueError:
+                    sys.excepthook(*sys.exc_info())
+
+            body = critical_mock.call_args[0][2]
+            self.assertIn("詳細はログに記録しました", body)
+            self.assertIn(log_path, body)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,19 +24,27 @@ def install_exception_hook():
         message = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         sys.stderr.write(message)
 
+        logged = True
         try:
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}]\n{message}\n")
         except OSError:
-            pass
+            # 書き込みに失敗してもアプリは継続させるが、案内の文言は実際の結果に合わせる。
+            # 残っていないログの場所を案内すると、調査の際に誤った手がかりを与えてしまう
+            logged = False
 
         if QApplication.instance() is not None:
+            detail = (
+                f"詳細はログに記録しました:\n{log_path}"
+                if logged
+                else f"ログファイルへの記録には失敗しました:\n{log_path}"
+            )
             QMessageBox.critical(
                 None,
                 "予期しないエラー",
                 "予期しないエラーが発生しました。動作が不安定な場合はアプリを再起動してください。\n\n"
-                f"詳細はログに記録しました:\n{log_path}\n\n{exc_type.__name__}: {exc_value}",
+                f"{detail}\n\n{exc_type.__name__}: {exc_value}",
             )
 
     sys.excepthook = handle_exception

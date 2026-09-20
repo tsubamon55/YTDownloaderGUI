@@ -97,6 +97,56 @@ class DragTest(unittest.TestCase):
         self.assertEqual(high, 30)
 
 
+class OverlappingHandlesTest(unittest.TestCase):
+    """開始・終了が同じ位置に重なった状態(テキスト欄に同じ時刻を入力した場合など)でも、
+    範囲を左右どちらへも広げられること。掴んだ側と逆向きの操作はクランプに阻まれるため、
+    重なっている間は動かした向きに応じてハンドルを掴み直す"""
+
+    @staticmethod
+    def _overlapped_slider(value: int):
+        slider = RangeSlider()
+        slider.resize(200, 24)
+        slider.setRange(0, 100)
+        slider.setValues(value, value)
+        return slider
+
+    def test_can_widen_to_the_right_from_overlapping_handles(self):
+        slider = self._overlapped_slider(50)
+        events = []
+        slider.rangeChanged.connect(lambda low, high: events.append((low, high)))
+
+        slider._active_handle = "low"
+        slider._drag_to(160)  # 重なった位置(x=100)より右へドラッグ
+
+        low, high = slider.values()
+        self.assertEqual(low, 50)
+        self.assertGreater(high, 50)
+        self.assertEqual(len(events), 1)
+
+    def test_can_widen_to_the_left_from_overlapping_handles(self):
+        slider = self._overlapped_slider(50)
+
+        slider._active_handle = "high"
+        slider._drag_to(40)  # 重なった位置より左へドラッグ
+
+        low, high = slider.values()
+        self.assertLess(low, 50)
+        self.assertEqual(high, 50)
+
+    def test_separated_handles_are_not_swapped(self):
+        """重なっていない通常の状態では掴み直しは起きず、従来どおりクランプされる"""
+        slider = RangeSlider()
+        slider.resize(200, 24)
+        slider.setRange(0, 100)
+        slider.setValues(20, 60)
+
+        slider._active_handle = "low"
+        slider._drag_to(190)  # high(60)を超える位置へ
+
+        self.assertEqual(slider.values(), (60, 60))
+        self.assertEqual(slider._active_handle, "low")
+
+
 class DisabledAppearanceTest(unittest.TestCase):
     """disabled時(URL未入力等)は有効時と見分けられるよう選択バーがグレーアウトされ、
     通常時の青色のままにならないことを実際の描画結果(画素色)で検証する"""

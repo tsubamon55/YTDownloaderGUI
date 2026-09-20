@@ -2,6 +2,8 @@
 
 ファイルが存在しない場合や、一部のキーを欠く場合は既定値を使う。JSON構文エラー等で
 読み込みに失敗した場合もアプリ全体を落とさず、すべて既定値にフォールバックする。
+キーは正しいが値の型が既定値と異なる場合も、そのキーだけ既定値のままにする
+(不正な型をそのまま通すと、下流で原因の分からないエラーになるため)。
 """
 
 import json
@@ -56,6 +58,38 @@ def _config_file_path() -> str | None:
     return None
 
 
+def _validated_value(expected_type, current, value):
+    """config.jsonから読んだ値を、AppConfigで宣言された型に合うか確かめたうえで返す。
+
+    戻り値は (採用してよいか, 実際に設定する値)。キー名が正しく JSON としても正当でも、
+    値の型が違えば(例: "thumbnail_max_candidates": "3")そのまま設定すると、下流の
+    スライス操作や文字列結合で TypeError / AttributeError になり、config.jsonの型ミスが
+    原因だと分からない無関係なエラー(「動画情報の取得に失敗しました」等)に化けてしまう。
+
+    判定の基準に既定値の実際の型ではなく宣言された型を使うのは、`x: float = 5` のように
+    既定値だけ整数で書かれている項目で、正当な小数の指定まで弾いてしまわないため。
+    """
+    # boolはintのサブクラスであり、件数や時間の設定として意図した値ではないため明示的に弾く
+    if isinstance(value, bool) is not (expected_type is bool):
+        return False, current
+
+    if expected_type is float:
+        # JSONに 5 と整数で書かれていても、秒数のような実数設定には受け入れる
+        if isinstance(value, (int, float)):
+            return True, float(value)
+        return False, current
+
+    if expected_type is dict and isinstance(value, dict):
+        # 辞書型の設定は、指定されたキーだけ上書きし残りは既定値のまま保つ
+        merged = dict(current) if isinstance(current, dict) else {}
+        merged.update(value)
+        return True, merged
+
+    if isinstance(expected_type, type) and isinstance(value, expected_type):
+        return True, value
+    return False, current
+
+
 def load_config() -> AppConfig:
     config = AppConfig()
     path = _config_file_path()
@@ -75,19 +109,21 @@ def load_config() -> AppConfig:
         log_debug(f"load_config: {path} の内容がオブジェクトではないため既定値を使用します")
         return config
 
-    valid_keys = {f.name for f in fields(AppConfig)}
+    field_types = {f.name: f.type for f in fields(AppConfig)}
     for key, value in data.items():
-        if key not in valid_keys:
+        if key not in field_types:
             log_debug(f"load_config: 未知の設定キーを無視しました ({key!r})")
             continue
-        current = getattr(config, key)
-        if isinstance(current, dict) and isinstance(value, dict):
-            # 辞書型の設定は、指定されたキーだけ上書きし残りは既定値のまま保つ
-            merged = dict(current)
-            merged.update(value)
-            setattr(config, key, merged)
-        else:
-            setattr(config, key, value)
+        expected_type = field_types[key]
+        accepted, resolved = _validated_value(expected_type, getattr(config, key), value)
+        if not accepted:
+            expected_name = getattr(expected_type, "__name__", expected_type)
+            log_debug(
+                f"load_config: 設定 {key!r} の値の型が不正なため既定値を使用します "
+                f"(期待: {expected_name}, 実際: {type(value).__name__})"
+            )
+            continue
+        setattr(config, key, resolved)
 
     return config
 

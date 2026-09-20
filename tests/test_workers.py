@@ -726,6 +726,30 @@ class ReattachThumbnailsTest(unittest.TestCase):
             )
             self.assertTrue(os.path.isfile(video_path))
 
+    def test_removes_intermediate_file_when_ffmpeg_fails(self):
+        """ffmpegが失敗した場合、部分書き込みされた中間ファイルを残さない。
+        この経路は呼び出し元で握りつぶされて成功扱い(finished_ok)になり
+        _cleanup_leftover_filesも走らないため、残骸に気づく手段がない"""
+        ffpp = MagicMock()
+
+        def fail_after_partial_write(input_specs, output_specs):
+            open(output_specs[0][0], "w").close()
+            raise RuntimeError("ffmpeg failed")
+
+        ffpp.real_run_ffmpeg.side_effect = fail_after_partial_write
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = os.path.join(tmp, "clip.mp4")
+            open(video_path, "w").close()
+            thumb_path = os.path.join(tmp, "clip.thumb2.png")
+            open(thumb_path, "w").close()
+
+            with self.assertRaises(RuntimeError):
+                DownloadWorker._reattach_thumbnails(ffpp, video_path, 2, [thumb_path])
+
+            self.assertNotIn("clip.thumbmerge.mp4", os.listdir(tmp))
+            self.assertTrue(os.path.isfile(video_path))
+
 
 class NearestKeyframeAtOrBeforeTest(unittest.TestCase):
     """_nearest_keyframe_at_or_beforeは、入力側の高速-ssが実際に着地する時刻
@@ -1332,6 +1356,51 @@ class RunErrorHandlingTest(unittest.TestCase):
             worker._is_cancelled = True
             errors, _ = self._run_with(tmp, socket.timeout("timed out"), worker=worker)
             self.assertEqual(errors, ["timed out"])
+
+    def test_cancel_after_download_completes_keeps_final_file(self):
+        """後処理中にキャンセルするとdownload()は例外を投げずに正常終了し、
+        完成した最終ファイルが出来ている。これをクリーンアップで消してはいけない
+        (未完成の中間ファイルだけを削除する)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            final_path = os.path.join(tmp, "My Video.mp4")
+
+            def complete_then_cancel(urls):
+                open(final_path, "w").close()
+                worker._final_filepath = final_path
+                worker._is_cancelled = True
+
+            errors, logs = self._run_with(tmp, complete_then_cancel, worker=worker)
+
+            self.assertEqual(errors, ["キャンセルされました"])
+            self.assertIn("My Video.mp4", os.listdir(tmp))
+            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertTrue(any("完成済みのファイルは残しました" in log for log in logs))
+
+    def test_cleanup_keeps_preexisting_file_with_other_extension(self):
+        """同じタイトルを別拡張子で再ダウンロードして失敗しても、開始前から
+        存在していた過去の完成ファイル(拡張子違い)は削除しない。
+        _resolve_unique_titleは拡張子が違えば衝突とみなさないため、
+        前方一致のクリーンアップが無関係なファイルを巻き込みうる"""
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.path.join(tmp, "My Video.mp3")
+            open(previous, "w").close()
+
+            errors, _ = self._run_with(tmp, RuntimeError("unsupported format"))
+
+            self.assertEqual(errors, ["unsupported format"])
+            self.assertTrue(os.path.isfile(previous))
+            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+
+    def test_cleanup_still_removes_preexisting_part_file(self):
+        """開始前から残っていても、.part等の未完成ファイルは前回の失敗の残骸なので削除する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "My Video.f137.mp4"), "w").close()
+            open(os.path.join(tmp, "My Video.mp4.ytdl"), "w").close()
+
+            self._run_with(tmp, RuntimeError("boom"))
+
+            self.assertEqual(os.listdir(tmp), [])
 
 
 if __name__ == "__main__":

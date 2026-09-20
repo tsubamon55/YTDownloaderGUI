@@ -3,6 +3,8 @@
 QtやUIに依存しないため、単体テストがそのまま実行できる。
 """
 
+import math
+
 
 def parse_clip_time(text: str) -> float | None:
     """"HH:MM:SS" / "MM:SS" / "SS" 形式の文字列を秒数に変換する。
@@ -23,7 +25,11 @@ def parse_clip_time(text: str) -> float | None:
     except ValueError:
         raise ValueError(f"時刻の形式が正しくありません: {text}") from None
 
-    if any(n < 0 for n in numbers):
+    # float()は"nan"/"inf"/"infinity"も受理してしまう。非負チェック(n < 0)はNaNにも
+    # 正の無限大にも効かないため、ここで明示的に有限値であることを確かめる。
+    # 素通りさせるとformat_clip_timeのround()がValueError/OverflowErrorで落ち、
+    # 動画長との比較(NaNとの比較は常にFalse)も素通りしてしまう
+    if any(not math.isfinite(n) or n < 0 for n in numbers):
         raise ValueError(f"時刻の形式が正しくありません: {text}")
 
     seconds = 0.0

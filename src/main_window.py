@@ -41,6 +41,10 @@ from workers import DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
 
 class MainWindow(Ui_MainWindow):
+    # 終了時にワーカースレッドの終了を待つ上限(ミリ秒)。cancel()が効くのは進捗フックの
+    # 区切りごとなので、ffmpegの結合・切り抜きの最中は即座には止まらない
+    _WORKER_SHUTDOWN_WAIT_MS = 10000
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -647,7 +651,16 @@ class MainWindow(Ui_MainWindow):
                 if choice == "1080p":
                     format_spec = fallback_spec
 
-        os.makedirs(out_dir, exist_ok=True)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            # 予約デバイス名(CON等)・禁止文字を含むパス・同名のファイルが既に存在する
+            # パスなどを手入力した場合にここへ来る。他の入力ミスと同じ「入力エラー」で
+            # 案内し、グローバルのexcepthookによる「予期しないエラー」に落とさない
+            QMessageBox.warning(
+                self, "入力エラー", f"保存先フォルダを作成できませんでした:\n{out_dir}\n\n{e}"
+            )
+            return
         self.last_output_dir = out_dir
         self.settings.setValue("last_output_dir", out_dir)
 
@@ -674,6 +687,44 @@ class MainWindow(Ui_MainWindow):
         if self.worker is not None:
             self.worker.cancel()
             self.status_label.setText("キャンセル中...")
+
+    def closeEvent(self, event) -> None:
+        """終了時に、走っているワーカースレッドを止めて終了を待つ。
+
+        待たずに閉じるとQThreadがrun()(ネットワークダウンロード中やffmpegの切り抜き処理中)
+        のままインタプリタ終了処理に入り、"QThread: Destroyed while thread is still running"
+        を招く。yt-dlp/ffmpegが中途半端に打ち切られ、DownloadWorker側の後片付けも走らないため
+        .part等の未完成ファイルが保存先に残ってしまう。
+        """
+        if self.worker is not None and self.worker.isRunning():
+            reply = QMessageBox.question(
+                self,
+                "ダウンロード中",
+                "ダウンロードが進行中です。中止して終了しますか?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.worker.cancel()
+            self.status_label.setText("キャンセル中...")
+
+        for worker in self._running_workers():
+            # cancel()は進捗フック経由でしか効かず、後処理(ffmpegの結合・切り抜き)の最中は
+            # 区切りが来るまで止まらないため、待ち時間には上限を設ける。時間切れの場合は
+            # これ以上UIスレッドからできることがないので、記録だけ残して終了する
+            if not worker.wait(self._WORKER_SHUTDOWN_WAIT_MS):
+                log_debug(
+                    f"closeEvent: {type(worker).__name__} が"
+                    f"{self._WORKER_SHUTDOWN_WAIT_MS}ms以内に終了しませんでした"
+                )
+        event.accept()
+
+    def _running_workers(self) -> list:
+        """終了待ちの対象となる、現在走っているワーカースレッドを列挙する"""
+        candidates = [self.worker, self.format_worker, *self._storyboard_workers]
+        return [w for w in candidates if w is not None and w.isRunning()]
 
     def on_progress(self, percent: float, text: str) -> None:
         self.progress_bar.setValue(int(percent))

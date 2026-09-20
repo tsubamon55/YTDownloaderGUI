@@ -291,6 +291,17 @@ class RangeSlider(QWidget):
 
     def _drag_to(self, x: float) -> None:
         value = self._x_to_value(x)
+
+        # 両ハンドルが同じ位置に重なっている場合、掴んだ側と逆向きへ動かそうとしても
+        # クランプ(low は high を超えられない / high は low を下回れない)に阻まれ、
+        # 一点に潰れた範囲を広げられなくなる。重なっている間は「動かした向き」を
+        # 意図とみなし、その向きへ動けるハンドルへ掴み直す
+        if self._low == self._high:
+            if self._active_handle == "low" and value > self._low:
+                self._active_handle = "high"
+            elif self._active_handle == "high" and value < self._high:
+                self._active_handle = "low"
+
         if self._active_handle == "low":
             value = min(value, self._high)
             changed = value != self._low
