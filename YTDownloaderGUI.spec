@@ -1,12 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 import sys
+
+# バージョン番号はVERSIONファイルを唯一の情報源とする(installer.issも同じファイルを参照する。
+# ここで別々にハードコードすると、過去に実際に起きたバージョン表記の食い違いが再発するため)
+with open(os.path.join(SPECPATH, 'VERSION'), encoding='utf-8') as f:
+    app_version = f.read().strip()
 
 a = Analysis(
     ['src/main.py'],
     pathex=[],
     binaries=[],
-    datas=[('ffmpeg', 'ffmpeg'), ('config.json', '.')],
+    datas=[
+        (os.path.join(SPECPATH, 'ffmpeg'), 'ffmpeg'),
+        (os.path.join(SPECPATH, 'config.json'), '.'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -53,8 +62,8 @@ if sys.platform == 'darwin':
         icon=None,
         bundle_identifier='com.tsubamon55.ytdownloadergui',
         info_plist={
-            'CFBundleShortVersionString': '1.2.0',
-            'CFBundleVersion': '1.2.0',
+            'CFBundleShortVersionString': app_version,
+            'CFBundleVersion': app_version,
             'NSHighResolutionCapable': True,
             'NSHumanReadableCopyright': 'yt-dlp GUI ダウンローダー',
         },

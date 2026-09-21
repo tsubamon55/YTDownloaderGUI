@@ -154,7 +154,7 @@ rm -rf dist/dmg_staging
 
 `installer_output\YTDownloaderGUI-Setup-<バージョン>.exe` が生成されます。このインストーラーは管理者権限不要で `%LOCALAPPDATA%\Programs\YTDownloaderGUI` にインストールし、スタートメニュー/デスクトップにショートカットを作成します。
 
-バージョンを上げる場合は `installer.iss` 冒頭の `#define MyAppVersion` の値を書き換えてから再ビルドしてください。
+バージョンを上げる場合は、プロジェクト直下の `VERSION` ファイルの値を書き換えてから再ビルドしてください。`installer.iss`(`MyAppVersion`)と `YTDownloaderGUI.spec`(`.app`のバージョン情報)はいずれもこの `VERSION` ファイルを唯一の情報源として参照するため、書き換えは1箇所で済みます。
 
 ## ライセンスに関する注意
 

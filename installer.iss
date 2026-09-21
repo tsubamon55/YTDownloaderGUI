@@ -3,7 +3,12 @@
 ; Then compile this script: iscc installer.iss
 
 #define MyAppName "YTDownloaderGUI"
-#define MyAppVersion "1.2.0"
+; バージョン番号はVERSIONファイルを唯一の情報源とする(YTDownloaderGUI.specも同じファイルを
+; 参照する。ここで別々にハードコードすると、過去に実際に起きたバージョン表記の食い違いが
+; 再発するため)
+#define VersionFile FileOpen(SourcePath + "VERSION")
+#define MyAppVersion Trim(FileRead(VersionFile))
+#expr FileClose(VersionFile)
 #define MyAppExeName "YTDownloaderGUI.exe"
 
 [Setup]
