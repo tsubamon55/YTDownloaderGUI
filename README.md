@@ -125,7 +125,23 @@ Python未インストールの環境でも動く実行ファイルを作成で�
 .venv/bin/pyinstaller YTDownloaderGUI.spec --noconfirm
 ```
 
-`dist/YTDownloaderGUI/` フォルダ一式(`YTDownloaderGUI` 実行ファイルと、同階層に展開されるライブラリ・`ffmpeg/`・`config.json`)が更新されます。フォルダごと配布してください(`.app`バンドルとしての体裁やコード署名・公証は現状未対応です)。
+`dist/YTDownloaderGUI/` フォルダ一式に加え、`dist/YTDownloaderGUI.app` としてFinderが認識できる `.app` バンドルも生成されます(`YTDownloaderGUI.spec` の `BUNDLE()` 設定、macOS実行時のみ有効)。同梱したffmpeg等の実行ファイルが依存する共有ライブラリもPyInstallerが自動検出してバンドル内に含めるため、他のMac(同じCPUアーキテクチャ)にも `.app` ごとコピーすれば動作します。
+
+**注意:** コード署名は行っていない(ad-hoc署名のみ)ため、他のMacに配布すると初回起動時にGatekeeperの警告が出ます。ビルドした本人のMacで使う分には問題ありません。他者に配布する場合は右クリック→「開く」で起動する旨を案内するか、Apple Developer Programでのコード署名・公証(notarization)を検討してください。
+
+### macOS用dmgの作成
+
+`.app` をドラッグ&ドロップでインストールできる `.dmg` にまとめる場合は、`.app` ビルド後に以下を実行します。
+
+```bash
+mkdir -p dist/dmg_staging
+ln -s /Applications dist/dmg_staging/Applications
+cp -R dist/YTDownloaderGUI.app dist/dmg_staging/
+hdiutil create -volname "YTDownloaderGUI" -srcfolder dist/dmg_staging -ov -format UDZO dist/YTDownloaderGUI-<バージョン>.dmg
+rm -rf dist/dmg_staging
+```
+
+`dist/YTDownloaderGUI-<バージョン>.dmg` が生成されます。マウントすると `.app` と `Applications` フォルダへのショートカットが表示され、ドラッグでインストールできます。
 
 ## インストーラーのビルド(Windowsのみ)
 

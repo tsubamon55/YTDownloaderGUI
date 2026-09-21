@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
 
 a = Analysis(
     ['src/main.py'],
@@ -43,3 +44,18 @@ coll = COLLECT(
     upx_exclude=[],
     name='YTDownloaderGUI',
 )
+
+# macOSではFinderが認識できる.appバンドルも作成する(Windowsではフォルダ配布のみのため対象外)
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='YTDownloaderGUI.app',
+        icon=None,
+        bundle_identifier='com.tsubamon55.ytdownloadergui',
+        info_plist={
+            'CFBundleShortVersionString': '1.1.1',
+            'CFBundleVersion': '1.1.1',
+            'NSHighResolutionCapable': True,
+            'NSHumanReadableCopyright': 'yt-dlp GUI ダウンローダー',
+        },
+    )
