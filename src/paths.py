@@ -15,11 +15,21 @@ def get_base_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def get_app_data_dir() -> str:
+    """インストール先(Program Files/Applications等)は書き込み不可なことがあるため、
+    OSごとの慣例に沿った、ユーザー書き込み可能なアプリデータ配置先を返す"""
+    if sys.platform == "win32":
+        base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "YTDownloaderGUI")
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "YTDownloaderGUI")
+    # Linux等: XDG Base Directory仕様
+    base = os.getenv("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "YTDownloaderGUI")
+
+
 def get_log_file_path() -> str:
-    """インストール先(Program Files等)は書き込み不可なことがあるため、
-    クラッシュログは常にユーザー書き込み可能なLOCALAPPDATA配下に置く"""
-    base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "YTDownloaderGUI", "crash.log")
+    return os.path.join(get_app_data_dir(), "crash.log")
 
 
 def log_debug(message: str) -> None:
@@ -51,6 +61,10 @@ class _GUID(ctypes.Structure):
 
 def get_downloads_folder() -> str:
     fallback = os.path.join(os.path.expanduser("~"), "Downloads")
+    # macOS/Linuxでは ~/Downloads が標準の配置先であり、Windows固有のAPIを呼ぶ必要が無い
+    if sys.platform != "win32":
+        return fallback
+
     try:
         folder_id = _GUID("{374DE290-123F-4565-9164-39C4925E467B}")  # FOLDERID_Downloads
         path_ptr = ctypes.c_wchar_p()
@@ -67,6 +81,10 @@ def get_downloads_folder() -> str:
     return fallback
 
 
+# 同梱ffmpegの実行ファイル名(拡張子の有無)はOSによって異なる
+FFMPEG_EXECUTABLE_NAME = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+
+
 def get_ffmpeg_location() -> str | None:
     candidates = [get_base_dir()]
     meipass = getattr(sys, "_MEIPASS", None)
@@ -75,11 +93,11 @@ def get_ffmpeg_location() -> str | None:
 
     for base in candidates:
         ffmpeg_dir = os.path.join(base, "ffmpeg")
-        if os.path.isfile(os.path.join(ffmpeg_dir, "ffmpeg.exe")):
+        if os.path.isfile(os.path.join(ffmpeg_dir, FFMPEG_EXECUTABLE_NAME)):
             return ffmpeg_dir
 
     # 同梱フォルダが無い場合、システムPATHのffmpegにフォールバック
-    # (winget等で別途インストール済みの開発者向け)
+    # (winget/brew等で別途インストール済みの開発者向け)
     system_ffmpeg = shutil.which("ffmpeg")
     if system_ffmpeg:
         return os.path.dirname(system_ffmpeg)

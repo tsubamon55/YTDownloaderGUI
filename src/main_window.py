@@ -5,11 +5,12 @@
 """
 
 import os
+import sys
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QTimer
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
 
 from clip_range import (
@@ -34,7 +35,7 @@ from formats import (
     is_codec_container_mismatch,
 )
 from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow
-from paths import get_downloads_folder, get_ffmpeg_location, log_debug
+from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_location, log_debug
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
 from widgets import ScrubPreviewPopup
 from workers import DownloadWorker, FormatListWorker, StoryboardFragmentWorker
@@ -494,7 +495,7 @@ class MainWindow(Ui_MainWindow):
             self.settings.setValue("last_output_dir", folder)
 
     def find_open_explorer_window(self, path: str) -> Any | None:
-        """指定フォルダを既に開いているエクスプローラーウィンドウがあれば返す"""
+        """指定フォルダを既に開いているエクスプローラーウィンドウがあれば返す(Windows専用)"""
         normalized = os.path.normcase(os.path.normpath(path))
         try:
             import win32com.client
@@ -517,18 +518,21 @@ class MainWindow(Ui_MainWindow):
         if not (self.last_output_dir and os.path.isdir(self.last_output_dir)):
             return
 
-        window = self.find_open_explorer_window(self.last_output_dir)
-        if window is not None:
-            try:
-                import win32gui
+        if sys.platform == "win32":
+            window = self.find_open_explorer_window(self.last_output_dir)
+            if window is not None:
+                try:
+                    import win32gui
 
-                window.Visible = True
-                win32gui.SetForegroundWindow(window.HWND)
-            except Exception as e:
-                log_debug(f"open_output_folder: 既存ウィンドウの前面化に失敗 ({e!r})")
-            return
+                    window.Visible = True
+                    win32gui.SetForegroundWindow(window.HWND)
+                except Exception as e:
+                    log_debug(f"open_output_folder: 既存ウィンドウの前面化に失敗 ({e!r})")
+                return
 
-        os.startfile(self.last_output_dir)
+        # Qtの薄いラッパー経由でOS標準のファイルマネージャ(Finder/Nautilus等)を開く。
+        # Windows以外では、既存ウィンドウの再利用のような最適化は行わず素直に開くだけにする
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_output_dir))
 
     def set_inputs_enabled(self, enabled: bool) -> None:
         for widget in self.input_widgets:
@@ -598,7 +602,7 @@ class MainWindow(Ui_MainWindow):
             QMessageBox.critical(
                 self,
                 "ffmpegが見つかりません",
-                "ffmpegが見つかりません。アプリの ffmpeg\\ffmpeg.exe を配置するか、"
+                f"ffmpegが見つかりません。アプリの ffmpeg{os.sep}{FFMPEG_EXECUTABLE_NAME} を配置するか、"
                 "システムにffmpegをインストールしてPATHを通してください。",
             )
             return

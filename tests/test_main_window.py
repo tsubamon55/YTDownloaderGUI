@@ -885,14 +885,26 @@ class SignalWiringTest(MainWindowTestCase):
         worker.cancel.assert_called_once()
         self.assertEqual(self.window.status_label.text(), "キャンセル中...")
 
-    def test_open_folder_button_click_triggers_open(self):
+    def test_open_folder_button_click_triggers_open_on_windows(self):
         self.window.last_output_dir = "C:/out"
         self.window.open_folder_btn.setEnabled(True)
-        with patch.object(main_window_module.os.path, "isdir", return_value=True), \
+        with patch.object(main_window_module.sys, "platform", "win32"), \
+             patch.object(main_window_module.os.path, "isdir", return_value=True), \
              patch.object(self.window, "find_open_explorer_window", return_value=None), \
-             patch.object(main_window_module.os, "startfile") as startfile_mock:
+             patch.object(main_window_module.QDesktopServices, "openUrl") as open_url_mock:
             self.window.open_folder_btn.click()
-        startfile_mock.assert_called_once_with("C:/out")
+        open_url_mock.assert_called_once()
+
+    def test_open_folder_button_click_triggers_open_on_macos(self):
+        self.window.last_output_dir = "/tmp/out"
+        self.window.open_folder_btn.setEnabled(True)
+        with patch.object(main_window_module.sys, "platform", "darwin"), \
+             patch.object(main_window_module.os.path, "isdir", return_value=True), \
+             patch.object(main_window_module.QDesktopServices, "openUrl") as open_url_mock:
+            self.window.open_folder_btn.click()
+        open_url_mock.assert_called_once()
+        opened_url = open_url_mock.call_args[0][0]
+        self.assertEqual(opened_url.toLocalFile(), "/tmp/out")
 
     def test_log_toggle_button_shows_log_view(self):
         self.window.log_toggle_btn.setChecked(True)

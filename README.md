@@ -16,12 +16,25 @@
 
 ## セットアップ(開発用)
 
+Windows / macOS のどちらでも動作します。OSに応じたコマンドを使ってください。
+
 ### 1. 仮想環境の作成と依存関係のインストール
+
+**Windows (PowerShell)**
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
+
+**macOS**
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+`requirements.txt` の `pywin32` はWindows専用パッケージで、`sys_platform == "win32"` の条件付きのためmacOSにはインストールされません。
 
 ### 2. ffmpegの配置
 
@@ -30,33 +43,47 @@ mp3変換や動画+音声の結合ダウンロードには ffmpeg が必要で�
 
 **方法A: プロジェクト直下に配置する(推奨)**
 
-1. [FFmpeg (Essentials Build) by Gyan.Dev](https://www.gyan.dev/ffmpeg/builds/) をダウンロード、または winget を使う:
-   ```powershell
-   winget install --id Gyan.FFmpeg.Essentials -e
-   ```
-2. 展開した `bin` フォルダの中から `ffmpeg.exe` と `ffprobe.exe` を、プロジェクト直下の `ffmpeg/` フォルダにコピーする。
+Windows: [FFmpeg (Essentials Build) by Gyan.Dev](https://www.gyan.dev/ffmpeg/builds/) をダウンロード、または winget を使う:
+```powershell
+winget install --id Gyan.FFmpeg.Essentials -e
+```
+展開した `bin` フォルダの中から `ffmpeg.exe` と `ffprobe.exe` を、プロジェクト直下の `ffmpeg/` フォルダにコピーする。
 
 ```
 youtube-downloader/
 ├── ffmpeg/
-│   ├── ffmpeg.exe
-│   └── ffprobe.exe
+│   ├── ffmpeg.exe       (Windows)
+│   ├── ffprobe.exe      (Windows)
+│   ├── ffmpeg           (macOS)
+│   └── ffprobe          (macOS)
 ├── src/
 │   └── main.py
 └── ...
 ```
 
+macOS: [ffmpeg公式サイト](https://ffmpeg.org/download.html)のビルド、または Homebrew でインストールしたバイナリ (`brew install ffmpeg` 後、`which ffmpeg`/`which ffprobe` で場所を確認) を `ffmpeg/` フォルダにコピーする。
+
 **方法B: システムにインストールしてPATHを通す**
 
-`winget install --id Gyan.FFmpeg.Essentials -e` などでffmpegをインストールし、PATHが通っていれば、
-`ffmpeg/` フォルダが無くてもアプリが自動検出して使用します。
+Windows: `winget install --id Gyan.FFmpeg.Essentials -e`
+macOS: `brew install ffmpeg`
 
-アプリは起動時にまず同梱の `ffmpeg/` フォルダを探し、無ければシステムPATH上のffmpegにフォールバックします。
+いずれもPATHが通っていれば、`ffmpeg/` フォルダが無くてもアプリが自動検出して使用します。
+
+アプリは起動時にまず同梱の `ffmpeg/` フォルダ(OSに応じて `ffmpeg.exe`/`ffmpeg` を探索)を探し、無ければシステムPATH上のffmpegにフォールバックします。
 
 ### 3. ソースから実行
 
+**Windows (PowerShell)**
+
 ```powershell
 .venv\Scripts\python src\main.py
+```
+
+**macOS**
+
+```bash
+.venv/bin/python src/main.py
 ```
 
 ## 設定ファイル (config.json)
@@ -75,9 +102,11 @@ youtube-downloader/
 | `mp3_quality` | `"192"` | 「音声のみ (mp3)」選択時の変換ビットレート(kbps) |
 | `clip_video_encoder_by_codec_prefix` | (コード参照) | クリップ切り出し時の再エンコード設定(映像コーデック毎の `[エンコーダ, CRF値]`)。表に無いコーデックはffmpegの既定設定にフォールバックします |
 
-## 配布用exeのビルド
+## 配布用実行ファイルのビルド
 
-Python未インストールの環境でも動くexeを作成できます。ビルド設定は `YTDownloaderGUI.spec` にまとめてあるので、ソースコードを変更したら以下を実行するだけで再ビルドできます。
+Python未インストールの環境でも動く実行ファイルを作成できます。ビルド設定は `YTDownloaderGUI.spec` にまとめてあるので、ソースコードを変更したら以下を実行するだけで再ビルドできます(`PyInstaller`はビルドを実行したOS向けの成果物しか作れないため、Windows用exeが欲しい場合はWindows上で、macOS用アプリが欲しい場合はmacOS上でそれぞれ実行してください)。
+
+**Windows (PowerShell)**
 
 ```powershell
 .venv\Scripts\pip install pyinstaller
@@ -89,9 +118,18 @@ Python未インストールの環境でも動くexeを作成できます。ビ�
 
 **注意:** `YTDownloaderGUI.exe` 単体だけをコピーして配布・実行すると、同階層にあるべきDLLやライブラリが見つからず起動時にエラーになります。フォルダごと配布するか、下記のインストーラーを使ってください。
 
-## インストーラーのビルド
+**macOS**
 
-[Inno Setup](https://jrsoftware.org/isinfo.php) がインストールされていれば、`installer.iss` からインストーラーを作成できます(未インストールの場合は `winget install --id JRSoftware.InnoSetup -e`)。
+```bash
+.venv/bin/pip install pyinstaller
+.venv/bin/pyinstaller YTDownloaderGUI.spec --noconfirm
+```
+
+`dist/YTDownloaderGUI/` フォルダ一式(`YTDownloaderGUI` 実行ファイルと、同階層に展開されるライブラリ・`ffmpeg/`・`config.json`)が更新されます。フォルダごと配布してください(`.app`バンドルとしての体裁やコード署名・公証は現状未対応です)。
+
+## インストーラーのビルド(Windowsのみ)
+
+[Inno Setup](https://jrsoftware.org/isinfo.php) がインストールされていれば、`installer.iss` からインストーラーを作成できます(未インストールの場合は `winget install --id JRSoftware.InnoSetup -e`)。Inno SetupはWindows専用ツールのため、この手順はWindows上でのみ実行できます。
 
 ```powershell
 .venv\Scripts\pyinstaller YTDownloaderGUI.spec --noconfirm
