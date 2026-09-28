@@ -612,9 +612,20 @@ class MainWindow(Ui_MainWindow):
         if worker is not self.update_download_worker:
             return
         self.update_download_worker = None
-        progress.close()
         # finished_okの送出直後はまだrun()から戻る途中のため、参照を手放す前に終了を待つ
         worker.wait()
+
+        # インストーラーの展開・ファイルコピーには数十秒かかることがあり、その間
+        # ウィンドウは閉じたまま何も表示されない。ここでダイアログを閉じずに
+        # 「適用中」表示へ切り替えておくことで、ウィンドウが消える直前まで
+        # 進行中であることが伝わるようにする(そのままcloseEvent完了時に一緒に破棄される)
+        progress.setLabelText("アップデートを適用しています。しばらくすると自動的に再起動します...")
+        progress.setRange(0, 0)
+        progress.setCancelButton(None)
+        # 直後のcloseEvent側の処理まで描画が持ち越されると、上の表示切り替えが一度も
+        # 画面に出ないまま次のイベントループの処理に埋もれてしまうことがあるため、
+        # ここで明示的に再描画させておく
+        QApplication.processEvents()
 
         # 適用はcloseEventで終了が確定してから行う。先にインストーラーを起動すると、
         # 終了確認で「いいえ」を選ばれた場合でも実行中のアプリがインストーラーに
