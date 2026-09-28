@@ -131,6 +131,34 @@ macOS: `brew install ffmpeg`
 タグ名(`tag_name`)にはVERSIONファイルと同じバージョン番号を使ってください。
 ソースから直接実行している間や `auto_update_enabled` を `false` にした場合は確認自体を行いません。
 
+## アプリアイコン
+
+`downloader-icon/` にアイコンの元データを置いています。
+
+| ファイル | 用途 |
+| --- | --- |
+| `app-icon.svg` | 編集用の元データ(ベクター) |
+| `app-icon-1024.png` | ウィンドウ/タスクバー用アイコン(`main.py` が実行時に読み込む)と、macOS用 `.icns` 生成の元画像 |
+| `app-icon.ico` | Windows用(exe埋め込み・インストーラー) |
+
+Windows用の `.exe`・インストーラーには `app-icon.ico` がそのまま使われるため、追加の手順は不要です。
+macOS用の `.icns` はmacOS上でのみ生成できるため、リポジトリには含めていません。`.app` にアイコンを
+付ける場合は、macOSビルドの前に一度だけ以下を実行してください(`sips`/`iconutil` はmacOS標準ツールです)。
+
+```bash
+ICONSET=downloader-icon/app-icon.iconset
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z $size $size downloader-icon/app-icon-1024.png --out "$ICONSET/icon_${size}x${size}.png"
+  sips -z $((size * 2)) $((size * 2)) downloader-icon/app-icon-1024.png --out "$ICONSET/icon_${size}x${size}@2x.png"
+done
+iconutil -c icns "$ICONSET" -o downloader-icon/app-icon.icns
+rm -rf "$ICONSET"
+```
+
+`downloader-icon/app-icon.icns` が生成されていれば、`YTDownloaderGUI.spec` のmacOSビルド(`BUNDLE()`)が
+自動的に読み込みます(無い場合はアイコン無しのままビルドされます)。
+
 ## 配布用実行ファイルのビルド
 
 Python未インストールの環境でも動く実行ファイルを作成できます。ビルド設定は `YTDownloaderGUI.spec` にまとめてあるので、ソースコードを変更したら以下を実行するだけで再ビルドできます(`PyInstaller`はビルドを実行したOS向けの成果物しか作れないため、Windows用exeが欲しい場合はWindows上で、macOS用アプリが欲しい場合はmacOS上でそれぞれ実行してください)。

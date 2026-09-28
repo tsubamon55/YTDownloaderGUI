@@ -3,10 +3,13 @@ import sys
 import traceback
 from datetime import datetime
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from main_window import MainWindow
-from paths import get_log_file_path
+from paths import find_bundled_file, get_log_file_path
+
+APP_ICON_PATH = os.path.join("downloader-icon", "app-icon-1024.png")
 
 
 def install_exception_hook():
@@ -53,6 +56,13 @@ def install_exception_hook():
 def main():
     install_exception_hook()
     app = QApplication(sys.argv)
+
+    # QApplication側に設定しておくと、個別にsetWindowIconしていないダイアログ
+    # (QMessageBox等)にもそのまま適用され、Windowsではタスクバーのアイコンにもなる
+    icon_path = find_bundled_file(APP_ICON_PATH)
+    if icon_path:
+        app.setWindowIcon(QIcon(icon_path))
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

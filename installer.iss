@@ -19,6 +19,7 @@ PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=downloader-icon\app-icon.ico
 OutputDir=installer_output
 OutputBaseFilename={#MyAppName}-Setup-{#MyAppVersion}
 Compression=lzma2
