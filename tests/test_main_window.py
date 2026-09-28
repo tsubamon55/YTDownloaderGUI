@@ -91,6 +91,14 @@ class MainWindowTestCase(unittest.TestCase):
         with patch.object(main_window_module, "get_downloads_folder", return_value="C:/Downloads"):
             self.window = MainWindow()
         self.addCleanup(self.window.deleteLater)
+        # url_edit にURLらしき文字列を設定するテストはon_url_changed経由で
+        # _info_fetch_timer(700msのsingleShot)を起動する。テスト自身はイベントループを
+        # 回さないため通常は発火しないが、後から(別のテストや本体コードで)何かが
+        # イベントループを一度でも回すと、対象が破棄済みの本テストのwindowであっても
+        # タイマーは生きたままFormatListWorkerを起動しようとし、実ネットワーク通信や
+        # クラッシュを招く。テスト終了時に必ず止めて、次のイベントループ処理へ
+        # 持ち越さないようにする
+        self.addCleanup(self.window._info_fetch_timer.stop)
         # isVisible()は祖先を含めた実際の表示状態を返すため、offscreenプラットフォームでも
         # トップレベルウィンドウ自体をshowしておく必要がある
         self.window.show()
