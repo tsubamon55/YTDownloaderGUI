@@ -38,6 +38,11 @@ class AppConfig:
         "vp8": ["libvpx", "10"],
         "vp08": ["libvpx", "10"],
     })
+    # 起動時にGitHub Releasesへ新バージョンの有無を問い合わせるかどうか。
+    # ソースから実行している開発中はネットワーク越しの確認自体が不要なため、falseで無効化できる
+    auto_update_enabled: bool = True
+    # アップデート確認(GitHub API)・アップデート本体のダウンロード、それぞれ1回あたりのタイムアウト(秒)
+    update_check_timeout_seconds: float = 5
 
 
 def _config_file_path() -> str | None:

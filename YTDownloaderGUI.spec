@@ -15,6 +15,10 @@ a = Analysis(
     datas=[
         (os.path.join(SPECPATH, 'ffmpeg'), 'ffmpeg'),
         (os.path.join(SPECPATH, 'config.json'), '.'),
+        # 起動時のアップデート確認(updater.get_current_version)が自分のバージョンを知るために必要
+        (os.path.join(SPECPATH, 'VERSION'), '.'),
+        # ウィンドウ/タスクバー用のアイコン(main_window.pyがQIcon読み込み時に同梱ファイルとして探す)
+        (os.path.join(SPECPATH, 'downloader-icon', 'app-icon-1024.png'), 'downloader-icon'),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -43,6 +47,9 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     contents_directory='.',
+    # Windowsではexe自体にアイコンが埋め込まれ、エクスプローラー/タスクバー/ショートカットに
+    # 反映される(macOSの.appアイコンは下のBUNDLE(icon=...)側で指定するため、ここでは無視される)
+    icon=os.path.join(SPECPATH, 'downloader-icon', 'app-icon.ico'),
 )
 coll = COLLECT(
     exe,
@@ -56,10 +63,14 @@ coll = COLLECT(
 
 # macOSではFinderが認識できる.appバンドルも作成する(Windowsではフォルダ配布のみのため対象外)
 if sys.platform == 'darwin':
+    # .icnsはmacOS専用形式でWindows上では生成できないため、リポジトリには同梱せずビルド時に
+    # 生成する(README「配布用実行ファイルのビルド」のsips/iconutilの手順を参照)。
+    # 無い場合は従来通りアイコン無し(PyInstaller既定のアイコン)にフォールバックする
+    icns_path = os.path.join(SPECPATH, 'downloader-icon', 'app-icon.icns')
     app = BUNDLE(
         coll,
         name='YTDownloaderGUI.app',
-        icon=None,
+        icon=icns_path if os.path.isfile(icns_path) else None,
         bundle_identifier='com.tsubamon55.ytdownloadergui',
         info_plist={
             'CFBundleShortVersionString': app_version,

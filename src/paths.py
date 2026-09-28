@@ -81,6 +81,23 @@ def get_downloads_folder() -> str:
     return fallback
 
 
+def find_bundled_file(filename: str) -> str | None:
+    """実行ファイル/プロジェクト直下、またはPyInstallerの一時展開先(_MEIPASS)に同梱された
+    ファイルを探す(どこにも無ければNone)。PyInstallerのonedirビルドは、同梱ファイルを
+    exeと同階層に置く配置と`_internal`配下にまとめる配置のどちらにもなり得るため、
+    get_ffmpeg_location()と同じ候補順で探索する"""
+    candidates = [get_base_dir()]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(meipass)
+
+    for base in candidates:
+        path = os.path.join(base, filename)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 # 同梱ffmpegの実行ファイル名(拡張子の有無)はOSによって異なる
 FFMPEG_EXECUTABLE_NAME = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
 

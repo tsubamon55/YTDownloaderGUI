@@ -19,12 +19,17 @@ PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=downloader-icon\app-icon.ico
 OutputDir=installer_output
 OutputBaseFilename={#MyAppName}-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
+; 自動アップデート(updater.py)はアプリ終了後にこのインストーラーを起動するが、終了処理が
+; 長引いた場合の保険としてCloseApplications(既定yes)で実行中のexeを閉じられるようにしておく。
+; 再起動は[Run]セクションに一本化する(RestartApplicationsも有効だと2つ起動してしまうため)
+RestartApplications=no
 
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
@@ -50,4 +55,6 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; skipifsilentを付けないのは、updater.pyの自動アップデート(/VERYSILENTでこのインストーラーを
+; 実行し、完了後にアプリが再起動することを前提にしている)でもここでの起動が必要なため
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall
