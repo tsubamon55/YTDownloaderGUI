@@ -15,6 +15,8 @@ a = Analysis(
     datas=[
         (os.path.join(SPECPATH, 'ffmpeg'), 'ffmpeg'),
         (os.path.join(SPECPATH, 'config.json'), '.'),
+        # 起動時のアップデート確認(updater.get_current_version)が自分のバージョンを知るために必要
+        (os.path.join(SPECPATH, 'VERSION'), '.'),
     ],
     hiddenimports=[],
     hookspath=[],

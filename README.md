@@ -13,6 +13,7 @@
   - 音声のみ (最高音質)
 - 進捗バー・ログ表示
 - ダウンロードのキャンセル
+- 起動時の自動アップデート確認・適用
 
 ## セットアップ(開発用)
 
@@ -101,6 +102,34 @@ macOS: `brew install ffmpeg`
 | `info_fetch_debounce_ms` | `700` | URL入力後、自動でフォーマット取得を始めるまでの待ち時間(ミリ秒) |
 | `mp3_quality` | `"192"` | 「音声のみ (mp3)」選択時の変換ビットレート(kbps) |
 | `clip_video_encoder_by_codec_prefix` | (コード参照) | クリップ切り出し時の再エンコード設定(映像コーデック毎の `[エンコーダ, CRF値]`)。表に無いコーデックはffmpegの既定設定にフォールバックします |
+| `auto_update_enabled` | `true` | 起動時にGitHub Releasesへ新バージョンの有無を問い合わせるかどうか |
+| `update_check_timeout_seconds` | `5` | アップデート確認(GitHub API)・ダウンロードそれぞれ1回あたりのタイムアウト(秒) |
+
+## 自動アップデート
+
+ビルド済み実行ファイル(`sys.frozen`)で起動した場合のみ、起動から少し経ったタイミングで
+[GitHub Releases](https://github.com/tsubamon55/youtube-downloader/releases) の最新リリースを
+問い合わせ、同梱の `VERSION` より新しいバージョンが公開されていれば通知します。「今すぐ
+ダウンロードしてインストール」を選ぶと、OSに応じたリリースアセットをダウンロードして適用し、
+アプリを再起動します。
+
+いずれのOSでも、更新の適用はアプリの終了が確定してから始まります(動画のダウンロード中は
+更新を提案せず、終了確認で「いいえ」を選んだ場合は更新も中止します)。
+
+- **Windows**: ファイル名が `.exe` で終わり、可能なら `Setup` を含むアセットを選び、アプリ終了時に
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` でサイレントインストールし、インストーラーの
+  `[Run]` セクションでアプリを再起動します(`installer.iss` 参照)。
+- **macOS**: ファイル名が `.dmg` で終わるアセットをダウンロードし、アプリ終了後にヘルパースクリプトが
+  dmgをマウントして、実行中だった `.app` と同じ場所へ `ditto` でコピー・入れ替えてから再起動します。
+  入れ替えに失敗した場合は元の `.app` が残ります。ダウンロードしたdmg由来の `com.apple.quarantine`
+  属性を外すため、Gatekeeperの警告なしで再起動できます(このアプリ自体はアドホック署名のみで
+  公証していないため、手動でdmgを開いた場合は引き続き初回起動時に警告が出ます)。
+  ヘルパーの実行結果は `crash.log` に記録されます。
+
+そのため、GitHub Releasesで新バージョンを公開する際は、`YTDownloaderGUI-Setup-<バージョン>.exe`
+(Windows)・`YTDownloaderGUI-<バージョン>.dmg`(macOS)をビルドしてアセットとして添付し、
+タグ名(`tag_name`)にはVERSIONファイルと同じバージョン番号を使ってください。
+ソースから直接実行している間や `auto_update_enabled` を `false` にした場合は確認自体を行いません。
 
 ## 配布用実行ファイルのビルド
 

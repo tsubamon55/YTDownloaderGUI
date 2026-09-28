@@ -11,7 +11,7 @@ from typing import Any
 
 from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QPixmap
-from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QProgressDialog
 
 from clip_range import (
     auto_format_clip_input,
@@ -37,6 +37,7 @@ from formats import (
 from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow
 from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_location, log_debug
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
+from updater import UpdateCheckWorker, UpdateDownloadWorker, apply_downloaded_update, download_dir
 from widgets import ScrubPreviewPopup
 from workers import DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
@@ -51,6 +52,10 @@ class MainWindow(Ui_MainWindow):
 
         self.worker: DownloadWorker | None = None
         self.format_worker: FormatListWorker | None = None
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_download_worker: UpdateDownloadWorker | None = None
+        # ダウンロード済みで、アプリ終了時(closeEvent)に適用するアップデートのパス
+        self._pending_update_path: str | None = None
         self.last_output_dir: str | None = None
         self.info_ready = False
         self.available_formats: list = []
@@ -77,6 +82,12 @@ class MainWindow(Ui_MainWindow):
 
         self.auto_paste_from_clipboard()
         self._sync_window_height()
+
+        # ソースから直接実行している開発中は、置き換えるインストーラー/appが存在せず
+        # アップデートを適用できないため、ビルド済み実行ファイルの場合のみ確認する
+        if getattr(sys, "frozen", False) and CONFIG.auto_update_enabled:
+            # ウィンドウの初回表示より前にダイアログが割り込まないよう、表示後まで少し遅らせる
+            QTimer.singleShot(1000, self._check_for_updates)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.MouseButtonPress:
@@ -534,6 +545,93 @@ class MainWindow(Ui_MainWindow):
         # Windows以外では、既存ウィンドウの再利用のような最適化は行わず素直に開くだけにする
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_output_dir))
 
+    def _check_for_updates(self) -> None:
+        worker = UpdateCheckWorker()
+        self.update_check_worker = worker
+        worker.update_available.connect(self.on_update_available)
+        worker.up_to_date.connect(lambda w=worker: self._on_update_check_settled(w))
+        worker.check_failed.connect(lambda message, w=worker: self._on_update_check_failed(message, w))
+        worker.start()
+
+    def _on_update_check_settled(self, worker: UpdateCheckWorker) -> None:
+        if worker is self.update_check_worker:
+            self.update_check_worker = None
+
+    def _on_update_check_failed(self, message: str, worker: UpdateCheckWorker) -> None:
+        # バックグラウンドの自動確認なので、ネットワーク不調等で失敗してもユーザーには
+        # 見せない(対処法を提示できない不安を与えるだけのため)。ログにのみ残す
+        log_debug(f"_check_for_updates: アップデート確認に失敗しました ({message})")
+        self._on_update_check_settled(worker)
+
+    def on_update_available(self, version: str, download_url: str, asset_name: str) -> None:
+        if not download_url or not asset_name:
+            return
+        if self.worker is not None and self.worker.isRunning():
+            # 更新の適用にはアプリの終了が必要なため、動画のダウンロード中には提案しない
+            # (次回起動時に改めて確認される)
+            log_debug(f"on_update_available: ダウンロード中のため {version} への更新提案を見送りました")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "アップデートがあります",
+            f"新しいバージョン {version} が利用可能です。今すぐダウンロードしてインストールしますか?\n"
+            "(インストール後、アプリは自動的に再起動します)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._start_update_download(download_url, asset_name)
+
+    def _start_update_download(self, download_url: str, asset_name: str) -> None:
+        dest_path = os.path.join(download_dir(), asset_name)
+        worker = UpdateDownloadWorker(download_url, dest_path)
+        self.update_download_worker = worker
+
+        progress = QProgressDialog("アップデートをダウンロード中...", "キャンセル", 0, 100, self)
+        progress.setWindowTitle("アップデート")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+
+        worker.progress.connect(lambda percent, p=progress: p.setValue(int(percent)))
+        progress.canceled.connect(worker.cancel)
+        worker.finished_ok.connect(
+            lambda path, w=worker, p=progress: self.on_update_download_finished(path, w, p)
+        )
+        worker.finished_error.connect(
+            lambda message, w=worker, p=progress: self.on_update_download_error(message, w, p)
+        )
+        worker.start()
+        progress.show()
+
+    def on_update_download_finished(
+        self, local_path: str, worker: UpdateDownloadWorker, progress: QProgressDialog
+    ) -> None:
+        if worker is not self.update_download_worker:
+            return
+        self.update_download_worker = None
+        progress.close()
+        # finished_okの送出直後はまだrun()から戻る途中のため、参照を手放す前に終了を待つ
+        worker.wait()
+
+        # 適用はcloseEventで終了が確定してから行う。先にインストーラーを起動すると、
+        # 終了確認で「いいえ」を選ばれた場合でも実行中のアプリがインストーラーに
+        # 強制終了され、進行中の動画ダウンロードが壊れてしまうため
+        self._pending_update_path = local_path
+        self.close()
+
+    def on_update_download_error(
+        self, message: str, worker: UpdateDownloadWorker, progress: QProgressDialog
+    ) -> None:
+        if worker is not self.update_download_worker:
+            return
+        self.update_download_worker = None
+        progress.close()
+        if message != "キャンセルされました":
+            QMessageBox.critical(self, "アップデートのダウンロードに失敗しました", message)
+
     def set_inputs_enabled(self, enabled: bool) -> None:
         for widget in self.input_widgets:
             widget.setEnabled(enabled)
@@ -709,10 +807,18 @@ class MainWindow(Ui_MainWindow):
                 QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
+                if self._pending_update_path is not None:
+                    self._pending_update_path = None
+                    QMessageBox.information(
+                        self, "アップデート", "アップデートを中止しました。次回起動時に改めて確認します。"
+                    )
                 event.ignore()
                 return
             self.worker.cancel()
             self.status_label.setText("キャンセル中...")
+
+        if self.update_download_worker is not None:
+            self.update_download_worker.cancel()
 
         for worker in self._running_workers():
             # cancel()は進捗フック経由でしか効かず、後処理(ffmpegの結合・切り抜き)の最中は
@@ -723,11 +829,31 @@ class MainWindow(Ui_MainWindow):
                     f"closeEvent: {type(worker).__name__} が"
                     f"{self._WORKER_SHUTDOWN_WAIT_MS}ms以内に終了しませんでした"
                 )
+
+        if self._pending_update_path is not None:
+            update_path = self._pending_update_path
+            self._pending_update_path = None
+            try:
+                apply_downloaded_update(update_path)
+            except Exception as e:
+                # 元のアプリはそのまま残っているため、終了自体は続行して手動更新を案内する
+                log_debug(f"closeEvent: アップデートの適用に失敗しました ({e!r})")
+                QMessageBox.critical(
+                    self,
+                    "アップデートの適用に失敗しました",
+                    f"アップデートを適用できませんでした。手動でダウンロード・インストールしてください。\n\n{e}",
+                )
         event.accept()
 
     def _running_workers(self) -> list:
         """終了待ちの対象となる、現在走っているワーカースレッドを列挙する"""
-        candidates = [self.worker, self.format_worker, *self._storyboard_workers]
+        candidates = [
+            self.worker,
+            self.format_worker,
+            self.update_check_worker,
+            self.update_download_worker,
+            *self._storyboard_workers,
+        ]
         return [w for w in candidates if w is not None and w.isRunning()]
 
     def on_progress(self, percent: float, text: str) -> None:
