@@ -1009,5 +1009,154 @@ class CloseEventTest(MainWindowTestCase):
         event.accept.assert_called_once()
 
 
+class UpdateAvailablePromptTest(MainWindowTestCase):
+    """新バージョン検出時、動画ダウンロード中でなければ確認ダイアログを出し、
+    承諾された場合のみダウンロードを開始すること"""
+
+    def test_offers_update_and_starts_download_on_yes(self):
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes) as question_mock, \
+             patch.object(MainWindow, "_start_update_download") as start_mock:
+            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe")
+
+        question_mock.assert_called_once()
+        start_mock.assert_called_once_with("https://example.com/Setup.exe", "Setup.exe")
+
+    def test_declining_does_not_start_download(self):
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No), \
+             patch.object(MainWindow, "_start_update_download") as start_mock:
+            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe")
+
+        start_mock.assert_not_called()
+
+    def test_no_prompt_while_video_download_is_running(self):
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        self.window.worker = worker
+
+        with patch.object(QMessageBox, "question") as question_mock, \
+             patch.object(MainWindow, "_start_update_download") as start_mock:
+            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe")
+
+        question_mock.assert_not_called()
+        start_mock.assert_not_called()
+
+    def test_missing_asset_info_is_ignored(self):
+        with patch.object(QMessageBox, "question") as question_mock:
+            self.window.on_update_available("9.9.9", "", "")
+
+        question_mock.assert_not_called()
+
+
+class UpdateDownloadCallbackTest(MainWindowTestCase):
+    """アップデート本体のダウンロード完了/失敗時のコールバックを、実際のQThread・
+    ネットワーク通信を使わずMagicMockのworker/progressダイアログで検証する"""
+
+    def test_finished_switches_progress_to_applying_state_without_closing_it(self):
+        worker = MagicMock()
+        progress = MagicMock()
+        self.window.update_download_worker = worker
+
+        with patch.object(MainWindow, "close") as close_mock:
+            self.window.on_update_download_finished("C:/tmp/Setup.exe", worker, progress)
+
+        # ダウンロード完了後もダイアログを閉じず、「適用中」の不確定進捗表示へ
+        # 切り替えるだけにする(closeEvent側で実際にウィンドウごと破棄されるまで見せ続ける)
+        progress.close.assert_not_called()
+        progress.setLabelText.assert_called_once()
+        progress.setRange.assert_called_once_with(0, 0)
+        progress.setCancelButton.assert_called_once_with(None)
+        worker.wait.assert_called_once()
+        self.assertEqual(self.window._pending_update_path, "C:/tmp/Setup.exe")
+        self.assertIsNone(self.window.update_download_worker)
+        close_mock.assert_called_once()
+
+    def test_stale_worker_callback_is_ignored(self):
+        stale_worker = MagicMock()
+        current_worker = MagicMock()
+        self.window.update_download_worker = current_worker
+        progress = MagicMock()
+
+        with patch.object(MainWindow, "close") as close_mock:
+            self.window.on_update_download_finished("C:/tmp/Setup.exe", stale_worker, progress)
+
+        progress.setLabelText.assert_not_called()
+        close_mock.assert_not_called()
+        self.assertIsNone(self.window._pending_update_path)
+        # 現在進行中のworker参照は、無関係な古いコールバックによって消されない
+        self.assertIs(self.window.update_download_worker, current_worker)
+
+    def test_error_closes_progress_and_shows_message(self):
+        worker = MagicMock()
+        progress = MagicMock()
+        self.window.update_download_worker = worker
+
+        with patch.object(QMessageBox, "critical") as critical_mock:
+            self.window.on_update_download_error("network down", worker, progress)
+
+        progress.close.assert_called_once()
+        critical_mock.assert_called_once()
+        self.assertIsNone(self.window.update_download_worker)
+
+    def test_cancellation_closes_progress_without_error_message(self):
+        worker = MagicMock()
+        progress = MagicMock()
+        self.window.update_download_worker = worker
+
+        with patch.object(QMessageBox, "critical") as critical_mock:
+            self.window.on_update_download_error("キャンセルされました", worker, progress)
+
+        progress.close.assert_called_once()
+        critical_mock.assert_not_called()
+
+
+class CloseEventUpdateApplyTest(MainWindowTestCase):
+    """closeEventでウィンドウの終了が確定した後にのみ、ダウンロード済みの
+    アップデートを適用すること"""
+
+    def test_pending_update_is_applied_before_closing(self):
+        self.window._pending_update_path = "C:/tmp/Setup.exe"
+        event = CloseEventTest._event()
+
+        with patch.object(main_window_module, "apply_downloaded_update") as apply_mock:
+            self.window.closeEvent(event)
+
+        apply_mock.assert_called_once_with("C:/tmp/Setup.exe")
+        self.assertIsNone(self.window._pending_update_path)
+        event.accept.assert_called_once()
+
+    def test_apply_failure_shows_error_but_still_closes(self):
+        self.window._pending_update_path = "C:/tmp/Setup.exe"
+        event = CloseEventTest._event()
+
+        with patch.object(
+                main_window_module, "apply_downloaded_update", side_effect=RuntimeError("boom")
+             ), \
+             patch.object(QMessageBox, "critical") as critical_mock:
+            self.window.closeEvent(event)
+
+        critical_mock.assert_called_once()
+        event.accept.assert_called_once()
+
+    def test_declining_download_cancellation_prompt_also_cancels_pending_update(self):
+        """動画ダウンロード中に終了確認で「いいえ」を選んだ場合、適用予定だった
+        アップデートも一緒に取り消す(強制終了でダウンロードが壊れるのを防ぐため)"""
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        self.window.worker = worker
+        self.window._pending_update_path = "C:/tmp/Setup.exe"
+        event = CloseEventTest._event()
+
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No), \
+             patch.object(QMessageBox, "information") as information_mock, \
+             patch.object(main_window_module, "apply_downloaded_update") as apply_mock:
+            self.window.closeEvent(event)
+
+        apply_mock.assert_not_called()
+        information_mock.assert_called_once()
+        self.assertIsNone(self.window._pending_update_path)
+        event.ignore.assert_called_once()
+        event.accept.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

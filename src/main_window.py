@@ -623,9 +623,12 @@ class MainWindow(Ui_MainWindow):
         progress.setRange(0, 0)
         progress.setCancelButton(None)
         # 直後のcloseEvent側の処理まで描画が持ち越されると、上の表示切り替えが一度も
-        # 画面に出ないまま次のイベントループの処理に埋もれてしまうことがあるため、
-        # ここで明示的に再描画させておく
-        QApplication.processEvents()
+        # 画面に出ないまま次の処理に埋もれてしまうことがあるため、ここで明示的に
+        # 再描画させておく。QApplication.processEvents()は無関係な保留中イベント
+        # (他のタイマー・別スレッドからのシグナル等)まで処理してしまい、この
+        # 終了シーケンスの最中に意図しない処理が割り込む余地を作ってしまうため、
+        # このダイアログ1つだけを対象にする repaint() を使う
+        progress.repaint()
 
         # 適用はcloseEventで終了が確定してから行う。先にインストーラーを起動すると、
         # 終了確認で「いいえ」を選ばれた場合でも実行中のアプリがインストーラーに
