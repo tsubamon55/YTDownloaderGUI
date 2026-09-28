@@ -1,6 +1,6 @@
 """起動時のアップデート確認・ダウンロード・適用(インストーラー実行/再起動)。
 
-GitHub Releases (tsubamon55/youtube-downloader) の最新リリースをGitHub APIで問い合わせ、
+GitHub Releases (tsubamon55/YTDownloaderGUI) の最新リリースをGitHub APIで問い合わせ、
 同梱のVERSIONファイルより新しいtag_nameがあれば、OSに応じたアセット(Windows: Setup*.exe,
 macOS: *.dmg)をダウンロードして適用する。リリースが1件も無い/該当アセットが無い場合は
 「アップデート無し」と同じ扱いにし、ユーザーには何も表示しない(バックグラウンドの
@@ -20,7 +20,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from config import CONFIG
 from paths import find_bundled_file, get_app_data_dir, get_log_file_path, log_debug
 
-GITHUB_REPO = "tsubamon55/youtube-downloader"
+GITHUB_REPO = "tsubamon55/YTDownloaderGUI"
 GITHUB_API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 VERSION_FILE_NAME = "VERSION"
 _REQUEST_HEADERS = {"User-Agent": "YTDownloaderGUI"}

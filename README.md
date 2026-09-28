@@ -51,7 +51,7 @@ winget install --id Gyan.FFmpeg.Essentials -e
 展開した `bin` フォルダの中から `ffmpeg.exe` と `ffprobe.exe` を、プロジェクト直下の `ffmpeg/` フォルダにコピーする。
 
 ```
-youtube-downloader/
+YTDownloaderGUI/
 ├── ffmpeg/
 │   ├── ffmpeg.exe       (Windows)
 │   ├── ffprobe.exe      (Windows)
@@ -108,7 +108,7 @@ macOS: `brew install ffmpeg`
 ## 自動アップデート
 
 ビルド済み実行ファイル(`sys.frozen`)で起動した場合のみ、起動から少し経ったタイミングで
-[GitHub Releases](https://github.com/tsubamon55/youtube-downloader/releases) の最新リリースを
+[GitHub Releases](https://github.com/tsubamon55/YTDownloaderGUI/releases) の最新リリースを
 問い合わせ、同梱の `VERSION` より新しいバージョンが公開されていれば通知します。「今すぐ
 ダウンロードしてインストール」を選ぶと、OSに応じたリリースアセットをダウンロードして適用し、
 アプリを再起動します。
