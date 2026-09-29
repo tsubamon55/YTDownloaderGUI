@@ -1,13 +1,17 @@
 """カスタムQWidget/QComboBox/QStyledItemDelegate"""
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from collections.abc import Iterable
+from typing import Literal
+
+from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QLabel,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionComboBox,
+    QStyleOptionViewItem,
     QStylePainter,
     QVBoxLayout,
     QWidget,
@@ -21,10 +25,21 @@ from formats import (
     FORMAT_MISMATCH_ROLE,
     FORMAT_ROW_HEIGHT,
 )
+from theme import ACCENT_COLOR
+
+# RangeSliderの2つのハンドル(開始側/終了側)
+HandleName = Literal["low", "high"]
+
+
+def _draw_columns(painter: QPainter, x: int, y: int, height: int, texts: Iterable[str]) -> None:
+    """フォーマット一覧の列幅(FORMAT_COLUMN_WIDTHS)に沿って、左から順にテキストを描く"""
+    for text, width in zip(texts, FORMAT_COLUMN_WIDTHS):
+        painter.drawText(QRect(x, y, width, height), int(Qt.AlignmentFlag.AlignVCenter), text)
+        x += width
 
 
 class FormatItemDelegate(QStyledItemDelegate):
-    def paint(self, painter, option, index):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         painter.save()
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, option.palette.highlight())
@@ -46,15 +61,10 @@ class FormatItemDelegate(QStyledItemDelegate):
             painter.restore()
             return
 
-        x = option.rect.x() + 4
-        for text, width in zip(columns, FORMAT_COLUMN_WIDTHS):
-            rect = QRect(x, option.rect.y(), width, option.rect.height())
-            painter.drawText(rect, int(Qt.AlignmentFlag.AlignVCenter), text)
-            x += width
-
+        _draw_columns(painter, option.rect.x() + 4, option.rect.y(), option.rect.height(), columns)
         painter.restore()
 
-    def sizeHint(self, option, index):
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         size = super().sizeHint(option, index)
         size.setHeight(FORMAT_ROW_HEIGHT)
         size.setWidth(sum(FORMAT_COLUMN_WIDTHS))
@@ -64,11 +74,11 @@ class FormatItemDelegate(QStyledItemDelegate):
 class FormatComboBox(QComboBox):
     """ドロップダウンの幅を選択ボックス自身の幅に一致させ、選択後の表示も列位置を揃えるQComboBox"""
 
-    def showPopup(self):
+    def showPopup(self) -> None:
         self.view().setMinimumWidth(self.width())
         super().showPopup()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event: QPaintEvent) -> None:
         painter = QStylePainter(self)
         painter.setPen(self.palette().color(self.foregroundRole()))
 
@@ -84,17 +94,13 @@ class FormatComboBox(QComboBox):
         field_rect = self.style().subControlRect(
             QStyle.ComplexControl.CC_ComboBox, opt, QStyle.SubControl.SC_ComboBoxEditField, self
         )
-        x = field_rect.x() + 2
-        for text, width in zip(columns, FORMAT_COLUMN_WIDTHS):
-            rect = QRect(x, field_rect.y(), width, field_rect.height())
-            painter.drawText(rect, int(Qt.AlignmentFlag.AlignVCenter), text)
-            x += width
+        _draw_columns(painter, field_rect.x() + 2, field_rect.y(), field_rect.height(), columns)
 
 
 class SpinnerWidget(QWidget):
     """処理がフリーズしていないことを示す回転インジケータ"""
 
-    def __init__(self, parent=None, diameter: int = 18):
+    def __init__(self, parent: QWidget | None = None, diameter: int = 18):
         super().__init__(parent)
         self._diameter = diameter
         self._angle = 0
@@ -104,25 +110,25 @@ class SpinnerWidget(QWidget):
         self._timer.timeout.connect(self._advance)
         self.setVisible(False)
 
-    def start(self):
+    def start(self) -> None:
         self._angle = 0
         self.setVisible(True)
         self._timer.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self._timer.stop()
         self.setVisible(False)
 
-    def _advance(self):
+    def _advance(self) -> None:
         self._angle = (self._angle + 30) % 360
         self.update()
 
-    def paintEvent(self, event):
+    def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.translate(self._diameter / 2, self._diameter / 2)
         painter.rotate(self._angle)
-        pen = QPen(QColor("#1a73e8"))
+        pen = QPen(QColor(ACCENT_COLOR))
         pen.setWidth(3)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
@@ -135,22 +141,18 @@ class SpinnerWidget(QWidget):
 class FormatHeaderWidget(QWidget):
     """フォーマット一覧の各列が何を示すかを示す見出し行"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setFixedHeight(18)
 
-    def paintEvent(self, event):
+    def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         font = painter.font()
         font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
         painter.setFont(font)
         painter.setPen(self.palette().color(self.foregroundRole()).lighter(160))
 
-        x = 4
-        for label, width in zip(FORMAT_COLUMN_LABELS, FORMAT_COLUMN_WIDTHS):
-            rect = QRect(x, 0, width, self.height())
-            painter.drawText(rect, int(Qt.AlignmentFlag.AlignVCenter), label)
-            x += width
+        _draw_columns(painter, 4, 0, self.height(), FORMAT_COLUMN_LABELS)
         painter.end()
 
 
@@ -163,7 +165,7 @@ class ScrubPreviewPopup(QWidget):
     # 画質が足りるストーリーボード階層(YouTubeの場合は概ね160x90)を選ばせる
     PREVIEW_SIZE = QSize(160, 90)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setStyleSheet("background-color: #202124; border-radius: 4px;")
@@ -222,18 +224,18 @@ class RangeSlider(QWidget):
     _HANDLE_RADIUS = 7
     _GROOVE_HEIGHT = 4
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._minimum = 0
         self._maximum = 100
         self._low = 0
         self._high = 100
-        self._active_handle: str | None = None
+        self._active_handle: HandleName | None = None
         self._preview = ScrubPreviewPopup(self)
         self.setFixedHeight(24)
 
     @property
-    def active_handle(self) -> str | None:
+    def active_handle(self) -> HandleName | None:
         return self._active_handle
 
     def setRange(self, minimum: int, maximum: int) -> None:
@@ -271,7 +273,7 @@ class RangeSlider(QWidget):
         ratio = min(max(ratio, 0.0), 1.0)
         return round(self._minimum + ratio * (self._maximum - self._minimum))
 
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         if not self.isEnabled():
             return
         x = event.position().x()
@@ -279,12 +281,12 @@ class RangeSlider(QWidget):
         self._active_handle = "low" if abs(x - low_x) <= abs(x - high_x) else "high"
         self._drag_to(x)
 
-    def mouseMoveEvent(self, event):
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._active_handle is None:
             return
         self._drag_to(event.position().x())
 
-    def mouseReleaseEvent(self, event):
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         self._active_handle = None
         self.update()
         self._preview.hide_popup()
@@ -321,14 +323,14 @@ class RangeSlider(QWidget):
         self._preview.move_above(self.mapToGlobal(QPoint(round(handle_x), 0)))
         self.previewRequested.emit(self._active_handle, value)
 
-    def set_preview_pixmap(self, which: str, pixmap: QPixmap) -> None:
+    def set_preview_pixmap(self, which: HandleName, pixmap: QPixmap) -> None:
         """previewRequestedを受けて呼び出し側が取得したサムネイルを反映する。
         既に別のハンドルの操作に移っている/ドラッグが終わっている場合は無視する"""
         if which != self._active_handle:
             return
         self._preview.set_pixmap(pixmap)
 
-    def paintEvent(self, event):
+    def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         mid_y = self.height() / 2
@@ -343,7 +345,7 @@ class RangeSlider(QWidget):
         # disabled中(URL未入力等)は有効時と同じ見た目にならないよう、
         # 選択バー・ハンドルをグレーにする(Qt標準ウィジェットと違い自前描画のため
         # isEnabled()を明示的に見ないと自動でグレーアウトされない)
-        accent_color = QColor("#1a73e8") if self.isEnabled() else QColor(160, 160, 160)
+        accent_color = QColor(ACCENT_COLOR) if self.isEnabled() else QColor(160, 160, 160)
 
         low_x, high_x = self._value_to_x(self._low), self._value_to_x(self._high)
         selected_rect = QRectF(low_x, mid_y - self._GROOVE_HEIGHT / 2, high_x - low_x, self._GROOVE_HEIGHT)

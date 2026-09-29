@@ -39,11 +39,11 @@ from formats import (
     has_video,
     is_codec_container_mismatch,
 )
-from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow
+from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow, toggle_button_text
 from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_location, log_debug
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
 from updater import UpdateCheckWorker, UpdateDownloadWorker, apply_downloaded_update, download_dir
-from widgets import ScrubPreviewPopup
+from widgets import HandleName, ScrubPreviewPopup
 from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
 
@@ -150,11 +150,11 @@ class MainWindow(Ui_MainWindow):
 
     def on_log_toggle(self, checked: bool) -> None:
         self.log_view.setVisible(checked)
-        self.log_toggle_btn.setText("ログ ▴" if checked else "ログ ▾")
+        self.log_toggle_btn.setText(toggle_button_text("ログ", checked))
         self._sync_window_height()
 
     def on_detail_toggled(self, checked: bool) -> None:
-        self.detail_toggle_btn.setText("詳細設定 ▴" if checked else "詳細設定 ▾")
+        self.detail_toggle_btn.setText(toggle_button_text("詳細設定", checked))
         self.detail_container.setVisible(checked)
         self._sync_window_height()
 
@@ -412,7 +412,7 @@ class MainWindow(Ui_MainWindow):
 
         self.clip_range_slider.setValues(low, high)
 
-    def on_clip_preview_requested(self, which: str, value: int) -> None:
+    def on_clip_preview_requested(self, which: HandleName, value: int) -> None:
         """スライダードラッグ中、そのハンドルが指す時刻のサムネイル(ストーリーボード)を
         取得してポップアップへ反映する。取得できるまで/できない場合は数字のみ表示される"""
         if not self.storyboard_format or not self.video_duration:
@@ -439,11 +439,13 @@ class MainWindow(Ui_MainWindow):
         worker.finished_error.connect(lambda message, w=worker: self._on_storyboard_fragment_failed(w))
         worker.start()
 
-    def _apply_storyboard_tile(self, which: str, sprite: QPixmap, tile: StoryboardTile) -> None:
+    def _apply_storyboard_tile(self, which: HandleName, sprite: QPixmap, tile: StoryboardTile) -> None:
         cropped = sprite.copy(tile.x, tile.y, tile.width, tile.height)
         self.clip_range_slider.set_preview_pixmap(which, cropped)
 
-    def _on_storyboard_fragment_fetched(self, worker: StoryboardFragmentWorker, data: bytes, which: str) -> None:
+    def _on_storyboard_fragment_fetched(
+        self, worker: StoryboardFragmentWorker, data: bytes, which: HandleName
+    ) -> None:
         self._storyboard_workers.discard(worker)
         self._pending_storyboard_urls.discard(worker.url)
 

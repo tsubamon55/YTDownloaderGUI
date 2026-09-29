@@ -9,6 +9,7 @@ Qtのイベントループ・ウィンドウ表示を要するため対象外と
 import os
 import sys
 import unittest
+from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -17,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication
 
+import widgets
 from widgets import RangeSlider
 
 _app = QApplication.instance() or QApplication(sys.argv)
@@ -230,6 +232,15 @@ class DragPreviewTest(unittest.TestCase):
         slider.set_preview_pixmap("low", pixmap)
 
         self.assertTrue(slider._preview._image_label.pixmap().isNull())
+
+
+class DrawColumnsTest(unittest.TestCase):
+    def test_draws_each_text_at_accumulated_x(self):
+        painter = MagicMock()
+        widgets._draw_columns(painter, 4, 0, 20, ["a", "b"])
+        rects = [call.args[0] for call in painter.drawText.call_args_list]
+        self.assertEqual([r.x() for r in rects], [4, 4 + widgets.FORMAT_COLUMN_WIDTHS[0]])
+        self.assertEqual([call.args[2] for call in painter.drawText.call_args_list], ["a", "b"])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from formats import FORMAT_OPTIONS
-from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow
+from main_window_ui import IDLE_STATUS_TEXT, THUMBNAIL_SIZE, Ui_MainWindow, toggle_button_text
 
 _app = QApplication.instance() or QApplication(sys.argv)
 
@@ -89,6 +89,15 @@ class SetupUiTest(unittest.TestCase):
             self.window.detail_container,
         }
         self.assertEqual(set(self.window.input_widgets), expected)
+
+
+class ToggleButtonTextTest(unittest.TestCase):
+    def test_expanded_and_collapsed(self):
+        self.assertEqual(toggle_button_text("ログ", True), "ログ ▴")
+        self.assertEqual(toggle_button_text("詳細設定", False), "詳細設定 ▾")
+
+    def test_thumbnail_size_is_unchanged(self):
+        self.assertEqual((THUMBNAIL_SIZE.width(), THUMBNAIL_SIZE.height()), (120, 68))
 
 
 if __name__ == "__main__":

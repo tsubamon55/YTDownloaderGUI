@@ -1,11 +1,12 @@
 """MainWindowのウィジェット生成・レイアウト組み立てのみを担当する。
 
 イベントハンドラの実装(on_xxx等)やシグナル接続はMainWindow側の責務とし、
-このモジュールはウィジェントの生成・配置・初期状態の設定にとどめる
-(pyuicが生成するUi_MainWindowクラスと同じ役割分担)。
+このモジュールはウィジェットの生成・配置・初期状態の設定にとどめる
+(pyuicが生成するUi_MainWindowクラスと同じ役割分担。ただしpyuicのように別オブジェクトに組み込むのではなく、
+QMainWindowを継承してMainWindowの基底クラスとして使う)。
 """
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,23 +23,31 @@ from PyQt6.QtWidgets import (
 )
 
 from formats import FORMAT_COLUMN_WIDTHS, FORMAT_OPTIONS
+from theme import ACCENT_COLOR
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, RangeSlider, SpinnerWidget
 
 IDLE_STATUS_TEXT = "待機中"
 
-LINK_BUTTON_STYLE = """
-QPushButton {
-    color: #1a73e8;
+THUMBNAIL_SIZE = QSize(120, 68)
+
+LINK_BUTTON_STYLE = f"""
+QPushButton {{
+    color: {ACCENT_COLOR};
     border: none;
     padding: 2px 4px;
     background: transparent;
-}
-QPushButton:hover { text-decoration: underline; }
+}}
+QPushButton:hover {{ text-decoration: underline; }}
 """
 
 
+def toggle_button_text(label: str, expanded: bool) -> str:
+    """折りたたみ式のトグルボタンの表示(展開中は▴、折りたたみ中は▾)"""
+    return f"{label} {'▴' if expanded else '▾'}"
+
+
 class Ui_MainWindow(QMainWindow):
-    """ウィジェント属性はsetup_ui内で代入される(型チェッカ・IDE補完のための宣言)"""
+    """ウィジェット属性はsetup_ui内で代入される(型チェッカ・IDE補完のための宣言)"""
 
     url_edit: QLineEdit
     paste_btn: QPushButton
@@ -75,6 +84,24 @@ class Ui_MainWindow(QMainWindow):
     log_view: QPlainTextEdit
     input_widgets: list[QWidget]
 
+    @staticmethod
+    def _make_toggle_button(text: str, fixed_size: bool = True) -> QPushButton:
+        """詳細表示を開閉するリンク風のトグルボタン"""
+        button = QPushButton(text)
+        button.setCheckable(True)
+        button.setFlat(True)
+        if fixed_size:
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        button.setStyleSheet(LINK_BUTTON_STYLE)
+        return button
+
+    def _make_format_combo(self, min_width: int) -> FormatComboBox:
+        combo = FormatComboBox()
+        combo.setEnabled(False)
+        combo.setItemDelegate(self.format_item_delegate)
+        combo.setMinimumWidth(min_width)
+        return combo
+
     def setup_ui(self, saved_out_dir: str) -> None:
         self.setWindowTitle("YouTube 動画ダウンローダー")
         self.resize(760, 420)
@@ -102,18 +129,18 @@ class Ui_MainWindow(QMainWindow):
         # heightForWidthの計算がずれて縦方向に大きく間延びするため、
         # 高さを固定したコンテナで包んで挙動を安定させる
         preview_container = QWidget()
-        preview_container.setFixedHeight(68)
+        preview_container.setFixedHeight(THUMBNAIL_SIZE.height())
         preview_row = QHBoxLayout(preview_container)
         preview_row.setContentsMargins(0, 0, 0, 0)
         preview_row.setSpacing(10)
         self.thumbnail_label = QLabel(preview_container)
-        self.thumbnail_label.setFixedSize(120, 68)
+        self.thumbnail_label.setFixedSize(THUMBNAIL_SIZE)
         self.thumbnail_label.setScaledContents(True)
         self.thumbnail_label.setStyleSheet("background-color: rgba(128, 128, 128, 35); border-radius: 3px;")
         preview_row.addWidget(self.thumbnail_label)
         self.title_label = QLabel("", preview_container)
         self.title_label.setWordWrap(True)
-        self.title_label.setMaximumHeight(68)
+        self.title_label.setMaximumHeight(THUMBNAIL_SIZE.height())
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         preview_row.addWidget(self.title_label, stretch=1)
         layout.addWidget(preview_container)
@@ -135,11 +162,7 @@ class Ui_MainWindow(QMainWindow):
         # auto_format_container が非表示のときはこのスペーサーが余白を吸収し、
         # manual_toggle_btn が引き伸ばされて中央寄りに見えるのを防ぐ
         format_row.addStretch(0)
-        self.manual_toggle_btn = QPushButton("手動設定 ▾")
-        self.manual_toggle_btn.setCheckable(True)
-        self.manual_toggle_btn.setFlat(True)
-        self.manual_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.manual_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        self.manual_toggle_btn = self._make_toggle_button("手動設定 ▾")
         format_row.addWidget(self.manual_toggle_btn)
         self.format_row = format_row
         layout.addLayout(format_row)
@@ -172,19 +195,13 @@ class Ui_MainWindow(QMainWindow):
 
         video_row = QHBoxLayout()
         video_row.addWidget(video_label)
-        self.video_format_combo = FormatComboBox()
-        self.video_format_combo.setEnabled(False)
-        self.video_format_combo.setItemDelegate(self.format_item_delegate)
-        self.video_format_combo.setMinimumWidth(format_combo_min_width)
+        self.video_format_combo = self._make_format_combo(format_combo_min_width)
         video_row.addWidget(self.video_format_combo, stretch=1)
         manual_layout.addLayout(video_row)
 
         audio_row = QHBoxLayout()
         audio_row.addWidget(audio_label)
-        self.audio_format_combo = FormatComboBox()
-        self.audio_format_combo.setEnabled(False)
-        self.audio_format_combo.setItemDelegate(self.format_item_delegate)
-        self.audio_format_combo.setMinimumWidth(format_combo_min_width)
+        self.audio_format_combo = self._make_format_combo(format_combo_min_width)
         audio_row.addWidget(self.audio_format_combo, stretch=1)
         manual_layout.addLayout(audio_row)
 
@@ -218,11 +235,7 @@ class Ui_MainWindow(QMainWindow):
         # トグルボタンは手動設定と同じく行の右端に寄せる
         detail_header_row = QHBoxLayout()
         detail_header_row.addStretch()
-        self.detail_toggle_btn = QPushButton("詳細設定 ▾")
-        self.detail_toggle_btn.setCheckable(True)
-        self.detail_toggle_btn.setFlat(True)
-        self.detail_toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.detail_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        self.detail_toggle_btn = self._make_toggle_button(toggle_button_text("詳細設定", False))
         detail_header_row.addWidget(self.detail_toggle_btn)
         layout.addLayout(detail_header_row)
 
@@ -287,18 +300,18 @@ class Ui_MainWindow(QMainWindow):
         download_font.setBold(True)
         self.download_btn.setFont(download_font)
         self.download_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #1a73e8;
+            f"""
+            QPushButton {{
+                background-color: {ACCENT_COLOR};
                 color: white;
                 font-weight: bold;
                 padding: 6px 16px;
                 border: none;
                 border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #1765cc; }
-            QPushButton:pressed { background-color: #145bb5; }
-            QPushButton:disabled { background-color: #a7c6f5; color: #f0f0f0; }
+            }}
+            QPushButton:hover {{ background-color: #1765cc; }}
+            QPushButton:pressed {{ background-color: #145bb5; }}
+            QPushButton:disabled {{ background-color: #a7c6f5; color: #f0f0f0; }}
             """
         )
         self.download_btn.setEnabled(False)
@@ -321,10 +334,7 @@ class Ui_MainWindow(QMainWindow):
         self.status_label = QLabel(IDLE_STATUS_TEXT)
         status_row.addWidget(self.status_label)
         status_row.addStretch()
-        self.log_toggle_btn = QPushButton("ログ ▾")
-        self.log_toggle_btn.setCheckable(True)
-        self.log_toggle_btn.setFlat(True)
-        self.log_toggle_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        self.log_toggle_btn = self._make_toggle_button(toggle_button_text("ログ", False), fixed_size=False)
         status_row.addWidget(self.log_toggle_btn)
         layout.addLayout(status_row)
 
