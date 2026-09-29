@@ -11,9 +11,10 @@ import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_range import clip_range_label
+from clip_trimmer import trim_clip
 from config import CONFIG
 from errors import describe_error
-from formats import codec_prefix, format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
+from formats import format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug, remove_file_quietly
 from yt_dlp_selection import make_filtering_format_selector
 
@@ -335,12 +336,6 @@ class DownloadWorker(QThread):
         "mp3", "mkv", "mka", "ogg", "opus", "flac", "m4a", "mp4", "m4v", "mov",
     }
 
-    # クリップ切り出し時に正確な時刻へ合わせるため再エンコードする映像コーデックと、
-    # 元のコーデックに対して体感できる劣化がほぼ出ないCRF値の組(値が小さいほど高品質)。
-    # 未対応のコーデック(HEVC/AV1等)はffmpegの既定エンコーダ・画質設定にフォールバックする
-    # (config.jsonのclip_video_encoder_by_codec_prefixで調整可能)
-    _CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX = CONFIG.clip_video_encoder_by_codec_prefix
-
     def _postprocessor_hook(self, d):
         status = d.get("status")
         name = d.get("postprocessor", "")
@@ -414,249 +409,9 @@ class DownloadWorker(QThread):
             return self.format_spec
         return make_filtering_format_selector(self.format_spec, is_codec_container_mismatch)
 
-    @staticmethod
-    def _probe_video_streams(ffpp: FFmpegPostProcessor, filepath: str) -> dict:
-        """ffprobeでファイルを直接調べ、そのメタデータを返す(失敗時は空のメタデータ)。
-
-        probe用に別途取得したextract_info()の結果を使うと、実ダウンロード時の
-        フォーマット選択との間に2回のネットワークリクエストの時間差があるため、
-        (フォーマットの有効期限切れ等で)実際にダウンロードされた内容とズレる
-        可能性がある。確定済みのローカルファイルを直接調べることでそのズレを避ける。
-
-        _detect_vcodecと_attached_pic_absolute_indicesの両方で使う共通の生データを
-        1回のffprobe呼び出しで取得するためにまとめてある"""
-        try:
-            return ffpp.get_metadata_object(filepath)
-        except Exception as e:
-            log_debug(f"_probe_video_streams: ffprobeでの検出に失敗 ({e!r})")
-            return {}
-
-    @staticmethod
-    def _detect_vcodec(metadata: dict) -> str | None:
-        """ffprobeのメタデータから、実際に書き出された本編映像のコーデックを返す
-        (音声のみの場合はNone)。
-
-        埋め込みサムネイルは別の映像ストリーム(disposition=attached_pic)として
-        検出されるため、本編映像のコーデックを正しく判定できるよう除外する"""
-        for stream in metadata.get("streams", []):
-            if stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic"):
-                return stream.get("codec_name")
-        return None
-
-    @staticmethod
-    def _attached_pic_absolute_indices(metadata: dict) -> list[int]:
-        """ffprobeのメタデータから、埋め込みサムネイル(disposition=attached_pic)の
-        映像ストリームの絶対インデックス(-map/-select_streamsにそのまま渡せる値)を
-        全て返す(本編映像は除く。見つからない場合は空リスト)"""
-        return [
-            i
-            for i, stream in enumerate(metadata.get("streams", []))
-            if stream.get("codec_type") == "video" and stream.get("disposition", {}).get("attached_pic")
-        ]
-
-    _ATTACHED_PIC_EXT_BY_CODEC = {"png": "png", "mjpeg": "jpg", "jpeg": "jpg"}
-
-    def _extract_attached_pics(
-        self, ffpp: FFmpegPostProcessor, filepath: str, metadata: dict, absolute_indices: list[int]
-    ) -> list[str]:
-        """埋め込みサムネイル(attached_pic)を個別の画像ファイルへ抽出する。
-
-        切り抜き処理は出力側で正確な時刻へシークするが、この-ssはストリームコピーする
-        全ての出力ストリームに一律で及び、attached_pic(先頭付近の低いpts、通常0の
-        1フレームだけの静止画)も本編と無関係に対象時刻より前として切り捨ててしまう
-        (ffmpegの単一の出力パイプラインではストリーム毎に-ssの適用有無を選べない)。
-        そのため切り抜き本体からはattached_picを除外し、シークの影響を受けない
-        単発のffmpeg呼び出しでここで先に画像として抜き出しておき、切り抜き完了後に
-        _reattach_thumbnailsで単純に付け直す(yt-dlp本体のEmbedThumbnailPPがmp4/mov等で
-        使うffmpegフォールバック手法と同じ、動画+画像を2入力でマージする方式)"""
-        root, _ = os.path.splitext(filepath)
-        extracted = []
-        for idx in absolute_indices:
-            codec_name = metadata["streams"][idx].get("codec_name") or ""
-            ext = self._ATTACHED_PIC_EXT_BY_CODEC.get(codec_name.lower(), "jpg")
-            thumb_path = f"{root}.thumb{idx}.{ext}"
-            try:
-                ffpp.real_run_ffmpeg(
-                    [(filepath, [])],
-                    [(thumb_path, ["-map", f"0:{idx}", "-c", "copy", "-f", "image2", "-update", "1"])],
-                )
-                extracted.append(thumb_path)
-            except Exception as e:
-                log_debug(f"_extract_attached_pics: サムネイル抽出に失敗 ({e!r})")
-        return extracted
-
-    @staticmethod
-    def _reattach_thumbnails(
-        ffpp: FFmpegPostProcessor, video_path: str, video_stream_count: int, thumbnail_paths: list[str]
-    ) -> None:
-        """_extract_attached_picsで抜き出しておいた画像を、切り抜き後の動画に
-        単純なコピーのみで付け直す(シークを一切伴わないため対象時刻の影響を受けない)。
-        video_stream_countは切り抜き後の動画自体が持つ出力ストリーム数(attached_pic除く)で、
-        disposition指定に使う出力側の絶対インデックスを組み立てるのに必要"""
-        root, ext = os.path.splitext(video_path)
-        merged_path = f"{root}.thumbmerge{ext}"
-        input_specs = [(video_path, [])] + [(path, []) for path in thumbnail_paths]
-        output_opts = ["-map", "0"]
-        for i in range(len(thumbnail_paths)):
-            output_opts += ["-map", str(i + 1)]
-        output_opts += ["-c", "copy"]
-        for i in range(len(thumbnail_paths)):
-            output_opts += [f"-disposition:{video_stream_count + i}", "attached_pic"]
-        try:
-            ffpp.real_run_ffmpeg(input_specs, [(merged_path, output_opts)])
-            os.replace(merged_path, video_path)
-        finally:
-            # ffmpegが失敗した場合、部分的に書き込まれた中間ファイルが保存先に残る。
-            # この経路は呼び出し元で握りつぶされて成功扱い(finished_ok)になり
-            # _cleanup_leftover_filesも走らないため、ここで確実に後片付けする
-            remove_file_quietly(merged_path, "_reattach_thumbnails")
-
-    @staticmethod
-    def _main_video_stream_absolute_index(metadata: dict) -> int | None:
-        """ffprobeのメタデータから、本編映像(埋め込みサムネイルを除く)ストリームの
-        絶対インデックス(ffprobeの-select_streamsにそのまま渡せる値)を返す"""
-        for i, stream in enumerate(metadata.get("streams", [])):
-            if stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic"):
-                return i
-        return None
-
-    @staticmethod
-    def _nearest_keyframe_at_or_before(
-        ffpp: FFmpegPostProcessor, filepath: str, stream_index: int, target: float
-    ) -> float:
-        """ffprobeで本編映像のキーフレーム時刻を調べ、target秒以前で最も近いものを返す
-        (キーフレームが見つからない場合は0.0)。
-
-        入力側の高速-ss(-iより前)は、コンテナのシーク単位(キーフレーム位置。mkv/webmでは
-        その位置に基づくクラスタ単位)までしか正確に戻れない。ここで実際に着地する時刻を
-        求めておき、_trim_clip_locallyがその差分だけ出力側でも正確にシークすることで、
-        ストリームコピーする音声も目標時刻まで正確に合わせられる(差分を求めず同じ時刻を
-        単純に2回指定すると、着地点からさらに丸ごとtarget秒分シークしてしまい動画終盤の
-        切り抜きで入力範囲を飛び越え、出力が空になる)。
-
-        skip_frame=nokeyでキーフレームのパケットだけを対象にするため、対象区間を
-        フルデコードするより大幅に軽い"""
-        try:
-            metadata = ffpp.get_metadata_object(
-                filepath,
-                opts=["-select_streams", str(stream_index), "-skip_frame", "nokey", "-show_frames"],
-            )
-        except Exception as e:
-            log_debug(f"_nearest_keyframe_at_or_before: ffprobeでの検出に失敗 ({e!r})")
-            return 0.0
-        keyframe_times = (
-            float(frame["pts_time"])
-            for frame in metadata.get("frames", [])
-            if frame.get("key_frame") and "pts_time" in frame
-        )
-        candidates = [t for t in keyframe_times if t <= target]
-        return max(candidates) if candidates else 0.0
-
     def _trim_clip_locally(self) -> None:
-        """ダウンロード済みファイルをffmpegでローカルに切り出し、self._final_filepathを
-        切り出し後のファイルで置き換える。
-
-        yt-dlpのdownload_ranges機能はクリップ区間の有無に関わらずダウンローダを
-        ffmpeg直結のFFmpegFDへ強制的に切り替える(yt_dlp.downloader.get_suitable_downloader
-        の実装による)。この経路はyt-dlp本来のダウンローダが持つ再接続・スロットリング回避を
-        経由しないため、YouTube側のCDNスロットリングに引っかかると進捗が一切報告されないまま
-        無期限に停止することがある。そのため範囲指定はダウンローダには渡さず、まず動画全体を
-        通常のダウンローダで取得してから、完成したローカルファイルに対してここで切り出す。
-
-        音声は数十ms単位のフレームで独立して切り出せる(キーフレーム制約がない)ため、
-        コーデックを問わず常にストリームコピーする(劣化なし)。映像は正確な時刻に合わせる
-        ため再エンコードが避けられないので、体感できる劣化がほぼ出ない高めのCRFを使う。
-
-        切り出し自体に失敗しても、動画全体のダウンロードはすでに成功しているため、
-        ダウンロード全体を失敗扱いにはせず、切り出し前の全体ファイルをそのまま残す。
-        """
-        if not self._final_filepath or not os.path.isfile(self._final_filepath):
-            return
-
-        self.log.emit("切り抜き範囲を切り出し中...")
-        ffpp = FFmpegPostProcessor(downloader=None)
-        root, ext = os.path.splitext(self._final_filepath)
-        trimmed_path = f"{root}.clip{ext}"
-        thumbnail_paths: list[str] = []
-
-        try:
-            metadata = self._probe_video_streams(ffpp, self._final_filepath)
-            vcodec = self._detect_vcodec(metadata)
-            attached_pic_indices = self._attached_pic_absolute_indices(metadata)
-            video_stream_count = len(metadata.get("streams", [])) - len(attached_pic_indices)
-
-            if attached_pic_indices:
-                thumbnail_paths = self._extract_attached_pics(
-                    ffpp, self._final_filepath, metadata, attached_pic_indices
-                )
-
-            # -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから
-            # 必要な範囲だけを再エンコードする(yt-dlpのFFmpegFDが行う高速+正確シークと同じ手法)。
-            # ただしこの入力側シークはキーフレーム(mkv/webmではその位置に基づくクラスタ単位)
-            # までしか正確に戻れず、コンテナによっては本編映像の目標時刻より数秒前の
-            # 位置までしか進まない。本編映像は再エンコードのため後段で余剰分が破棄され
-            # 正確な時刻に合うが、ストリームコピーする音声はその破棄が効かず、シーク後の
-            # 位置からそのままコピーされてしまうため、本編映像より数秒早い音声が出力され
-            # ズレて聞こえる。そこで実際に着地するキーフレーム時刻をffprobeで求め、
-            # その差分(余り)だけを-iの直後(=output_opts側)に追加の-ssとして指定し、
-            # コピーストリームも含めて目標時刻まで正確にシークさせる。ここで単純に同じ
-            # 時刻を2回指定してしまうと、着地点からさらに丸ごと目標時刻分だけシークする
-            # ことになり、動画終盤の切り抜きで入力範囲を飛び越えて出力が空になる
-            input_opts = []
-            accurate_seek_opts = []
-            if self.start_time:
-                main_video_index = self._main_video_stream_absolute_index(metadata)
-                if main_video_index is not None:
-                    keyframe_time = self._nearest_keyframe_at_or_before(
-                        ffpp, self._final_filepath, main_video_index, self.start_time
-                    )
-                else:
-                    # 映像ストリームが無い(音声のみ)場合、キーフレーム制約自体が無く
-                    # 入力側シークだけで十分正確なため、そのまま入力側シークに委ねる
-                    keyframe_time = self.start_time
-                input_opts = ["-ss", str(keyframe_time)]
-                remainder = self.start_time - keyframe_time
-                if remainder > 0:
-                    accurate_seek_opts = ["-ss", str(remainder)]
-
-            # -map 0で全ストリーム(本編映像・音声に加えmkvの添付ファイルなど)を出力対象に
-            # 含めつつ、埋め込みサムネイル(attached_pic)だけは-map -0:Nで除外する
-            # (理由は_extract_attached_pics参照: 出力側の正確シークは低pts(通常0)の
-            # 静止画1コマも問答無用で切り捨ててしまうため、切り抜き本体には含めず
-            # 後段のos.replace後に_reattach_thumbnailsで単純コピーのみで付け直す)。
-            # 音声・添付ファイルは常にコピーする。本編映像(-c:v:0)は、対応コーデックなら
-            # 専用エンコーダ+CRFで、非対応コーデック(HEVC/AV1等)は何も指定せずffmpeg既定の
-            # エンコーダにフォールバックさせる(ここを"-c copy"にすると非対応コーデック時に
-            # 本編映像までストリームコピーになり、キーフレーム単位でしか正確な時刻に合わせられず
-            # 音声とズレて見えてしまう)
-            output_opts = accurate_seek_opts + ["-map", "0"]
-            for idx in attached_pic_indices:
-                output_opts += ["-map", f"-0:{idx}"]
-            output_opts += ["-c:a", "copy", "-c:t", "copy"]
-            video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix(vcodec))
-            if video_encoder:
-                encoder_name, crf = video_encoder
-                output_opts += ["-c:v:0", encoder_name, "-crf", crf]
-            if self.end_time is not None:
-                output_opts += ["-t", str(self.end_time - (self.start_time or 0))]
-
-            ffpp.real_run_ffmpeg([(self._final_filepath, input_opts)], [(trimmed_path, output_opts)])
-            os.replace(trimmed_path, self._final_filepath)
-
-            if thumbnail_paths:
-                try:
-                    self._reattach_thumbnails(ffpp, self._final_filepath, video_stream_count, thumbnail_paths)
-                except Exception as e:
-                    log_debug(f"_trim_clip_locally: サムネイルの再添付に失敗 ({e!r})")
-                    self.log.emit("切り抜きは完了しましたが、サムネイルの再添付に失敗しました")
-
-            self.log.emit("切り出し完了")
-        except Exception as e:
-            remove_file_quietly(trimmed_path, "_trim_clip_locally")
-            self.log.emit(f"切り抜き範囲の切り出しに失敗したため、動画全体を保存しました: {e}")
-        finally:
-            for path in thumbnail_paths:
-                remove_file_quietly(path, "_trim_clip_locally")
+        """ダウンロード済みの最終ファイルを切り抜き範囲で切り出す(詳細はclip_trimmer参照)"""
+        trim_clip(self._final_filepath, self.start_time, self.end_time, self.log.emit)
 
     def run(self):
         self._start_time = time.monotonic()
