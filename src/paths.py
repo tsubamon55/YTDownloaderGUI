@@ -32,16 +32,37 @@ def get_log_file_path() -> str:
     return os.path.join(get_app_data_dir(), "crash.log")
 
 
-def log_debug(message: str) -> None:
-    """crash.logと同じファイルに、ユーザーには見せず処理を続行させた例外の情報を記録する。
-    (except Exceptionで握りつぶすだけだと、後から不具合の原因を追跡できなくなるため)"""
-    log_path = get_log_file_path()
+def append_log_entry(text: str, log_path: str | None = None) -> bool:
+    """crash.logへタイムスタンプ付きで1件追記する。書き込めた場合True。
+    書き込み失敗はアプリの動作に影響させないため例外は投げない"""
+    log_path = log_path or get_log_file_path()
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}\n")
+            f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {text}\n")
     except OSError:
-        pass
+        return False
+    return True
+
+
+def log_debug(message: str) -> None:
+    """crash.logと同じファイルに、ユーザーには見せず処理を続行させた例外の情報を記録する。
+    (except Exceptionで握りつぶすだけだと、後から不具合の原因を追跡できなくなるため)"""
+    append_log_entry(message)
+
+
+def remove_file_quietly(path: str, context: str) -> bool:
+    """pathのファイルがあれば削除する。削除できた場合True。
+    後片付け目的の削除が失敗しても本来の処理を止めないよう、例外は投げずに
+    context(呼び出し元の名前)付きでlog_debugへ記録するだけにする"""
+    if not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+    except OSError as e:
+        log_debug(f"{context}: {path} の削除に失敗 ({e!r})")
+        return False
+    return True
 
 
 class _GUID(ctypes.Structure):
@@ -81,17 +102,21 @@ def get_downloads_folder() -> str:
     return fallback
 
 
-def find_bundled_file(filename: str) -> str | None:
-    """実行ファイル/プロジェクト直下、またはPyInstallerの一時展開先(_MEIPASS)に同梱された
-    ファイルを探す(どこにも無ければNone)。PyInstallerのonedirビルドは、同梱ファイルを
-    exeと同階層に置く配置と`_internal`配下にまとめる配置のどちらにもなり得るため、
-    get_ffmpeg_location()と同じ候補順で探索する"""
-    candidates = [get_base_dir()]
+def _bundle_search_dirs() -> list[str]:
+    """同梱ファイルの探索先。PyInstallerのonedirビルドは、同梱ファイルをexeと同階層に
+    置く配置と`_internal`配下(_MEIPASS)にまとめる配置のどちらにもなり得るため両方を見る
+    (spec側の設定だけに依存していると、specを再生成した拍子に読み込めなくなるため)"""
+    dirs = [get_base_dir()]
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        candidates.append(meipass)
+        dirs.append(meipass)
+    return dirs
 
-    for base in candidates:
+
+def find_bundled_file(filename: str) -> str | None:
+    """実行ファイル/プロジェクト直下、またはPyInstallerの一時展開先に同梱された
+    ファイルを探す(どこにも無ければNone)"""
+    for base in _bundle_search_dirs():
         path = os.path.join(base, filename)
         if os.path.isfile(path):
             return path
@@ -103,12 +128,7 @@ FFMPEG_EXECUTABLE_NAME = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
 
 
 def get_ffmpeg_location() -> str | None:
-    candidates = [get_base_dir()]
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(meipass)
-
-    for base in candidates:
+    for base in _bundle_search_dirs():
         ffmpeg_dir = os.path.join(base, "ffmpeg")
         if os.path.isfile(os.path.join(ffmpeg_dir, FFMPEG_EXECUTABLE_NAME)):
             return ffmpeg_dir

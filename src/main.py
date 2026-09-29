@@ -1,13 +1,12 @@
 import os
 import sys
 import traceback
-from datetime import datetime
 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from main_window import MainWindow
-from paths import find_bundled_file, get_log_file_path
+from paths import append_log_entry, find_bundled_file, get_log_file_path
 
 APP_ICON_PATH = os.path.join("downloader-icon", "app-icon-1024.png")
 
@@ -27,15 +26,9 @@ def install_exception_hook():
         message = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         sys.stderr.write(message)
 
-        logged = True
-        try:
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}]\n{message}\n")
-        except OSError:
-            # 書き込みに失敗してもアプリは継続させるが、案内の文言は実際の結果に合わせる。
-            # 残っていないログの場所を案内すると、調査の際に誤った手がかりを与えてしまう
-            logged = False
+        # 書き込みに失敗してもアプリは継続させるが、案内の文言は実際の結果に合わせる。
+        # 残っていないログの場所を案内すると、調査の際に誤った手がかりを与えてしまう
+        logged = append_log_entry(f"未処理の例外\n{message}", log_path)
 
         if QApplication.instance() is not None:
             detail = (

@@ -8,10 +8,9 @@
 
 import json
 import os
-import sys
 from dataclasses import dataclass, field, fields
 
-from paths import get_base_dir, log_debug
+from paths import find_bundled_file, get_base_dir, log_debug
 
 CONFIG_FILE_NAME = "config.json"
 
@@ -46,21 +45,8 @@ class AppConfig:
 
 
 def _config_file_path() -> str | None:
-    """config.jsonの実体パスを返す(どこにも無ければNone)。
-
-    PyInstallerのonedirビルドは、同梱ファイルをexeと同階層に置く配置と`_internal`配下に
-    まとめる配置のどちらにもなり得るため、get_ffmpeg_location()と同じ候補順で探索する。
-    (spec側の設定だけに依存していると、specを再生成した拍子に読み込めなくなるため)"""
-    candidates = [get_base_dir()]
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(meipass)
-
-    for base in candidates:
-        path = os.path.join(base, CONFIG_FILE_NAME)
-        if os.path.isfile(path):
-            return path
-    return None
+    """config.jsonの実体パスを返す(どこにも無ければNone)"""
+    return find_bundled_file(CONFIG_FILE_NAME)
 
 
 def _validated_value(expected_type, current, value):

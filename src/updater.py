@@ -18,7 +18,7 @@ import urllib.request
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from config import CONFIG
-from paths import find_bundled_file, get_app_data_dir, get_log_file_path, log_debug
+from paths import find_bundled_file, get_app_data_dir, get_log_file_path, log_debug, remove_file_quietly
 
 GITHUB_REPO = "tsubamon55/YTDownloaderGUI"
 GITHUB_API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -172,11 +172,7 @@ class UpdateDownloadWorker(QThread):
             self.finished_error.emit(str(e))
 
     def _cleanup_partial_file(self) -> None:
-        if os.path.isfile(self.dest_path):
-            try:
-                os.remove(self.dest_path)
-            except OSError as e:
-                log_debug(f"UpdateDownloadWorker: 未完成ファイルの削除に失敗しました ({e!r})")
+        remove_file_quietly(self.dest_path, "UpdateDownloadWorker")
 
 
 def _launch_windows_installer(installer_path: str) -> None:

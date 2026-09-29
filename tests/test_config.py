@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import config
+import paths
 
 
 def _write_config(directory: str, data) -> str:
@@ -27,7 +28,7 @@ class ConfigFilePathTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base_dir, tempfile.TemporaryDirectory() as meipass:
             expected = _write_config(base_dir, {})
             _write_config(meipass, {})
-            with patch.object(config, "get_base_dir", return_value=base_dir), \
+            with patch.object(paths, "get_base_dir", return_value=base_dir), \
                  patch("sys._MEIPASS", meipass, create=True):
                 self.assertEqual(config._config_file_path(), expected)
 
@@ -35,13 +36,13 @@ class ConfigFilePathTest(unittest.TestCase):
         """PyInstallerが同梱ファイルを_internal配下にまとめる配置でも読み込めること"""
         with tempfile.TemporaryDirectory() as base_dir, tempfile.TemporaryDirectory() as meipass:
             expected = _write_config(meipass, {})
-            with patch.object(config, "get_base_dir", return_value=base_dir), \
+            with patch.object(paths, "get_base_dir", return_value=base_dir), \
                  patch("sys._MEIPASS", meipass, create=True):
                 self.assertEqual(config._config_file_path(), expected)
 
     def test_returns_none_when_nothing_found(self):
         with tempfile.TemporaryDirectory() as base_dir, tempfile.TemporaryDirectory() as meipass:
-            with patch.object(config, "get_base_dir", return_value=base_dir), \
+            with patch.object(paths, "get_base_dir", return_value=base_dir), \
                  patch("sys._MEIPASS", meipass, create=True):
                 self.assertIsNone(config._config_file_path())
 
@@ -53,7 +54,7 @@ class LoadConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base_dir:
             if data is not None:
                 _write_config(base_dir, data)
-            with patch.object(config, "get_base_dir", return_value=base_dir), \
+            with patch.object(paths, "get_base_dir", return_value=base_dir), \
                  patch.object(config, "log_debug", side_effect=logged.append):
                 return config.load_config(), logged
 

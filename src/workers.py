@@ -18,7 +18,7 @@ from yt_dlp.postprocessor import FFmpegPostProcessor
 from clip_range import clip_range_label
 from config import CONFIG
 from formats import codec_prefix, format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
-from paths import get_ffmpeg_location, log_debug
+from paths import get_ffmpeg_location, log_debug, remove_file_quietly
 from yt_dlp_selection import make_filtering_format_selector
 
 # ネットワーク切断・タイムアウト等を表す例外型。yt-dlpは内部でurllib/http.client/sslの
@@ -285,11 +285,8 @@ class DownloadWorker(QThread):
             path = os.path.join(self.out_dir, name)
             if keep_path and os.path.normcase(os.path.abspath(path)) == keep_path:
                 continue
-            try:
-                os.remove(path)
+            if remove_file_quietly(path, "_cleanup_leftover_files"):
                 self.log.emit(f"未完了ファイルを削除しました: {name}")
-            except OSError as e:
-                log_debug(f"_cleanup_leftover_files: {name} の削除に失敗 ({e!r})")
 
     @staticmethod
     def _describe_selected_format(info: dict) -> str:
@@ -572,11 +569,7 @@ class DownloadWorker(QThread):
             # ffmpegが失敗した場合、部分的に書き込まれた中間ファイルが保存先に残る。
             # この経路は呼び出し元で握りつぶされて成功扱い(finished_ok)になり
             # _cleanup_leftover_filesも走らないため、ここで確実に後片付けする
-            if os.path.isfile(merged_path):
-                try:
-                    os.remove(merged_path)
-                except OSError as cleanup_error:
-                    log_debug(f"_reattach_thumbnails: 中間ファイルの削除に失敗 ({cleanup_error!r})")
+            remove_file_quietly(merged_path, "_reattach_thumbnails")
 
     @staticmethod
     def _main_video_stream_absolute_index(metadata: dict) -> int | None:
@@ -719,19 +712,11 @@ class DownloadWorker(QThread):
 
             self.log.emit("切り出し完了")
         except Exception as e:
-            if os.path.isfile(trimmed_path):
-                try:
-                    os.remove(trimmed_path)
-                except OSError as cleanup_error:
-                    log_debug(f"_trim_clip_locally: 切り出し失敗後の一時ファイル削除に失敗 ({cleanup_error!r})")
+            remove_file_quietly(trimmed_path, "_trim_clip_locally")
             self.log.emit(f"切り抜き範囲の切り出しに失敗したため、動画全体を保存しました: {e}")
         finally:
             for path in thumbnail_paths:
-                if os.path.isfile(path):
-                    try:
-                        os.remove(path)
-                    except OSError as cleanup_error:
-                        log_debug(f"_trim_clip_locally: サムネイル一時ファイルの削除に失敗 ({cleanup_error!r})")
+                remove_file_quietly(path, "_trim_clip_locally")
 
     def run(self):
         self._start_time = time.monotonic()

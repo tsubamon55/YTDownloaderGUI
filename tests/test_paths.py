@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -115,6 +116,44 @@ class GetFfmpegLocationTest(unittest.TestCase):
              patch("shutil.which", return_value=None):
             result = paths.get_ffmpeg_location()
         self.assertIsNone(result)
+
+
+class AppendLogEntryTest(unittest.TestCase):
+    def test_appends_timestamped_line_and_returns_true(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, "nested", "crash.log")
+            self.assertTrue(paths.append_log_entry("hello", log_path))
+            with open(log_path, encoding="utf-8") as f:
+                content = f.read()
+            self.assertRegex(content, r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] hello\n$")
+
+    def test_returns_false_when_directory_cannot_be_created(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocking_file = os.path.join(tmp, "blocker")
+            open(blocking_file, "w").close()
+            self.assertFalse(paths.append_log_entry("x", os.path.join(blocking_file, "crash.log")))
+
+
+class RemoveFileQuietlyTest(unittest.TestCase):
+    def test_removes_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.tmp")
+            open(path, "w").close()
+            self.assertTrue(paths.remove_file_quietly(path, "test"))
+            self.assertFalse(os.path.exists(path))
+
+    def test_missing_file_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(paths.remove_file_quietly(os.path.join(tmp, "none.tmp"), "test"))
+
+    def test_failure_is_logged_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.tmp")
+            open(path, "w").close()
+            with patch("paths.os.remove", side_effect=PermissionError("locked")), \
+                 patch("paths.log_debug") as log_mock:
+                self.assertFalse(paths.remove_file_quietly(path, "ctx"))
+            self.assertIn("ctx", log_mock.call_args[0][0])
 
 
 if __name__ == "__main__":
