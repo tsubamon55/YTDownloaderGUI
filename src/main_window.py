@@ -9,8 +9,8 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, QUrl
-from PyQt6.QtGui import QCloseEvent, QDesktopServices, QPixmap
+from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer
+from PyQt6.QtGui import QCloseEvent, QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QProgressDialog
 
 from clip_range import (
@@ -20,6 +20,7 @@ from clip_range import (
     resolve_clip_range,
 )
 from config import CONFIG
+from folder_opener import open_folder
 from format_engine import (
     FormatSelection,
     compute_auto_format_note,
@@ -512,45 +513,9 @@ class MainWindow(Ui_MainWindow):
             self.out_edit.setText(folder)
             self.settings.setValue("last_output_dir", folder)
 
-    def find_open_explorer_window(self, path: str) -> Any | None:
-        """指定フォルダを既に開いているエクスプローラーウィンドウがあれば返す(Windows専用)"""
-        normalized = os.path.normcase(os.path.normpath(path))
-        try:
-            import win32com.client
-
-            shell = win32com.client.Dispatch("Shell.Application")
-            for window in shell.Windows():
-                try:
-                    folder_path = window.Document.Folder.Self.Path
-                except Exception:
-                    # 制御パネル等、フォルダを持たないシェルウィンドウもあるため無視して次へ
-                    continue
-                if os.path.normcase(os.path.normpath(folder_path)) == normalized:
-                    return window
-        except Exception as e:
-            log_debug(f"find_open_explorer_window: シェルウィンドウの列挙に失敗 ({e!r})")
-            return None
-        return None
-
     def open_output_folder(self) -> None:
-        if not (self.last_output_dir and os.path.isdir(self.last_output_dir)):
-            return
-
-        if sys.platform == "win32":
-            window = self.find_open_explorer_window(self.last_output_dir)
-            if window is not None:
-                try:
-                    import win32gui
-
-                    window.Visible = True
-                    win32gui.SetForegroundWindow(window.HWND)
-                except Exception as e:
-                    log_debug(f"open_output_folder: 既存ウィンドウの前面化に失敗 ({e!r})")
-                return
-
-        # Qtの薄いラッパー経由でOS標準のファイルマネージャ(Finder/Nautilus等)を開く。
-        # Windows以外では、既存ウィンドウの再利用のような最適化は行わず素直に開くだけにする
-        QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_output_dir))
+        if self.last_output_dir and os.path.isdir(self.last_output_dir):
+            open_folder(self.last_output_dir)
 
     def _check_for_updates(self) -> None:
         worker = UpdateCheckWorker()
