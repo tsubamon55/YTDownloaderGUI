@@ -30,6 +30,7 @@ def make_video(format_id, ext, vcodec, height, width=None, fps=30, filesize=None
         "fps": fps,
         "filesize": filesize,
         "protocol": protocol,
+        "url": f"https://example.com/{format_id}",
     }
 
 
@@ -42,6 +43,7 @@ def make_audio(format_id, ext, acodec, abr=128, filesize=None, protocol="https")
         "abr": abr,
         "filesize": filesize,
         "protocol": protocol,
+        "url": f"https://example.com/{format_id}",
     }
 
 

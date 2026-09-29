@@ -20,6 +20,7 @@ YoutubeDL._select_formats/build_format_selectorの実装差分を確認し、こ
 _build_ctxを追従させる。
 """
 
+import copy
 from collections.abc import Callable
 from typing import Any
 
@@ -41,21 +42,28 @@ def _build_ctx(formats: list[dict]) -> dict:
     }
 
 
+# process_ie_resultが要求する最小限の動画情報。extractorは候補が無いときのエラーメッセージの組み立てに必須
+_PREVIEW_INFO = {"id": "preview", "title": "preview", "extractor": "generic", "extractor_key": "Generic"}
+
+
 def select_formats(
     formats: list[dict], format_spec: str, format_sort: list | None = None
 ) -> list[dict]:
     """format_specに一致する候補をformatsから選択する(ネットワークアクセスなし)。
 
     実際のダウンロード(DownloadWorker)と同じ選択結果を得るため、独自の選択ロジックを
-    実装せずyt-dlp本体の選択エンジンをそのまま利用する。
+    実装せず、formatsだけを持つ最小の動画情報をyt-dlpの通常の処理経路
+    (process_ie_result)に通して選ばせる。一致する候補が無ければ空リストを返す。
     """
-    ydl_opts: dict[str, Any] = {"quiet": True, "no_warnings": True}
+    ydl_opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "format": format_spec}
     if format_sort:
         ydl_opts["format_sort"] = format_sort
-    ydl = yt_dlp.YoutubeDL(ydl_opts)
-    ydl.sort_formats({"formats": formats})
-    selector = ydl.build_format_selector(format_spec)
-    return list(selector(_build_ctx(formats)))
+    info = {**_PREVIEW_INFO, "formats": copy.deepcopy(formats)}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return [ydl.process_ie_result(info, download=False)]
+    except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
+        return []
 
 
 def make_filtering_format_selector(

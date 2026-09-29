@@ -5,6 +5,7 @@ format_engine.pyとworkers.pyが共有するyt-dlp内部の非公開の契約
 yt-dlpの更新でこの契約が変わった場合、真っ先にこのテストが落ちることを意図している。
 """
 
+import copy
 import os
 import sys
 import unittest
@@ -75,6 +76,24 @@ class SelectFormatsTest(unittest.TestCase):
 
     def test_empty_formats_returns_empty_list(self):
         self.assertEqual(select_formats([], "b", None), [])
+
+    def test_no_matching_format_returns_empty_list(self):
+        self.assertEqual(select_formats(self.formats, "bv*[ext=avi]", None), [])
+
+    def test_single_format_has_no_requested_formats(self):
+        """単体フォーマットの選択結果にrequested_formatsが付くと、サイズ・解像度の計算を誤る"""
+        selected = select_formats(self.formats, "137", None)
+        self.assertNotIn("requested_formats", selected[0])
+
+    def test_does_not_modify_input_formats(self):
+        before = copy.deepcopy(self.formats)
+        select_formats(self.formats, "137+140", None)
+        self.assertEqual(self.formats, before)
+
+    def test_format_sort_is_applied(self):
+        """同じ解像度ならformat_sortで指定したコーデック(avc)が優先される"""
+        selected = select_formats(self.formats, "bv*", ["res", "codec:avc:m4a"])
+        self.assertEqual(selected[0]["format_id"], "137")
 
 
 class MakeFilteringFormatSelectorTest(unittest.TestCase):
