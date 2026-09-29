@@ -2,7 +2,6 @@
 
 import http.client
 import os
-import socket
 import ssl
 import sys
 import unittest
@@ -34,7 +33,7 @@ class IsNetworkErrorTest(unittest.TestCase):
         self.assertTrue(is_network_error(urllib.error.URLError("no route to host")))
 
     def test_socket_timeout_is_network_error(self):
-        self.assertTrue(is_network_error(socket.timeout("timed out")))
+        self.assertTrue(is_network_error(TimeoutError("timed out")))
 
     def test_connection_reset_is_network_error(self):
         self.assertTrue(is_network_error(ConnectionResetError("接続がリセットされました")))
@@ -71,12 +70,13 @@ class IsNetworkErrorTest(unittest.TestCase):
             try:
                 raise urllib.error.URLError("getaddrinfo failed")
             except urllib.error.URLError:
-                raise yt_dlp.utils.DownloadError("Unable to download webpage")
+                # 暗黙の例外チェーン(__context__)を辿れることを確かめるため、あえてfromを付けない
+                raise yt_dlp.utils.DownloadError("Unable to download webpage")  # noqa: B904
         except yt_dlp.utils.DownloadError as wrapped:
             self.assertTrue(is_network_error(wrapped))
 
     def test_download_error_wrapping_via_explicit_cause(self):
-        original = socket.timeout("timed out")
+        original = TimeoutError("timed out")
         wrapped = yt_dlp.utils.DownloadError("timed out while downloading")
         wrapped.__cause__ = original
         self.assertTrue(is_network_error(wrapped))

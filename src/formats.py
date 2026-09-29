@@ -217,11 +217,11 @@ def format_codec(fmt: Format) -> str:
 # H.264のmp4が存在しない場合に、webm版VP9をそのままmp4タグのHLSバリアントとして
 # 配信することがあり、サイズ不明・進捗不正確な上に一部の再生環境(Apple製品や
 # 簡易ハードウェアプレイヤー等)では再生できないことがある「見た目だけmp4」になる。
-_MISMATCHED_VCODEC_BY_EXT = {
+_MISMATCHED_VCODEC_BY_EXT: dict[str, tuple[str, ...]] = {
     "mp4": ("vp9", "vp09", "vp8", "vp08"),
     "webm": ("avc1", "h264"),
 }
-_MISMATCHED_ACODEC_BY_EXT = {
+_MISMATCHED_ACODEC_BY_EXT: dict[str, tuple[str, ...]] = {
     "mp4": ("opus", "vorbis"),
     "m4a": ("opus", "vorbis"),
     "webm": ("mp4a", "aac"),
@@ -231,7 +231,7 @@ _MISMATCHED_ACODEC_BY_EXT = {
 def is_codec_container_mismatch(fmt: Format) -> bool:
     """コンテナ(ext)と実際のコーデックが一致しない、実質的に劣化コピーでしかない
     フォーマットかどうかを判定する"""
-    ext = fmt.get("ext")
+    ext = fmt.get("ext") or ""
     vcodec_prefix = codec_prefix(fmt.get("vcodec"))
     acodec_prefix = codec_prefix(fmt.get("acodec"))
 

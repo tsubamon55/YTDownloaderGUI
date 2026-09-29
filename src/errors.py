@@ -29,7 +29,7 @@ _NETWORK_ERROR_TYPES = (
 def is_network_error(exc: BaseException) -> bool:
     """例外(またはその原因チェーン)にネットワーク関連の例外が含まれるかを調べる"""
     seen: set[int] = set()
-    pending = [exc]
+    pending: list[BaseException | None] = [exc]
     while pending:
         current = pending.pop()
         if current is None or id(current) in seen:

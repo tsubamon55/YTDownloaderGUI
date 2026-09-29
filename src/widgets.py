@@ -33,13 +33,17 @@ HandleName = Literal["low", "high"]
 
 def _draw_columns(painter: QPainter, x: int, y: int, height: int, texts: Iterable[str]) -> None:
     """フォーマット一覧の列幅(FORMAT_COLUMN_WIDTHS)に沿って、左から順にテキストを描く"""
-    for text, width in zip(texts, FORMAT_COLUMN_WIDTHS):
+    # 列幅より多いテキストは描かない(見出し・各行とも列数は列幅の数と一致する前提)
+    for text, width in zip(texts, FORMAT_COLUMN_WIDTHS, strict=False):
         painter.drawText(QRect(x, y, width, height), int(Qt.AlignmentFlag.AlignVCenter), text)
         x += width
 
 
 class FormatItemDelegate(QStyledItemDelegate):
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+    def paint(
+        self, painter: QPainter | None, option: QStyleOptionViewItem | None, index: QModelIndex
+    ) -> None:
+        assert painter is not None and option is not None
         painter.save()
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, option.palette.highlight())
@@ -75,10 +79,12 @@ class FormatComboBox(QComboBox):
     """ドロップダウンの幅を選択ボックス自身の幅に一致させ、選択後の表示も列位置を揃えるQComboBox"""
 
     def showPopup(self) -> None:
-        self.view().setMinimumWidth(self.width())
+        view = self.view()
+        assert view is not None
+        view.setMinimumWidth(self.width())
         super().showPopup()
 
-    def paintEvent(self, event: QPaintEvent) -> None:
+    def paintEvent(self, event: QPaintEvent | None) -> None:
         painter = QStylePainter(self)
         painter.setPen(self.palette().color(self.foregroundRole()))
 
@@ -91,7 +97,9 @@ class FormatComboBox(QComboBox):
             painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opt)
             return
 
-        field_rect = self.style().subControlRect(
+        style = self.style()
+        assert style is not None
+        field_rect = style.subControlRect(
             QStyle.ComplexControl.CC_ComboBox, opt, QStyle.SubControl.SC_ComboBoxEditField, self
         )
         _draw_columns(painter, field_rect.x() + 2, field_rect.y(), field_rect.height(), columns)
@@ -123,7 +131,7 @@ class SpinnerWidget(QWidget):
         self._angle = (self._angle + 30) % 360
         self.update()
 
-    def paintEvent(self, event: QPaintEvent) -> None:
+    def paintEvent(self, event: QPaintEvent | None) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.translate(self._diameter / 2, self._diameter / 2)
@@ -145,7 +153,7 @@ class FormatHeaderWidget(QWidget):
         super().__init__(parent)
         self.setFixedHeight(18)
 
-    def paintEvent(self, event: QPaintEvent) -> None:
+    def paintEvent(self, event: QPaintEvent | None) -> None:
         painter = QPainter(self)
         font = painter.font()
         font.setPointSizeF(max(7.0, font.pointSizeF() - 1))
@@ -273,20 +281,20 @@ class RangeSlider(QWidget):
         ratio = min(max(ratio, 0.0), 1.0)
         return round(self._minimum + ratio * (self._maximum - self._minimum))
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if not self.isEnabled():
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        if not self.isEnabled() or event is None:
             return
         x = event.position().x()
         low_x, high_x = self._value_to_x(self._low), self._value_to_x(self._high)
         self._active_handle = "low" if abs(x - low_x) <= abs(x - high_x) else "high"
         self._drag_to(x)
 
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._active_handle is None:
+    def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
+        if self._active_handle is None or event is None:
             return
         self._drag_to(event.position().x())
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+    def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
         self._active_handle = None
         self.update()
         self._preview.hide_popup()
@@ -330,7 +338,7 @@ class RangeSlider(QWidget):
             return
         self._preview.set_pixmap(pixmap)
 
-    def paintEvent(self, event: QPaintEvent) -> None:
+    def paintEvent(self, event: QPaintEvent | None) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         mid_y = self.height() / 2

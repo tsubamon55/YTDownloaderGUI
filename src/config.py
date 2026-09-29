@@ -7,7 +7,6 @@
 """
 
 import json
-import os
 from dataclasses import dataclass, field, fields
 from typing import get_origin
 
@@ -93,7 +92,7 @@ def load_config() -> AppConfig:
         return config
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
         log_debug(f"load_config: {path} の読み込みに失敗したため既定値を使用します ({e!r})")

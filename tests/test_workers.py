@@ -2,7 +2,6 @@
 依存しないロジック(進捗計算・ファイル名解決・後処理判定等)の単体テスト"""
 
 import os
-import socket
 import sys
 import tempfile
 import unittest
@@ -254,7 +253,7 @@ class StoryboardFragmentWorkerRunTest(unittest.TestCase):
         worker = StoryboardFragmentWorker("https://example.com/storyboard.jpg")
         worker.finished_error.connect(errors.append)
 
-        with patch("workers.urllib.request.urlopen", side_effect=socket.timeout("timed out")):
+        with patch("workers.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
             worker.run()
 
         self.assertEqual(len(errors), 1)
@@ -615,7 +614,7 @@ class RunErrorHandlingTest(unittest.TestCase):
 
     def test_network_error_message_is_user_friendly(self):
         with tempfile.TemporaryDirectory() as tmp:
-            errors, _ = self._run_with(tmp, socket.timeout("timed out"))
+            errors, _ = self._run_with(tmp, TimeoutError("timed out"))
             self.assertEqual(len(errors), 1)
             self.assertIn("ネットワーク接続が切断されたため", errors[0])
 
@@ -647,7 +646,7 @@ class RunErrorHandlingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             worker = make_worker(out_dir=tmp)
             worker._is_cancelled = True
-            errors, _ = self._run_with(tmp, socket.timeout("timed out"), worker=worker)
+            errors, _ = self._run_with(tmp, TimeoutError("timed out"), worker=worker)
             self.assertEqual(errors, ["timed out"])
 
     def test_cancel_after_download_completes_keeps_final_file(self):

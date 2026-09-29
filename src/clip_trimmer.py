@@ -120,7 +120,8 @@ def reattach_thumbnails(
     disposition指定に使う出力側の絶対インデックスを組み立てるのに必要"""
     root, ext = os.path.splitext(video_path)
     merged_path = f"{root}.thumbmerge{ext}"
-    input_specs = [(video_path, [])] + [(path, []) for path in thumbnail_paths]
+    input_specs: list[tuple[str, list[str]]] = [(video_path, [])]
+    input_specs += [(path, []) for path in thumbnail_paths]
     output_opts = ["-map", "0"]
     for i in range(len(thumbnail_paths)):
         output_opts += ["-map", str(i + 1)]

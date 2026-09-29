@@ -21,6 +21,7 @@ _build_ctxを追従させる。
 """
 
 from collections.abc import Callable
+from typing import Any
 
 import yt_dlp
 
@@ -47,7 +48,7 @@ def select_formats(
     実際のダウンロード(DownloadWorker)と同じ選択結果を得るため、独自の選択ロジックを
     実装せずyt-dlp本体の選択エンジンをそのまま利用する。
     """
-    ydl_opts = {"quiet": True, "no_warnings": True}
+    ydl_opts: dict[str, Any] = {"quiet": True, "no_warnings": True}
     if format_sort:
         ydl_opts["format_sort"] = format_sort
     ydl = yt_dlp.YoutubeDL(ydl_opts)

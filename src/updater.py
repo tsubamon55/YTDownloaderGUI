@@ -39,7 +39,7 @@ def get_current_version() -> str | None:
         log_debug(f"get_current_version: {VERSION_FILE_NAME} が見つからないためアップデート確認を行いません")
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             version = f.read().strip()
     except OSError as e:
         log_debug(f"get_current_version: {path} の読み込みに失敗しました ({e!r})")

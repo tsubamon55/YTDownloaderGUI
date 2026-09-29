@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer
-from PyQt6.QtGui import QCloseEvent, QPixmap
+from PyQt6.QtGui import QCloseEvent, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QProgressDialog
 
 from clip_range import (
@@ -45,6 +45,11 @@ from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile
 from updater import UpdateCheckWorker, UpdateDownloadWorker, apply_downloaded_update, download_dir
 from widgets import HandleName, ScrubPreviewPopup
 from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker
+
+
+def _clipboard_text() -> str:
+    clipboard = QApplication.clipboard()
+    return clipboard.text().strip() if clipboard is not None else ""
 
 
 def _looks_like_url(text: str) -> bool:
@@ -90,7 +95,9 @@ class MainWindow(Ui_MainWindow):
         self._connect_signals()
         # 入力欄をクリックした後、ラベルや背景などフォーカスを持たない場所をクリックしても
         # カーソル/フォーカス枠が残り続けるため、アプリ全体のクリックを監視して解除する
-        QApplication.instance().installEventFilter(self)
+        app = QApplication.instance()
+        assert app is not None
+        app.installEventFilter(self)
 
         self.auto_paste_from_clipboard()
         self._sync_window_height()
@@ -100,8 +107,8 @@ class MainWindow(Ui_MainWindow):
         if getattr(sys, "frozen", False) and CONFIG.auto_update_enabled:
             QTimer.singleShot(self._UPDATE_CHECK_DELAY_MS, self._check_for_updates)
 
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.MouseButtonPress:
+    def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:
+        if isinstance(event, QMouseEvent) and event.type() == QEvent.Type.MouseButtonPress:
             focus_widget = QApplication.focusWidget()
             if isinstance(focus_widget, QLineEdit) and focus_widget.window() is self:
                 clicked_widget = QApplication.widgetAt(event.globalPosition().toPoint())
@@ -137,12 +144,15 @@ class MainWindow(Ui_MainWindow):
     def _sync_window_height(self) -> None:
         """現在表示中のウィジェットに合わせてウィンドウの高さだけを追従させる"""
         central = self.centralWidget()
+        assert central is not None
+        layout = central.layout()
+        assert layout is not None
         # setVisible直後はレイアウトの最小サイズキャッシュが古いままのことがあるため、
         # sizeHintを読む前に明示的に再計算させる
-        central.layout().invalidate()
-        central.layout().activate()
+        layout.invalidate()
+        layout.activate()
         chrome_height = self.height() - central.height()
-        target_height = central.layout().sizeHint().height() + chrome_height
+        target_height = layout.sizeHint().height() + chrome_height
         # QMainWindowは一度大きくなった最小サイズを記憶したままになることがあるため、
         # 縮める前にリセットしてから目的の高さへ合わせる
         self.setMinimumSize(0, 0)
@@ -233,12 +243,12 @@ class MainWindow(Ui_MainWindow):
             self.fetch_formats(auto=False)
 
     def paste_from_clipboard(self) -> None:
-        text = QApplication.clipboard().text().strip()
+        text = _clipboard_text()
         if text:
             self.url_edit.setText(text)
 
     def auto_paste_from_clipboard(self) -> None:
-        text = QApplication.clipboard().text().strip()
+        text = _clipboard_text()
         if _looks_like_url(text):
             self.url_edit.setText(text)
 
@@ -815,7 +825,7 @@ class MainWindow(Ui_MainWindow):
             self.download_worker.cancel()
             self.status_label.setText("キャンセル中...")
 
-    def closeEvent(self, event: QCloseEvent) -> None:
+    def closeEvent(self, event: QCloseEvent | None) -> None:
         """終了時に、走っているワーカースレッドを止めて終了を待つ。
 
         待たずに閉じるとQThreadがrun()(ネットワークダウンロード中やffmpegの切り抜き処理中)
@@ -823,6 +833,7 @@ class MainWindow(Ui_MainWindow):
         を招く。yt-dlp/ffmpegが中途半端に打ち切られ、DownloadWorker側の後片付けも走らないため
         .part等の未完成ファイルが保存先に残ってしまう。
         """
+        assert event is not None
         if self.download_worker is not None and self.download_worker.isRunning():
             reply = QMessageBox.question(
                 self,

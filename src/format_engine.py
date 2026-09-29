@@ -71,6 +71,7 @@ def _resolve_manual_selection(video_fmt: Format | None, audio_fmt: Format | None
         return FormatSelection(f"{video_fmt['format_id']}+{audio_fmt['format_id']}", [], None)
     if video_fmt is not None:
         return FormatSelection(video_fmt["format_id"], [], None)
+    assert audio_fmt is not None  # 動画・音声とも未選択の場合は冒頭で弾いている
     postprocessors = [extract_audio_postprocessor("mp3")] if mp3_checked else []
     return FormatSelection(audio_fmt["format_id"], postprocessors, None)
 
@@ -187,8 +188,7 @@ def plan_high_resolution_confirmation(
     size_text = f"約{format_size(best_size)}" if best_size else "不明"
 
     message = f"最高画質は {resolution_text}({size_text})です。\n1080pを超える解像度のため、ファイルサイズが大きくなります。"
-    has_fallback = fallback_resolution is not None
-    if has_fallback:
+    if fallback_resolution is not None:
         fallback_width, fallback_height = fallback_resolution
         fallback_resolution_text = f"{fallback_width}x{fallback_height}"
         fallback_size_text = f"約{format_size(fallback_size)}" if fallback_size else "不明"
@@ -197,7 +197,7 @@ def plan_high_resolution_confirmation(
     return HighResolutionPlan(
         needs_confirmation=True,
         message=message,
-        fallback_spec=fallback_spec if has_fallback else None,
+        fallback_spec=fallback_spec if fallback_resolution is not None else None,
     )
 
 

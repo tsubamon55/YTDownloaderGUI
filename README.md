@@ -87,6 +87,18 @@ macOS: `brew install ffmpeg`
 .venv/bin/python src/main.py
 ```
 
+### 4. テストとコードチェック
+
+テストは標準ライブラリのunittestで実行します。書式と型のチェックには開発用ツール(ruff / mypy)を使います。
+アプリの実行・ビルドには不要なので、依存関係は `requirements-dev.txt` に分けています。
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests
+python -m ruff check src tests
+python -m mypy
+```
+
 ## 設定ファイル (config.json)
 
 タイムアウトやmp3変換品質など、頻繁に変える必要はないが調整したい場合がある定数は、

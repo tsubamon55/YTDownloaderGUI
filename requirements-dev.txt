@@ -1,0 +1,4 @@
+# 開発時のみ使うツール(アプリの実行・ビルドには不要)
+-r requirements.txt
+ruff
+mypy

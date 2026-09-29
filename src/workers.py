@@ -7,18 +7,26 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-from PyQt6.QtCore import QThread, pyqtSignal
-
 import yt_dlp
+from PyQt6.QtCore import QThread, pyqtSignal
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_range import clip_range_label, format_clip_time
 from clip_trimmer import trim_clip
 from config import CONFIG
 from errors import describe_error
-from formats import Format, format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
+from formats import (
+    Format,
+    format_filesize,
+    format_size,
+    has_audio,
+    has_video,
+    is_codec_container_mismatch,
+    protocol_rank,
+)
 from paths import get_ffmpeg_location, log_debug, remove_file_quietly
 from yt_dlp_selection import make_filtering_format_selector
+
 
 def _base_ydl_opts(format_sort: list[str] | None = None, ffmpeg_location: str | None = None) -> dict[str, Any]:
     """このアプリの全てのYoutubeDL呼び出しに共通するオプション(出力の抑止・プレイリスト展開の無効化)"""
@@ -510,6 +518,7 @@ class DownloadWorker(QThread):
     def _finish_success(self) -> None:
         if self.request.has_clip:
             self._trim_clip_locally()
+        assert self._started_at is not None  # run()の冒頭で設定済み
         elapsed = time.monotonic() - self._started_at
         if self._final_filepath and os.path.isfile(self._final_filepath):
             size = format_size(os.path.getsize(self._final_filepath))
