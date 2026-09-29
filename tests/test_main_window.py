@@ -553,13 +553,13 @@ class ResolveFormatSpecTest(MainWindowTestCase):
     def test_auto_mode_uses_combo_label(self):
         self.window.manual_toggle_btn.setChecked(False)
         self.window.format_combo.setCurrentText("動画 (最高画質 mp4)")
-        spec, postprocessors, _ = self.window.resolve_format_spec()
+        spec, postprocessors, _ = self.window._current_format_selection()
         self.assertIn("avc1", spec)
 
     def test_manual_mode_without_selection_raises(self):
         self.window.manual_toggle_btn.setChecked(True)
         with self.assertRaises(ValueError):
-            self.window.resolve_format_spec()
+            self.window._current_format_selection()
 
     def test_manual_mode_with_video_and_audio_merges_ids(self):
         self.window.manual_toggle_btn.setChecked(True)
@@ -567,7 +567,7 @@ class ResolveFormatSpecTest(MainWindowTestCase):
         self.window.audio_format_combo.addItem("a", userData=make_audio(format_id="140"))
         self.window.video_format_combo.setCurrentIndex(self.window.video_format_combo.count() - 1)
         self.window.audio_format_combo.setCurrentIndex(self.window.audio_format_combo.count() - 1)
-        spec, _, _ = self.window.resolve_format_spec()
+        spec, _, _ = self.window._current_format_selection()
         self.assertEqual(spec, "137+140")
 
 
@@ -578,7 +578,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
         with patch.object(QMessageBox, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
-        self.assertIsNone(self.window.worker)
+        self.assertIsNone(self.window.download_worker)
 
     def test_empty_out_dir_shows_warning_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -586,7 +586,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
         with patch.object(QMessageBox, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
-        self.assertIsNone(self.window.worker)
+        self.assertIsNone(self.window.download_worker)
 
     def test_missing_ffmpeg_shows_critical_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -595,7 +595,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
              patch.object(QMessageBox, "critical") as critical_mock:
             self.window.start_download()
         critical_mock.assert_called_once()
-        self.assertIsNone(self.window.worker)
+        self.assertIsNone(self.window.download_worker)
 
     def test_manual_mode_value_error_shows_warning(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -605,7 +605,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
              patch.object(QMessageBox, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
-        self.assertIsNone(self.window.worker)
+        self.assertIsNone(self.window.download_worker)
 
     def test_valid_input_starts_worker(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -640,7 +640,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
         warning_mock.assert_called_once()
         self.assertEqual(warning_mock.call_args[0][1], "入力エラー")
         worker_cls.assert_not_called()
-        self.assertIsNone(self.window.worker)
+        self.assertIsNone(self.window.download_worker)
 
     def test_clip_range_is_passed_to_worker(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -743,23 +743,28 @@ class StartDownloadValidationTest(MainWindowTestCase):
         worker_cls.assert_not_called()
 
 
+MP4_SPEC = "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b"
+
+
 class ConfirmHighResolutionDownloadTest(MainWindowTestCase):
-    def test_no_confirmation_needed_returns_best(self):
+    def test_no_confirmation_needed_returns_original_spec(self):
         self.window.available_formats = [make_video(height=1080)]
-        choice, fallback = self.window.confirm_high_resolution_download(
-            "動画 (最高画質 mp4)", "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b", None
+        self.assertEqual(
+            self.window.confirm_high_resolution_download("動画 (最高画質 mp4)", MP4_SPEC, None), MP4_SPEC
         )
-        self.assertEqual(choice, "best")
-        self.assertIsNone(fallback)
+
+    def test_label_without_confirmation_returns_original_spec(self):
+        self.window.available_formats = [make_video(format_id="399", height=2160, width=3840)]
+        self.assertEqual(
+            self.window.confirm_high_resolution_download("音声のみ (mp3)", "ba/b", None), "ba/b"
+        )
 
     def test_confirmation_needed_best_button_clicked(self):
         formats = [
             make_video(format_id="399", height=1440, width=2560, filesize=80_000_000),
             make_video(format_id="137", height=1080, filesize=50_000_000),
         ]
-        choice, fallback = self._run_with_clicked_button_index(formats, 0)
-        self.assertEqual(choice, "best")
-        self.assertIsNone(fallback)
+        self.assertEqual(self._run_with_clicked_button_index(formats, 0), MP4_SPEC)
 
     def _run_with_clicked_button_index(self, formats, button_index):
         """QMessageBox.exec/clickedButtonをモックし、button_index番目に追加された
@@ -781,27 +786,45 @@ class ConfirmHighResolutionDownloadTest(MainWindowTestCase):
                  "clickedButton",
                  lambda box_self: captured["buttons"][button_index],
              ):
-            return self.window.confirm_high_resolution_download(
-                "動画 (最高画質 mp4)", "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b", None
-            )
+            return self.window.confirm_high_resolution_download("動画 (最高画質 mp4)", MP4_SPEC, None)
 
     def test_1080p_button_clicked_returns_fallback_spec(self):
         formats = [
             make_video(format_id="399", height=1440, width=2560, filesize=80_000_000),
             make_video(format_id="137", height=1080, filesize=50_000_000),
         ]
-        choice, fallback = self._run_with_clicked_button_index(formats, 1)
-        self.assertEqual(choice, "1080p")
-        self.assertIsNotNone(fallback)
+        spec = self._run_with_clicked_button_index(formats, 1)
+        self.assertIsNotNone(spec)
+        self.assertNotEqual(spec, MP4_SPEC)
 
     def test_cancel_button_clicked_returns_none(self):
         formats = [
             make_video(format_id="399", height=1440, width=2560, filesize=80_000_000),
             make_video(format_id="137", height=1080, filesize=50_000_000),
         ]
-        choice, fallback = self._run_with_clicked_button_index(formats, 2)
-        self.assertIsNone(choice)
-        self.assertIsNone(fallback)
+        self.assertIsNone(self._run_with_clicked_button_index(formats, 2))
+
+    def test_dialog_closed_without_button_returns_none(self):
+        """Esc/×で閉じるとclickedButton()はNoneを返す。1080p候補が無くボタンが
+        Noneのときでも、None同士の比較で1080pを選んだ扱いにならないこと"""
+        self.window.available_formats = [
+            make_video(format_id="399", height=1440, width=2560, filesize=80_000_000),
+        ]
+        with patch.object(main_window_module.QMessageBox, "exec", return_value=0), \
+             patch.object(main_window_module.QMessageBox, "clickedButton", return_value=None):
+            self.assertIsNone(
+                self.window.confirm_high_resolution_download("動画 (最高画質 mp4)", MP4_SPEC, None)
+            )
+
+
+class LooksLikeUrlTest(unittest.TestCase):
+    def test_http_and_https(self):
+        self.assertTrue(main_window_module._looks_like_url("https://example.com"))
+        self.assertTrue(main_window_module._looks_like_url("  http://example.com  "))
+
+    def test_other_text(self):
+        for text in ("", "example.com", "ftp://example.com", "hello"):
+            self.assertFalse(main_window_module._looks_like_url(text))
 
 
 class ProgressAndFinishHandlersTest(MainWindowTestCase):
@@ -835,13 +858,13 @@ class ProgressAndFinishHandlersTest(MainWindowTestCase):
 
     def test_cancel_download_calls_worker_cancel(self):
         worker = MagicMock()
-        self.window.worker = worker
+        self.window.download_worker = worker
         self.window.cancel_download()
         worker.cancel.assert_called_once()
         self.assertEqual(self.window.status_label.text(), "キャンセル中...")
 
     def test_cancel_download_noop_without_worker(self):
-        self.window.worker = None
+        self.window.download_worker = None
         self.window.cancel_download()  # 例外にならないことを確認
 
 
@@ -887,7 +910,7 @@ class SignalWiringTest(MainWindowTestCase):
 
     def test_cancel_button_click_cancels_worker(self):
         worker = MagicMock()
-        self.window.worker = worker
+        self.window.download_worker = worker
         self.window.cancel_btn.setEnabled(True)
         self.window.cancel_btn.click()
         worker.cancel.assert_called_once()
@@ -946,7 +969,7 @@ class CloseEventTest(MainWindowTestCase):
 
     def test_running_download_asks_and_cancels_then_waits(self):
         worker = self._running_worker()
-        self.window.worker = worker
+        self.window.download_worker = worker
         event = self._event()
 
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
@@ -959,7 +982,7 @@ class CloseEventTest(MainWindowTestCase):
 
     def test_declining_the_prompt_keeps_the_window_open(self):
         worker = self._running_worker()
-        self.window.worker = worker
+        self.window.download_worker = worker
         event = self._event()
 
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
@@ -992,7 +1015,7 @@ class CloseEventTest(MainWindowTestCase):
         ことがある。その場合もUIスレッドからできることはないので記録だけ残して閉じる"""
         worker = self._running_worker()
         worker.wait.return_value = False
-        self.window.worker = worker
+        self.window.download_worker = worker
         event = self._event()
 
         with (
@@ -1007,7 +1030,7 @@ class CloseEventTest(MainWindowTestCase):
     def test_finished_worker_is_not_waited_on(self):
         worker = MagicMock()
         worker.isRunning.return_value = False
-        self.window.worker = worker
+        self.window.download_worker = worker
         event = self._event()
 
         self.window.closeEvent(event)
@@ -1039,7 +1062,7 @@ class UpdateAvailablePromptTest(MainWindowTestCase):
     def test_no_prompt_while_video_download_is_running(self):
         worker = MagicMock()
         worker.isRunning.return_value = True
-        self.window.worker = worker
+        self.window.download_worker = worker
 
         with patch.object(QMessageBox, "question") as question_mock, \
              patch.object(MainWindow, "_start_update_download") as start_mock:
@@ -1157,7 +1180,7 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         アップデートも一緒に取り消す(強制終了でダウンロードが壊れるのを防ぐため)"""
         worker = MagicMock()
         worker.isRunning.return_value = True
-        self.window.worker = worker
+        self.window.download_worker = worker
         self.window._pending_update_path = "C:/tmp/Setup.exe"
         event = CloseEventTest._event()
 

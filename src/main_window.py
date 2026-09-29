@@ -9,8 +9,8 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, QUrl
-from PyQt6.QtGui import QDesktopServices, QPixmap
+from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, QUrl
+from PyQt6.QtGui import QCloseEvent, QDesktopServices, QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QProgressDialog
 
 from clip_range import (
@@ -21,14 +21,16 @@ from clip_range import (
 )
 from config import CONFIG
 from format_engine import (
+    FormatSelection,
     compute_auto_format_note,
     mismatched_selected_formats,
     plan_high_resolution_confirmation,
-    resolve_format_spec as resolve_format_spec_logic,
+    resolve_format_spec,
 )
 from formats import (
     FORMAT_COLUMN_ROLE,
     FORMAT_MISMATCH_ROLE,
+    Format,
     describe_format_plain,
     find_format_option,
     format_columns,
@@ -44,15 +46,22 @@ from widgets import ScrubPreviewPopup
 from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
 
+def _looks_like_url(text: str) -> bool:
+    """自動で動画情報を取得しにいく対象か(http/httpsで始まるか)"""
+    return text.strip().startswith(("http://", "https://"))
+
+
 class MainWindow(Ui_MainWindow):
     # 終了時にワーカースレッドの終了を待つ上限(ミリ秒)。cancel()が効くのは進捗フックの
     # 区切りごとなので、ffmpegの結合・切り抜きの最中は即座には止まらない
     _WORKER_SHUTDOWN_WAIT_MS = 10000
+    # ウィンドウの初回表示より前にアップデートのダイアログが割り込まないよう、表示後まで遅らせる時間
+    _UPDATE_CHECK_DELAY_MS = 1000
 
     def __init__(self) -> None:
         super().__init__()
 
-        self.worker: DownloadWorker | None = None
+        self.download_worker: DownloadWorker | None = None
         self.format_worker: FormatListWorker | None = None
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
@@ -60,9 +69,9 @@ class MainWindow(Ui_MainWindow):
         self._pending_update_path: str | None = None
         self.last_output_dir: str | None = None
         self.info_ready = False
-        self.available_formats: list = []
+        self.available_formats: list[Format] = []
         self.video_duration: float | None = None
-        self.storyboard_format: dict | None = None
+        self.storyboard_format: Format | None = None
         self._storyboard_cache: dict[str, QPixmap] = {}
         self._storyboard_workers: set[StoryboardFragmentWorker] = set()
         self._pending_storyboard_urls: set[str] = set()
@@ -88,8 +97,7 @@ class MainWindow(Ui_MainWindow):
         # ソースから直接実行している開発中は、置き換えるインストーラー/appが存在せず
         # アップデートを適用できないため、ビルド済み実行ファイルの場合のみ確認する
         if getattr(sys, "frozen", False) and CONFIG.auto_update_enabled:
-            # ウィンドウの初回表示より前にダイアログが割り込まないよう、表示後まで少し遅らせる
-            QTimer.singleShot(1000, self._check_for_updates)
+            QTimer.singleShot(self._UPDATE_CHECK_DELAY_MS, self._check_for_updates)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.MouseButtonPress:
@@ -151,21 +159,25 @@ class MainWindow(Ui_MainWindow):
 
     def on_url_changed(self, text: str) -> None:
         self._info_fetch_timer.stop()
-        self.info_ready = False
-        self.download_btn.setEnabled(False)
         # URLが削除・変更・別のものに貼り替えられた場合、直前の動画に対する選択
         # (フォーマット・mp3変換・クリップ範囲・進捗バー等)が次の動画にそのまま
         # 引き継がれてしまわないよう、都度すべての入力内容をリセットする
+        self._clear_video_info()
+        self.progress_bar.reset()
+        self.status_label.setText(IDLE_STATUS_TEXT)
+
+        if _looks_like_url(text):
+            self._info_fetch_timer.start()
+
+    def _clear_video_info(self) -> None:
+        """表示中の動画の情報(タイトル・サムネイル・フォーマット・クリップ範囲)を破棄し、
+        ダウンロードできない状態に戻す"""
+        self.info_ready = False
+        self.download_btn.setEnabled(False)
         self.title_label.setText("")
         self.thumbnail_label.clear()
         self._reset_format_state()
         self._reset_video_state()
-        self.progress_bar.reset()
-        self.status_label.setText(IDLE_STATUS_TEXT)
-
-        stripped = text.strip()
-        if stripped.startswith("http://") or stripped.startswith("https://"):
-            self._info_fetch_timer.start()
 
     def _reset_format_state(self) -> None:
         """動画/音声フォーマットの選択・mp3変換・関連の注記表示を初期化する。
@@ -226,7 +238,7 @@ class MainWindow(Ui_MainWindow):
 
     def auto_paste_from_clipboard(self) -> None:
         text = QApplication.clipboard().text().strip()
-        if text.startswith("http://") or text.startswith("https://"):
+        if _looks_like_url(text):
             self.url_edit.setText(text)
 
     def fetch_formats(self, auto: bool = False) -> None:
@@ -234,12 +246,7 @@ class MainWindow(Ui_MainWindow):
         if not url:
             return
 
-        self.title_label.setText("")
-        self.thumbnail_label.clear()
-        self.info_ready = False
-        self._reset_format_state()
-        self._reset_video_state()
-        self.download_btn.setEnabled(False)
+        self._clear_video_info()
         self.status_label.setText("動画情報を取得中...")
         self.spinner.start()
 
@@ -267,37 +274,13 @@ class MainWindow(Ui_MainWindow):
         if worker is not self.format_worker:
             return
 
-        self.video_format_combo.clear()
-        self.audio_format_combo.clear()
         self.available_formats = formats
         self.video_duration = duration
         self.storyboard_format = select_storyboard_format(
             formats, ScrubPreviewPopup.PREVIEW_SIZE.width(), ScrubPreviewPopup.PREVIEW_SIZE.height()
         )
         self._update_clip_slider_range()
-
-        self.video_format_combo.addItem("なし", userData=None)
-        self.audio_format_combo.addItem("なし", userData=None)
-
-        video_count = 0
-        audio_count = 0
-        # コンテナ/コーデックが一致しない非推奨フォーマットを一覧の下の方に追いやる(安定ソートなので
-        # 元々の解像度順は各グループ内で保たれる)
-        sorted_formats = sorted(formats, key=is_codec_container_mismatch)
-        for fmt in sorted_formats:
-            if has_video(fmt):
-                combo = self.video_format_combo
-                video_count += 1
-            elif has_audio(fmt):
-                combo = self.audio_format_combo
-                audio_count += 1
-            else:
-                continue
-
-            combo.addItem(describe_format_plain(fmt), userData=fmt)
-            row = combo.count() - 1
-            combo.setItemData(row, format_columns(fmt), FORMAT_COLUMN_ROLE)
-            combo.setItemData(row, is_codec_container_mismatch(fmt), FORMAT_MISMATCH_ROLE)
+        video_count, audio_count = self._populate_format_combos(formats)
 
         self.video_format_combo.setEnabled(self.manual_toggle_btn.isChecked())
         self.audio_format_combo.setEnabled(self.manual_toggle_btn.isChecked())
@@ -314,6 +297,33 @@ class MainWindow(Ui_MainWindow):
         self.spinner.stop()
         self.info_ready = True
         self.download_btn.setEnabled(True)
+
+    def _populate_format_combos(self, formats: list[Format]) -> tuple[int, int]:
+        """手動設定の動画/音声コンボにフォーマット一覧を流し込み、(動画件数, 音声件数)を返す"""
+        self.video_format_combo.clear()
+        self.audio_format_combo.clear()
+        self.video_format_combo.addItem("なし", userData=None)
+        self.audio_format_combo.addItem("なし", userData=None)
+
+        video_count = 0
+        audio_count = 0
+        # コンテナ/コーデックが一致しない非推奨フォーマットを一覧の下の方に追いやる(安定ソートなので
+        # 元々の解像度順は各グループ内で保たれる)
+        for fmt in sorted(formats, key=is_codec_container_mismatch):
+            if has_video(fmt):
+                combo = self.video_format_combo
+                video_count += 1
+            elif has_audio(fmt):
+                combo = self.audio_format_combo
+                audio_count += 1
+            else:
+                continue
+
+            combo.addItem(describe_format_plain(fmt), userData=fmt)
+            row = combo.count() - 1
+            combo.setItemData(row, format_columns(fmt), FORMAT_COLUMN_ROLE)
+            combo.setItemData(row, is_codec_container_mismatch(fmt), FORMAT_MISMATCH_ROLE)
+        return video_count, audio_count
 
     def _fit_thumbnail_pixmap(self, pixmap: QPixmap) -> QPixmap:
         """thumbnail_labelの表示枠に合わせて、アスペクト比を保ったまま
@@ -563,7 +573,7 @@ class MainWindow(Ui_MainWindow):
     def on_update_available(self, version: str, download_url: str, asset_name: str) -> None:
         if not download_url or not asset_name:
             return
-        if self.worker is not None and self.worker.isRunning():
+        if self.download_worker is not None and self.download_worker.isRunning():
             # 更新の適用にはアプリの終了が必要なため、動画のダウンロード中には提案しない
             # (次回起動時に改めて確認される)
             log_debug(f"on_update_available: ダウンロード中のため {version} への更新提案を見送りました")
@@ -664,9 +674,9 @@ class MainWindow(Ui_MainWindow):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{timestamp}] {msg}")
 
-    def resolve_format_spec(self) -> tuple[str, list, list | None]:
+    def _current_format_selection(self) -> FormatSelection:
         manual_mode = self.manual_toggle_btn.isChecked()
-        return resolve_format_spec_logic(
+        return resolve_format_spec(
             manual_mode,
             self.video_format_combo.currentData() if manual_mode else None,
             self.audio_format_combo.currentData() if manual_mode else None,
@@ -675,14 +685,16 @@ class MainWindow(Ui_MainWindow):
         )
 
     def confirm_high_resolution_download(
-        self, format_label: str, format_spec: str, format_sort: list | None
-    ) -> tuple[str | None, str | None]:
+        self, format_label: str, format_spec: str, format_sort: list[str] | None
+    ) -> str | None:
         """自動設定の最高画質が1920x1080を超える場合に確認する。
-        戻り値: (選択, 1080p選択時の代替format_spec)
-        選択は "best"(最高画質のまま) / "1080p"(1080pに制限) / None(キャンセル)"""
+        戻り値はダウンロードに使うformat_spec(1080pを選んだ場合はその代替)。キャンセル時はNone"""
+        option = find_format_option(format_label)
+        if option is None or not option.confirm_high_resolution:
+            return format_spec
         plan = plan_high_resolution_confirmation(self.available_formats, format_label, format_spec, format_sort)
         if not plan.needs_confirmation:
-            return "best", None
+            return format_spec
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
@@ -700,21 +712,67 @@ class MainWindow(Ui_MainWindow):
 
         clicked = box.clickedButton()
         if clicked is best_btn:
-            return "best", None
-        if clicked is p1080_btn:
-            return "1080p", plan.fallback_spec
-        return None, None
+            return format_spec
+        if p1080_btn is not None and clicked is p1080_btn:
+            return plan.fallback_spec
+        return None
 
     def start_download(self) -> None:
+        request = self._build_download_request()
+        if request is None or not self._prepare_output_dir(request.out_dir):
+            return
+
+        self._set_busy(True)
+        self.download_btn.setEnabled(False)
+        self.open_folder_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("ダウンロード中...")
+
+        self.download_worker = DownloadWorker(request)
+        self.download_worker.progress.connect(self.on_progress)
+        self.download_worker.log.connect(self.append_log)
+        self.download_worker.finished_ok.connect(self.on_finished_ok)
+        self.download_worker.finished_error.connect(self.on_finished_error)
+        self.download_worker.start()
+
+    def _build_download_request(self) -> DownloadRequest | None:
+        """入力内容を検証・確認してダウンロード要求を組み立てる。入力エラーや
+        ユーザーのキャンセルの場合は、ダイアログを出した上でNoneを返す"""
         url = self.url_edit.text().strip()
         out_dir = self.out_edit.text().strip()
+        if not self._check_required_inputs(url, out_dir):
+            return None
 
+        try:
+            selection = self._current_format_selection()
+            clip_start, clip_end = resolve_clip_range(self.clip_start_edit.text(), self.clip_end_edit.text())
+            self._check_clip_within_duration(clip_start, clip_end)
+        except ValueError as e:
+            QMessageBox.warning(self, "入力エラー", str(e))
+            return None
+
+        format_spec = self._confirm_format_choice(selection)
+        if format_spec is None:
+            return None
+
+        return DownloadRequest(
+            url=url,
+            out_dir=out_dir,
+            format_spec=format_spec,
+            postprocessors=selection.postprocessors,
+            format_sort=selection.sort,
+            exclude_mismatched=not self.manual_toggle_btn.isChecked(),
+            clip_start=clip_start,
+            clip_end=clip_end,
+        )
+
+    def _check_required_inputs(self, url: str, out_dir: str) -> bool:
         if not url:
             QMessageBox.warning(self, "入力エラー", "URLを入力してください")
-            return
+            return False
         if not out_dir:
             QMessageBox.warning(self, "入力エラー", "保存先フォルダを指定してください")
-            return
+            return False
         if get_ffmpeg_location() is None:
             QMessageBox.critical(
                 self,
@@ -722,57 +780,46 @@ class MainWindow(Ui_MainWindow):
                 f"ffmpegが見つかりません。アプリの ffmpeg{os.sep}{FFMPEG_EXECUTABLE_NAME} を配置するか、"
                 "システムにffmpegをインストールしてPATHを通してください。",
             )
+            return False
+        return True
+
+    def _check_clip_within_duration(self, clip_start: float | None, clip_end: float | None) -> None:
+        """resolve_clip_rangeは開始・終了の前後関係のみを見るため、動画の長さとの整合性は
+        ここで確認する(範囲外ならValueError)。長さが不明(ライブ配信等)な場合はチェックできないためスキップする"""
+        if not self.video_duration:
             return
+        if clip_start is not None and clip_start >= self.video_duration:
+            raise ValueError("開始時刻が動画の長さを超えています")
+        if clip_end is not None and clip_end > self.video_duration:
+            raise ValueError("終了時刻が動画の長さを超えています")
 
-        try:
-            format_spec, postprocessors, format_sort = self.resolve_format_spec()
-        except ValueError as e:
-            QMessageBox.warning(self, "入力エラー", str(e))
-            return
-
-        try:
-            clip_start, clip_end = resolve_clip_range(self.clip_start_edit.text(), self.clip_end_edit.text())
-        except ValueError as e:
-            QMessageBox.warning(self, "入力エラー", str(e))
-            return
-
-        # resolve_clip_rangeは開始・終了の前後関係のみを見るため、動画の長さとの整合性は
-        # ここで確認する。長さが不明(ライブ配信等)な場合はチェックできないためスキップする
-        if self.video_duration:
-            if clip_start is not None and clip_start >= self.video_duration:
-                QMessageBox.warning(self, "入力エラー", "開始時刻が動画の長さを超えています")
-                return
-            if clip_end is not None and clip_end > self.video_duration:
-                QMessageBox.warning(self, "入力エラー", "終了時刻が動画の長さを超えています")
-                return
-
+    def _confirm_format_choice(self, selection: FormatSelection) -> str | None:
+        """選んだフォーマットに注意が必要な場合にユーザーへ確認し、使うformat_specを返す(中止ならNone)"""
         if self.manual_toggle_btn.isChecked():
-            mismatched_fmts = mismatched_selected_formats(
-                self.video_format_combo.currentData(), self.audio_format_combo.currentData()
-            )
-            if mismatched_fmts:
-                ids = ", ".join(f"[{fmt.get('format_id')}]" for fmt in mismatched_fmts)
-                reply = QMessageBox.question(
-                    self,
-                    "非推奨フォーマットの選択",
-                    f"選択中のフォーマット({ids})はコンテナとコーデックが一致しない非推奨のものです。"
-                    "再生環境によっては正しく再生できない場合があります。\n\nこのままダウンロードしますか?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if reply != QMessageBox.StandardButton.Yes:
-                    return
+            return selection.spec if self._confirm_mismatched_formats() else None
+        return self.confirm_high_resolution_download(
+            self.format_combo.currentText(), selection.spec, selection.sort
+        )
 
-        if not self.manual_toggle_btn.isChecked():
-            format_label = self.format_combo.currentText()
-            option = find_format_option(format_label)
-            if option is not None and option.confirm_high_resolution:
-                choice, fallback_spec = self.confirm_high_resolution_download(format_label, format_spec, format_sort)
-                if choice is None:
-                    return
-                if choice == "1080p":
-                    format_spec = fallback_spec
+    def _confirm_mismatched_formats(self) -> bool:
+        """手動設定で非推奨フォーマットを選んでいる場合に続行してよいか確認する"""
+        mismatched_fmts = mismatched_selected_formats(
+            self.video_format_combo.currentData(), self.audio_format_combo.currentData()
+        )
+        if not mismatched_fmts:
+            return True
+        ids = ", ".join(f"[{fmt.get('format_id')}]" for fmt in mismatched_fmts)
+        reply = QMessageBox.question(
+            self,
+            "非推奨フォーマットの選択",
+            f"選択中のフォーマット({ids})はコンテナとコーデックが一致しない非推奨のものです。"
+            "再生環境によっては正しく再生できない場合があります。\n\nこのままダウンロードしますか?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
+    def _prepare_output_dir(self, out_dir: str) -> bool:
         try:
             os.makedirs(out_dir, exist_ok=True)
         except OSError as e:
@@ -782,40 +829,26 @@ class MainWindow(Ui_MainWindow):
             QMessageBox.warning(
                 self, "入力エラー", f"保存先フォルダを作成できませんでした:\n{out_dir}\n\n{e}"
             )
-            return
+            return False
         self.last_output_dir = out_dir
         self.settings.setValue("last_output_dir", out_dir)
+        return True
 
-        self.set_inputs_enabled(False)
-        self.download_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.open_folder_btn.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.status_label.setText("ダウンロード中...")
-        self.spinner.start()
-
-        self.worker = DownloadWorker(DownloadRequest(
-            url=url,
-            out_dir=out_dir,
-            format_spec=format_spec,
-            postprocessors=postprocessors,
-            format_sort=format_sort,
-            exclude_mismatched=not self.manual_toggle_btn.isChecked(),
-            clip_start=clip_start,
-            clip_end=clip_end,
-        ))
-        self.worker.progress.connect(self.on_progress)
-        self.worker.log.connect(self.append_log)
-        self.worker.finished_ok.connect(self.on_finished_ok)
-        self.worker.finished_error.connect(self.on_finished_error)
-        self.worker.start()
+    def _set_busy(self, busy: bool) -> None:
+        """ダウンロード中/待機中で切り替わる入力欄・キャンセルボタン・スピナーをまとめて設定する"""
+        self.set_inputs_enabled(not busy)
+        self.cancel_btn.setEnabled(busy)
+        if busy:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
 
     def cancel_download(self) -> None:
-        if self.worker is not None:
-            self.worker.cancel()
+        if self.download_worker is not None:
+            self.download_worker.cancel()
             self.status_label.setText("キャンセル中...")
 
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, event: QCloseEvent) -> None:
         """終了時に、走っているワーカースレッドを止めて終了を待つ。
 
         待たずに閉じるとQThreadがrun()(ネットワークダウンロード中やffmpegの切り抜き処理中)
@@ -823,7 +856,7 @@ class MainWindow(Ui_MainWindow):
         を招く。yt-dlp/ffmpegが中途半端に打ち切られ、DownloadWorker側の後片付けも走らないため
         .part等の未完成ファイルが保存先に残ってしまう。
         """
-        if self.worker is not None and self.worker.isRunning():
+        if self.download_worker is not None and self.download_worker.isRunning():
             reply = QMessageBox.question(
                 self,
                 "ダウンロード中",
@@ -839,7 +872,7 @@ class MainWindow(Ui_MainWindow):
                     )
                 event.ignore()
                 return
-            self.worker.cancel()
+            self.download_worker.cancel()
             self.status_label.setText("キャンセル中...")
 
         if self.update_download_worker is not None:
@@ -870,10 +903,10 @@ class MainWindow(Ui_MainWindow):
                 )
         event.accept()
 
-    def _running_workers(self) -> list:
+    def _running_workers(self) -> list[QThread]:
         """終了待ちの対象となる、現在走っているワーカースレッドを列挙する"""
         candidates = [
-            self.worker,
+            self.download_worker,
             self.format_worker,
             self.update_check_worker,
             self.update_download_worker,
@@ -886,23 +919,19 @@ class MainWindow(Ui_MainWindow):
         self.status_label.setText(text)
 
     def on_finished_ok(self) -> None:
-        self.spinner.stop()
         # url_edit.clear()がtextChangedを発火させ、on_url_changed内のリセット処理で
         # フォーマット選択・mp3変換・クリップ範囲・進捗バー等の入力内容が一括で初期化される
         self.url_edit.clear()
-        self.set_inputs_enabled(True)
+        self._set_busy(False)
         self.download_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(False)
         self.open_folder_btn.setEnabled(True)
         self.progress_bar.reset()
         self.status_label.setText("完了")
         self.open_output_folder()
 
     def on_finished_error(self, message: str) -> None:
-        self.spinner.stop()
         self.status_label.setText("エラーまたはキャンセル")
-        self.set_inputs_enabled(True)
+        self._set_busy(False)
         self.download_btn.setEnabled(self.info_ready)
-        self.cancel_btn.setEnabled(False)
         self.progress_bar.reset()
         QMessageBox.critical(self, "ダウンロード失敗", message)
