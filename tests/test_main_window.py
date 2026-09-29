@@ -1134,6 +1134,36 @@ class UpdateDownloadCallbackTest(MainWindowTestCase):
         progress.close.assert_not_called()
 
 
+class UpdateCancelWiringTest(MainWindowTestCase):
+    """Review Focus 3: ワーカーのcancelledシグナルが実際にハンドラへ配線され、
+    キャンセル時にエラーダイアログを出さずに後片付けされること"""
+
+    def test_cancelled_signal_from_worker_is_handled_without_error_dialog(self):
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        class FakeUpdateDownloadWorker(QObject):
+            progress = pyqtSignal(float)
+            finished_ok = pyqtSignal(str)
+            finished_error = pyqtSignal(str)
+            cancelled = pyqtSignal()
+
+            def __init__(self, url, dest_path):
+                super().__init__()
+
+            def cancel(self):
+                pass
+
+            def start(self):
+                self.cancelled.emit()
+
+        with patch.object(main_window_module, "UpdateDownloadWorker", FakeUpdateDownloadWorker), \
+             patch.object(QMessageBox, "critical") as critical_mock:
+            self.window._start_update_download("https://example.com/Setup.exe", "Setup.exe")
+
+        critical_mock.assert_not_called()
+        self.assertIsNone(self.window.update_download_worker)
+
+
 class CloseEventUpdateApplyTest(MainWindowTestCase):
     """closeEventでウィンドウの終了が確定した後にのみ、ダウンロード済みの
     アップデートを適用すること"""
