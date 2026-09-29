@@ -7,6 +7,10 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from formats import (
+    FORMAT_OPTIONS,
+    FormatKey,
+    find_format_option,
+    format_option,
     codec_prefix,
     format_filesize,
     has_audio,
@@ -260,6 +264,29 @@ class CodecPrefixTest(unittest.TestCase):
     def test_empty_for_none_or_missing(self):
         self.assertEqual(codec_prefix("none"), "")
         self.assertEqual(codec_prefix(None), "")
+
+
+class FormatOptionsTest(unittest.TestCase):
+    def test_labels_and_order_unchanged(self):
+        self.assertEqual(
+            [o.label for o in FORMAT_OPTIONS],
+            ["動画 (最高画質 mp4)", "動画 (最高画質)", "音声のみ (最高音質 m4a)", "音声のみ (最高音質)", "音声のみ (mp3)"],
+        )
+
+    def test_every_option_has_tooltip(self):
+        self.assertTrue(all(o.tooltip for o in FORMAT_OPTIONS))
+
+    def test_lookup_by_label_and_key(self):
+        option = find_format_option("動画 (最高画質)")
+        self.assertIs(option.key, FormatKey.VIDEO_BEST)
+        self.assertIs(format_option(FormatKey.VIDEO_BEST), option)
+        self.assertIsNone(find_format_option("存在しない"))
+
+    def test_only_video_options_confirm_high_resolution(self):
+        self.assertEqual(
+            {o.key for o in FORMAT_OPTIONS if o.confirm_high_resolution},
+            {FormatKey.VIDEO_BEST_MP4, FormatKey.VIDEO_BEST},
+        )
 
 
 if __name__ == "__main__":

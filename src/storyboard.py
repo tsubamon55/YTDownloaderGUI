@@ -9,7 +9,7 @@ main_window.MainWindowが担当する。
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True)
 class StoryboardTile:
     """1マス分のサムネイルの位置。fragment_urlの画像をこの矩形で切り出せば、
     その時刻のサムネイルになる"""

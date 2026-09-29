@@ -1,5 +1,7 @@
 """フォーマット選択肢の定義と、フォーマット情報の整形ロジック"""
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from PyQt6.QtCore import Qt
@@ -25,30 +27,104 @@ def format_filesize(fmt: Format) -> int | None:
     return fmt.get("filesize") or fmt.get("filesize_approx") or None
 
 
-FORMAT_OPTIONS = {
-    # ext=mp4/m4aだけではコーデックまでは保証されない(高解像度ではYouTubeがH.264を提供せず、
-    # VP9がmp4コンテナのHLSバリアントとして出てくることがある)ため、
-    # H.264(avc1)・AAC(mp4a)であることも明示的に条件にする
-    "動画 (最高画質 mp4)": (
-        "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]"
-        "/bv*[ext=mp4][vcodec^=avc1]+ba*[acodec^=mp4a]"
-        "/b[ext=mp4][vcodec^=avc1]"
-        "/b"
-    ),
-    "動画 (最高画質)": "bv*+ba/b",
-    "音声のみ (最高音質 m4a)": "audio_m4a",
-    "音声のみ (最高音質)": "audio_best",
-    "音声のみ (mp3)": "audio_mp3",
-}
+# 解像度を最優先しつつ、同じ解像度の中では最も互換性の高いコーデック(h264/aac)を選ぶ
+BEST_QUALITY_COMPATIBLE_SORT = ["res", "codec:avc:m4a"]
 
-# 「互換重視」であることをラベルに詰め込まず、ホバー時のツールチップで補足するための対応表
-FORMAT_OPTION_TOOLTIPS = {
-    "動画 (最高画質 mp4)": "【推奨】 互換性重視でmp4に限定します。動画によっては本来の最高画質(webm/av1等)より画質が下がる場合があります。",
-    "動画 (最高画質)": "コンテナ・コーデックを問わず本来の最高画質を選びます。webm/av1等になる場合があり、再生環境によっては再生できないことがあります。",
-    "音声のみ (最高音質 m4a)": "【推奨】 互換性重視でm4aに限定します。再エンコードは行いません。",
-    "音声のみ (最高音質)": "コーデックを問わず本来の最高音質を選びます。opus等になる場合があり、再生環境によっては再生できないことがあります。",
-    "音声のみ (mp3)": "再生互換性は最も高い形式ですが、非可逆で192kbpsに変換されるためm4a版より音質は劣化します。",
-}
+# 音声ビットレートを最優先しつつ、同じビットレートの中では最も互換性の高いコーデック(aac/m4a)を選ぶ
+BEST_AUDIO_COMPATIBLE_SORT = ["abr", "acodec:m4a"]
+
+
+class FormatKey(Enum):
+    """自動設定の「形式」の識別子。処理の分岐はラベルではなくこれで行う"""
+
+    VIDEO_BEST_MP4 = "video_best_mp4"
+    VIDEO_BEST = "video_best"
+    AUDIO_BEST_M4A = "audio_best_m4a"
+    AUDIO_BEST = "audio_best"
+    AUDIO_MP3 = "audio_mp3"
+
+
+@dataclass(frozen=True)
+class FormatOption:
+    """自動設定の「形式」コンボの1項目。labelは画面表示専用で、処理の判定にはkeyを使う"""
+
+    key: FormatKey
+    label: str
+    # 「互換重視」であることをラベルに詰め込まず、ホバー時のツールチップで補足する
+    tooltip: str
+    spec: str
+    sort: list[str] | None = None
+    # 音声トラックだけを取り出す後処理(FFmpegExtractAudio)の変換先。Noneなら後処理なし
+    extract_audio_codec: str | None = None
+    # 最高画質が1080pを超える場合に、ダウンロード前に確認ダイアログを出すか
+    confirm_high_resolution: bool = False
+
+
+FORMAT_OPTIONS: tuple[FormatOption, ...] = (
+    FormatOption(
+        key=FormatKey.VIDEO_BEST_MP4,
+        label="動画 (最高画質 mp4)",
+        tooltip="【推奨】 互換性重視でmp4に限定します。動画によっては本来の最高画質(webm/av1等)より画質が下がる場合があります。",
+        # ext=mp4/m4aだけではコーデックまでは保証されない(高解像度ではYouTubeがH.264を提供せず、
+        # VP9がmp4コンテナのHLSバリアントとして出てくることがある)ため、
+        # H.264(avc1)・AAC(mp4a)であることも明示的に条件にする
+        spec=(
+            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]"
+            "/bv*[ext=mp4][vcodec^=avc1]+ba*[acodec^=mp4a]"
+            "/b[ext=mp4][vcodec^=avc1]"
+            "/b"
+        ),
+        confirm_high_resolution=True,
+    ),
+    FormatOption(
+        key=FormatKey.VIDEO_BEST,
+        label="動画 (最高画質)",
+        tooltip="コンテナ・コーデックを問わず本来の最高画質を選びます。webm/av1等になる場合があり、再生環境によっては再生できないことがあります。",
+        spec="bv*+ba/b",
+        sort=BEST_QUALITY_COMPATIBLE_SORT,
+        confirm_high_resolution=True,
+    ),
+    FormatOption(
+        key=FormatKey.AUDIO_BEST_M4A,
+        label="音声のみ (最高音質 m4a)",
+        tooltip="【推奨】 互換性重視でm4aに限定します。再エンコードは行いません。",
+        spec="ba[ext=m4a]/ba[acodec^=mp4a]/ba",
+        # 音声のみに限定できない場合の"ba"フォールバックで動画結合フォーマットが
+        # 選ばれてしまう事態に備え、常に音声トラックのみを取り出す後処理を付ける
+        # (対象が既に音声のみ・良コーデックならffmpegは何もせずスキップする)
+        extract_audio_codec="best",
+    ),
+    FormatOption(
+        key=FormatKey.AUDIO_BEST,
+        label="音声のみ (最高音質)",
+        tooltip="コーデックを問わず本来の最高音質を選びます。opus等になる場合があり、再生環境によっては再生できないことがあります。",
+        spec="ba/b",
+        sort=BEST_AUDIO_COMPATIBLE_SORT,
+        # "ba"に一致するフォーマットが無い場合の"/b"フォールバックで動画結合
+        # フォーマットが選ばれてしまう事態に備え、音声トラックのみを取り出す
+        extract_audio_codec="best",
+    ),
+    FormatOption(
+        key=FormatKey.AUDIO_MP3,
+        label="音声のみ (mp3)",
+        tooltip="再生互換性は最も高い形式ですが、非可逆で192kbpsに変換されるためm4a版より音質は劣化します。",
+        spec="ba/b",
+        extract_audio_codec="mp3",
+    ),
+)
+
+_OPTIONS_BY_LABEL = {option.label: option for option in FORMAT_OPTIONS}
+_OPTIONS_BY_KEY = {option.key: option for option in FORMAT_OPTIONS}
+
+
+def find_format_option(label: str) -> FormatOption | None:
+    """コンボに表示しているラベルから形式を引く(未知のラベルならNone)"""
+    return _OPTIONS_BY_LABEL.get(label)
+
+
+def format_option(key: FormatKey) -> FormatOption:
+    return _OPTIONS_BY_KEY[key]
+
 
 def format_spec_1080p(format_label: str, portrait: bool) -> str:
     """自動設定の「最高画質」系オプションで、1080p相当に画質を制限する代替セレクタを作る。
@@ -63,7 +139,8 @@ def format_spec_1080p(format_label: str, portrait: bool) -> str:
     width_cap, height_cap = (1080, 1920) if portrait else (1920, 1080)
     # 最後の"/b"は本当に候補が皆無だった場合の最終手段であり、解像度上限を守れないため、
     # その手前に「コンテナ/コーデック条件は緩めるが上限は維持する」段階を挟んでおく
-    if format_label == "動画 (最高画質 mp4)":
+    option = find_format_option(format_label)
+    if option is not None and option.key is FormatKey.VIDEO_BEST_MP4:
         return (
             f"bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba[ext=m4a]"
             f"/bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba*[acodec^=mp4a]"
@@ -76,16 +153,6 @@ def format_spec_1080p(format_label: str, portrait: bool) -> str:
         f"/b[width<={width_cap}][height<={height_cap}]"
         "/b"
     )
-
-# 自動設定で解像度確認ダイアログの対象となる「最高画質」系オプション
-HIGH_RESOLUTION_CHECK_LABELS = ("動画 (最高画質 mp4)", "動画 (最高画質)")
-
-# 解像度を最優先しつつ、同じ解像度の中では最も互換性の高いコーデック(h264/aac)を選ぶ
-BEST_QUALITY_COMPATIBLE_SORT = ["res", "codec:avc:m4a"]
-
-# 音声ビットレートを最優先しつつ、同じビットレートの中では最も互換性の高いコーデック(aac/m4a)を選ぶ
-BEST_AUDIO_COMPATIBLE_SORT = ["abr", "acodec:m4a"]
-
 
 def format_size(num_bytes) -> str:
     if not num_bytes:

@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from formats import FORMAT_COLUMN_WIDTHS, FORMAT_OPTION_TOOLTIPS, FORMAT_OPTIONS
+from formats import FORMAT_COLUMN_WIDTHS, FORMAT_OPTIONS
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, RangeSlider, SpinnerWidget
 
 IDLE_STATUS_TEXT = "待機中"
@@ -125,11 +125,11 @@ class Ui_MainWindow(QMainWindow):
         auto_layout.setContentsMargins(0, 0, 0, 0)
         auto_layout.addWidget(QLabel("形式:"))
         self.format_combo = QComboBox()
-        self.format_combo.addItems(FORMAT_OPTIONS.keys())
-        for i, label in enumerate(FORMAT_OPTIONS.keys()):
-            tooltip = FORMAT_OPTION_TOOLTIPS.get(label)
-            if tooltip:
-                self.format_combo.setItemData(i, tooltip, Qt.ItemDataRole.ToolTipRole)
+        for option in FORMAT_OPTIONS:
+            self.format_combo.addItem(option.label, userData=option.key)
+            self.format_combo.setItemData(
+                self.format_combo.count() - 1, option.tooltip, Qt.ItemDataRole.ToolTipRole
+            )
         auto_layout.addWidget(self.format_combo, stretch=1)
         format_row.addWidget(self.auto_format_container, stretch=1)
         # auto_format_container が非表示のときはこのスペーサーが余白を吸収し、

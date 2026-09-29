@@ -7,8 +7,10 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from format_engine import (
+    FormatSelection,
     compute_auto_format_note,
     estimate_selection_size,
+    extract_audio_postprocessor,
     mismatched_selected_formats,
     plan_high_resolution_confirmation,
     resolve_format_spec,
@@ -184,6 +186,31 @@ class MismatchedSelectedFormatsTest(unittest.TestCase):
         matched = {"ext": "mp4", "vcodec": "avc1", "acodec": "none"}
         result = mismatched_selected_formats(None, matched, mismatched)
         self.assertEqual(result, [mismatched])
+
+
+class ResolveFormatSpecTypeTest(unittest.TestCase):
+    def test_returns_named_selection(self):
+        selection = resolve_format_spec(False, None, None, False, "音声のみ (mp3)")
+        self.assertIsInstance(selection, FormatSelection)
+        self.assertEqual(selection.spec, "ba/b")
+        self.assertEqual(selection.postprocessors, [extract_audio_postprocessor("mp3")])
+
+    def test_unknown_label_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            resolve_format_spec(False, None, None, False, "存在しない形式")
+
+
+class ExtractAudioPostprocessorTest(unittest.TestCase):
+    def test_mp3_includes_quality(self):
+        pp = extract_audio_postprocessor("mp3")
+        self.assertEqual(pp["key"], "FFmpegExtractAudio")
+        self.assertEqual(pp["preferredcodec"], "mp3")
+        self.assertIn("preferredquality", pp)
+
+    def test_best_has_no_quality(self):
+        self.assertEqual(
+            extract_audio_postprocessor("best"), {"key": "FFmpegExtractAudio", "preferredcodec": "best"}
+        )
 
 
 if __name__ == "__main__":

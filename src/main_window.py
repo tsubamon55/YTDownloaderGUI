@@ -29,8 +29,8 @@ from format_engine import (
 from formats import (
     FORMAT_COLUMN_ROLE,
     FORMAT_MISMATCH_ROLE,
-    HIGH_RESOLUTION_CHECK_LABELS,
     describe_format_plain,
+    find_format_option,
     format_columns,
     has_audio,
     has_video,
@@ -765,7 +765,8 @@ class MainWindow(Ui_MainWindow):
 
         if not self.manual_toggle_btn.isChecked():
             format_label = self.format_combo.currentText()
-            if format_label in HIGH_RESOLUTION_CHECK_LABELS:
+            option = find_format_option(format_label)
+            if option is not None and option.confirm_high_resolution:
                 choice, fallback_spec = self.confirm_high_resolution_download(format_label, format_spec, format_sort)
                 if choice is None:
                     return

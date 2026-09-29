@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from formats import FORMAT_OPTIONS
@@ -36,7 +37,13 @@ class SetupUiTest(unittest.TestCase):
 
     def test_format_combo_populated_with_options(self):
         self.assertEqual(self.window.format_combo.count(), len(FORMAT_OPTIONS))
-        self.assertEqual(self.window.format_combo.itemText(0), next(iter(FORMAT_OPTIONS)))
+        self.assertEqual(self.window.format_combo.itemText(0), FORMAT_OPTIONS[0].label)
+
+    def test_format_combo_items_have_tooltips(self):
+        for i, option in enumerate(FORMAT_OPTIONS):
+            self.assertEqual(
+                self.window.format_combo.itemData(i, Qt.ItemDataRole.ToolTipRole), option.tooltip
+            )
 
     def test_manual_container_starts_hidden(self):
         self.assertFalse(self.window.manual_container.isVisible())

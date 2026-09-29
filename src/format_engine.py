@@ -7,14 +7,15 @@ QtやQMessageBoxには一切依存しないため、単体テストがそのま�
 
 import copy
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from config import CONFIG
 from formats import (
-    BEST_AUDIO_COMPATIBLE_SORT,
-    BEST_QUALITY_COMPATIBLE_SORT,
-    FORMAT_OPTIONS,
+    FormatKey,
     filter_mismatched_formats,
+    find_format_option,
     format_filesize,
+    format_option,
     format_size,
     format_spec_1080p,
     is_codec_container_mismatch,
@@ -22,11 +23,21 @@ from formats import (
 from paths import log_debug
 from yt_dlp_selection import select_formats
 
-MP3_POSTPROCESSOR = {
-    "key": "FFmpegExtractAudio",
-    "preferredcodec": "mp3",
-    "preferredquality": CONFIG.mp3_quality,
-}
+
+class FormatSelection(NamedTuple):
+    """yt-dlpに渡すフォーマット指定一式"""
+
+    spec: str
+    postprocessors: list[dict]
+    sort: list[str] | None
+
+
+def extract_audio_postprocessor(codec: str) -> dict:
+    """音声トラックだけを取り出す(必要ならcodecへ変換する)yt-dlpの後処理設定"""
+    postprocessor = {"key": "FFmpegExtractAudio", "preferredcodec": codec}
+    if codec == "mp3":
+        postprocessor["preferredquality"] = CONFIG.mp3_quality
+    return postprocessor
 
 
 def resolve_format_spec(
@@ -35,50 +46,32 @@ def resolve_format_spec(
     audio_fmt: dict | None,
     mp3_checked: bool,
     format_label: str,
-) -> tuple[str, list, list | None]:
+) -> FormatSelection:
     """UIの選択状態からyt-dlpに渡すformat_spec/postprocessors/format_sortを決定する。
 
-    戻り値: (format_spec, postprocessors, format_sort)
-    手動設定で動画・音声のどちらも未選択の場合はValueErrorを送出する。
+    手動設定で動画・音声のどちらも未選択の場合、自動設定で未知の形式が指定された場合は
+    ValueErrorを送出する。
     """
     if manual_mode:
-        if video_fmt is None and audio_fmt is None:
-            raise ValueError("動画または音声のフォーマットを選択してください")
+        return _resolve_manual_selection(video_fmt, audio_fmt, mp3_checked)
 
-        postprocessors = []
-        if video_fmt is not None and audio_fmt is not None:
-            format_spec = f"{video_fmt['format_id']}+{audio_fmt['format_id']}"
-        elif video_fmt is not None:
-            format_spec = video_fmt["format_id"]
-        else:
-            format_spec = audio_fmt["format_id"]
-            if mp3_checked:
-                postprocessors = [dict(MP3_POSTPROCESSOR)]
-        return format_spec, postprocessors, None
+    option = find_format_option(format_label)
+    if option is None:
+        raise ValueError(f"未知の形式です: {format_label}")
+    postprocessors = [extract_audio_postprocessor(option.extract_audio_codec)] if option.extract_audio_codec else []
+    return FormatSelection(option.spec, postprocessors, option.sort)
 
-    format_key = FORMAT_OPTIONS[format_label]
-    if format_key == "audio_mp3":
-        return "ba/b", [dict(MP3_POSTPROCESSOR)], None
-    if format_key == "audio_m4a":
-        # 音声のみに限定できない場合の"ba"フォールバックで動画結合フォーマットが
-        # 選ばれてしまう事態に備え、常に音声トラックのみを取り出す後処理を付ける
-        # (対象が既に音声のみ・良コーデックならffmpegは何もせずスキップする)
-        return (
-            "ba[ext=m4a]/ba[acodec^=mp4a]/ba",
-            [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}],
-            None,
-        )
-    if format_key == "audio_best":
-        # "ba"に一致するフォーマットが無い場合の"/b"フォールバックで動画結合
-        # フォーマットが選ばれてしまう事態に備え、音声トラックのみを取り出す
-        return (
-            "ba/b",
-            [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}],
-            BEST_AUDIO_COMPATIBLE_SORT,
-        )
-    if format_label == "動画 (最高画質)":
-        return format_key, [], BEST_QUALITY_COMPATIBLE_SORT
-    return format_key, [], None
+
+def _resolve_manual_selection(video_fmt: dict | None, audio_fmt: dict | None, mp3_checked: bool) -> FormatSelection:
+    if video_fmt is None and audio_fmt is None:
+        raise ValueError("動画または音声のフォーマットを選択してください")
+
+    if video_fmt is not None and audio_fmt is not None:
+        return FormatSelection(f"{video_fmt['format_id']}+{audio_fmt['format_id']}", [], None)
+    if video_fmt is not None:
+        return FormatSelection(video_fmt["format_id"], [], None)
+    postprocessors = [extract_audio_postprocessor("mp3")] if mp3_checked else []
+    return FormatSelection(audio_fmt["format_id"], postprocessors, None)
 
 
 def select_best_format(
@@ -126,15 +119,13 @@ def selection_resolution(selected: dict | None) -> tuple[int, int] | None:
 def compute_auto_format_note(available_formats: list, format_label: str) -> str:
     """自動設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
     解像度が落ちる場合のみ、その旨を伝える注記文を返す。落ちない場合は空文字。"""
-    if not available_formats or format_label != "動画 (最高画質 mp4)":
+    option = find_format_option(format_label)
+    if not available_formats or option is None or option.key is not FormatKey.VIDEO_BEST_MP4:
         return ""
 
-    mp4_selected = select_best_format(available_formats, FORMAT_OPTIONS[format_label], None)
-    mp4_resolution = selection_resolution(mp4_selected)
-
-    best_label = "動画 (最高画質)"
-    best_selected = select_best_format(available_formats, FORMAT_OPTIONS[best_label], BEST_QUALITY_COMPATIBLE_SORT)
-    best_resolution = selection_resolution(best_selected)
+    mp4_resolution = selection_resolution(select_best_format(available_formats, option.spec, option.sort))
+    best = format_option(FormatKey.VIDEO_BEST)
+    best_resolution = selection_resolution(select_best_format(available_formats, best.spec, best.sort))
 
     if mp4_resolution is None or best_resolution is None:
         return ""
@@ -146,7 +137,7 @@ def compute_auto_format_note(available_formats: list, format_label: str) -> str:
     return ""
 
 
-@dataclass
+@dataclass(frozen=True)
 class HighResolutionPlan:
     """confirm_high_resolution_downloadがダイアログに表示すべき内容の判定結果。
 
@@ -156,7 +147,10 @@ class HighResolutionPlan:
     needs_confirmation: bool
     message: str = ""
     fallback_spec: str | None = None
-    has_fallback: bool = False
+
+    @property
+    def has_fallback(self) -> bool:
+        return self.fallback_spec is not None
 
 
 def plan_high_resolution_confirmation(
@@ -203,7 +197,6 @@ def plan_high_resolution_confirmation(
         needs_confirmation=True,
         message=message,
         fallback_spec=fallback_spec if has_fallback else None,
-        has_fallback=has_fallback,
     )
 
 
