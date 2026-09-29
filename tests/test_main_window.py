@@ -90,6 +90,14 @@ class MainWindowTestCase(unittest.TestCase):
         mock_clipboard_getter.return_value = mock_clipboard
         self.addCleanup(clipboard_patch.stop)
 
+        # URL入力後に手動設定を開く等、テスト中の操作がfetch_formatsを経由して本物の
+        # FormatListWorkerを起動すると、実ネットワーク通信が発生するうえ、window破棄時に
+        # スレッドが実行中だとプロセスごと異常終了する。スレッドの起動だけを止めておき、
+        # ワーカーの生成やシグナル接続はそのまま検証できるようにする
+        start_patch = patch.object(main_window_module.FormatListWorker, "start")
+        start_patch.start()
+        self.addCleanup(start_patch.stop)
+
         with patch.object(main_window_module, "get_downloads_folder", return_value="C:/Downloads"):
             self.window = MainWindow()
         self.addCleanup(self.window.deleteLater)
@@ -104,6 +112,17 @@ class MainWindowTestCase(unittest.TestCase):
         # isVisible()は祖先を含めた実際の表示状態を返すため、offscreenプラットフォームでも
         # トップレベルウィンドウ自体をshowしておく必要がある
         self.window.show()
+
+
+class MainWindowTestIsolationTest(MainWindowTestCase):
+    def test_format_fetch_does_not_start_real_thread(self):
+        """URL入力後に手動設定を開くとfetch_formatsが走る。テストで本物のFormatListWorkerが
+        起動すると実ネットワーク通信が発生し、window破棄時にスレッドが実行中だと
+        "QThread: Destroyed while thread is still running" でプロセスごと異常終了する"""
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.manual_toggle_btn.setChecked(True)
+        self.assertIsNotNone(self.window.format_worker)
+        self.assertFalse(self.window.format_worker.isRunning())
 
 
 class EventFilterTest(MainWindowTestCase):
