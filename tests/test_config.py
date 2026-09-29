@@ -129,6 +129,17 @@ class LoadConfigTest(unittest.TestCase):
         self.assertIsInstance(loaded.thumbnail_fetch_timeout_seconds, float)
         self.assertEqual(logged, [])
 
+    def test_dict_setting_is_merged_even_with_generic_annotation(self):
+        """clip_video_encoder_by_codec_prefixの型注釈をdict[str, list[str]]にしても、
+        辞書の部分上書きが効くこと"""
+        cfg, _ = self._load({"clip_video_encoder_by_codec_prefix": {"hevc": ["libx265", "22"]}})
+        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["hevc"], ["libx265", "22"])
+        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["avc1"], ["libx264", "18"])
+
+    def test_non_dict_for_dict_setting_is_rejected(self):
+        cfg, _ = self._load({"clip_video_encoder_by_codec_prefix": ["libx264"]})
+        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["avc1"], ["libx264", "18"])
+
 
 if __name__ == "__main__":
     unittest.main()

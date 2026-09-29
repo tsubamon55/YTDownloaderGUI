@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 from config import CONFIG
 from formats import (
+    Format,
     FormatKey,
     filter_mismatched_formats,
     find_format_option,
@@ -42,8 +43,8 @@ def extract_audio_postprocessor(codec: str) -> dict:
 
 def resolve_format_spec(
     manual_mode: bool,
-    video_fmt: dict | None,
-    audio_fmt: dict | None,
+    video_fmt: Format | None,
+    audio_fmt: Format | None,
     mp3_checked: bool,
     format_label: str,
 ) -> FormatSelection:
@@ -62,7 +63,7 @@ def resolve_format_spec(
     return FormatSelection(option.spec, postprocessors, option.sort)
 
 
-def _resolve_manual_selection(video_fmt: dict | None, audio_fmt: dict | None, mp3_checked: bool) -> FormatSelection:
+def _resolve_manual_selection(video_fmt: Format | None, audio_fmt: Format | None, mp3_checked: bool) -> FormatSelection:
     if video_fmt is None and audio_fmt is None:
         raise ValueError("動画または音声のフォーマットを選択してください")
 
@@ -75,8 +76,8 @@ def _resolve_manual_selection(video_fmt: dict | None, audio_fmt: dict | None, mp
 
 
 def select_best_format(
-    available_formats: list, format_spec: str, format_sort: list | None
-) -> dict | None:
+    available_formats: list[Format], format_spec: str, format_sort: list[str] | None
+) -> Format | None:
     """実際のダウンロード(DownloadWorker)と全く同じformat_spec/format_sortをyt-dlp本体の
     選択エンジンに通し、実際に選ばれるフォーマットを求める(ネットワークアクセスなし)。
     プレビュー用の選択ロジックを独自実装すると、実際のダウンロード結果とズレる恐れがあるため、
@@ -92,7 +93,7 @@ def select_best_format(
     return selected[0] if selected else None
 
 
-def estimate_selection_size(selected: dict | None) -> int | None:
+def estimate_selection_size(selected: Format | None) -> int | None:
     if not selected:
         return None
     total = 0
@@ -105,7 +106,7 @@ def estimate_selection_size(selected: dict | None) -> int | None:
     return total
 
 
-def selection_resolution(selected: dict | None) -> tuple[int, int] | None:
+def selection_resolution(selected: Format | None) -> tuple[int, int] | None:
     if not selected:
         return None
     for part in selected.get("requested_formats") or [selected]:
@@ -116,7 +117,7 @@ def selection_resolution(selected: dict | None) -> tuple[int, int] | None:
     return None
 
 
-def compute_auto_format_note(available_formats: list, format_label: str) -> str:
+def compute_auto_format_note(available_formats: list[Format], format_label: str) -> str:
     """自動設定の「動画 (最高画質 mp4)」がH.264限定のため本来の最高画質より
     解像度が落ちる場合のみ、その旨を伝える注記文を返す。落ちない場合は空文字。"""
     option = find_format_option(format_label)
@@ -154,10 +155,10 @@ class HighResolutionPlan:
 
 
 def plan_high_resolution_confirmation(
-    available_formats: list,
+    available_formats: list[Format],
     format_label: str,
     format_spec: str,
-    format_sort: list | None,
+    format_sort: list[str] | None,
 ) -> HighResolutionPlan:
     """自動設定の最高画質が1920x1080を超える場合に確認が必要かどうかと、
     確認する場合に表示するメッセージ・1080p版のformat_specを判定する。
@@ -200,6 +201,6 @@ def plan_high_resolution_confirmation(
     )
 
 
-def mismatched_selected_formats(*formats: dict | None) -> list[dict]:
+def mismatched_selected_formats(*formats: Format | None) -> list[Format]:
     """手動設定で選択中のフォーマットのうち、コンテナ/コーデックが一致しない非推奨のものを返す"""
     return [fmt for fmt in formats if fmt is not None and is_codec_container_mismatch(fmt)]

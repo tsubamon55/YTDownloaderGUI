@@ -9,6 +9,7 @@
 import json
 import os
 from dataclasses import dataclass, field, fields
+from typing import get_origin
 
 from paths import find_bundled_file, get_base_dir, log_debug
 
@@ -29,7 +30,7 @@ class AppConfig:
     mp3_quality: str = "192"
     # クリップ切り出し時、映像コーデック(先頭部分)ごとの再エンコード設定。
     # 値は [ffmpegエンコーダ名, CRF値] の組。表に無いコーデックはffmpegの既定設定にフォールバックする
-    clip_video_encoder_by_codec_prefix: dict = field(default_factory=lambda: {
+    clip_video_encoder_by_codec_prefix: dict[str, list[str]] = field(default_factory=lambda: {
         "avc1": ["libx264", "18"],
         "h264": ["libx264", "18"],
         "vp9": ["libvpx-vp9", "31"],
@@ -59,7 +60,9 @@ def _validated_value(expected_type, current, value):
 
     判定の基準に既定値の実際の型ではなく宣言された型を使うのは、`x: float = 5` のように
     既定値だけ整数で書かれている項目で、正当な小数の指定まで弾いてしまわないため。
+    dict[str, list[str]] のような総称型の注釈は、元の型(dict)で判定する。
     """
+    expected_type = get_origin(expected_type) or expected_type
     # boolはintのサブクラスであり、件数や時間の設定として意図した値ではないため明示的に弾く
     if isinstance(value, bool) is not (expected_type is bool):
         return False, current

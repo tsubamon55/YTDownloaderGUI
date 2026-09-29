@@ -7,6 +7,7 @@ main_window.MainWindowが担当する。
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,9 @@ class StoryboardTile:
     height: int
 
 
-def select_storyboard_format(formats: list[dict], min_width: int = 0, min_height: int = 0) -> dict | None:
+def select_storyboard_format(
+    formats: list[dict[str, Any]], min_width: int = 0, min_height: int = 0
+) -> dict[str, Any] | None:
     """フォーマット一覧の中から、プレビュー表示に使うストーリーボードを選ぶ。
 
     min_width/min_height(プレビューの表示サイズ)以上の1マスを持つものの中では、
@@ -35,7 +38,7 @@ def select_storyboard_format(formats: list[dict], min_width: int = 0, min_height
     if not storyboards:
         return None
 
-    def tile_area(f: dict) -> int:
+    def tile_area(f: dict[str, Any]) -> int:
         return (f.get("width") or 0) * (f.get("height") or 0)
 
     large_enough = [
@@ -47,7 +50,7 @@ def select_storyboard_format(formats: list[dict], min_width: int = 0, min_height
     return max(storyboards, key=tile_area)
 
 
-def storyboard_tile_for_time(storyboard: dict, duration: float, seconds: float) -> StoryboardTile | None:
+def storyboard_tile_for_time(storyboard: dict[str, Any], duration: float, seconds: float) -> StoryboardTile | None:
     """再生時刻(秒)に対応するサムネイルマスの位置を返す。必要な情報が
     欠けている場合はNoneを返す"""
     fps = storyboard.get("fps")

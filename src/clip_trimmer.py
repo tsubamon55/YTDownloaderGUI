@@ -170,7 +170,8 @@ def nearest_keyframe_at_or_before(
 
 
 def _seek_options(
-    ffpp: FFmpegPostProcessor, filepath: str, metadata: dict, clip_start: float | None) -> tuple[list[str], list[str]]:
+    ffpp: FFmpegPostProcessor, filepath: str, metadata: dict, clip_start: float | None
+) -> tuple[list[str], list[str]]:
     """切り抜き開始位置へのシーク指定を (入力側の-ss, 出力側の正確シーク用-ss) で返す。
 
     -ssを-iより前(入力側)に置くことで、区間の先頭まで一気にシークしてから

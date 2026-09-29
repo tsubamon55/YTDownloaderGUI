@@ -154,7 +154,7 @@ def format_spec_1080p(format_label: str, portrait: bool) -> str:
         "/b"
     )
 
-def format_size(num_bytes) -> str:
+def format_size(num_bytes: int | float | None) -> str:
     if not num_bytes:
         return "不明"
     mb = num_bytes / (1024 * 1024)
@@ -206,7 +206,7 @@ def _codec_label(codec: str | None) -> str:
     return CODEC_LABELS.get(prefix, prefix.upper())
 
 
-def format_codec(fmt: dict) -> str:
+def format_codec(fmt: Format) -> str:
     """映像/音声コーデックの短いラベル。同じ解像度/fps/配信方式でも
     コーデックが違えば別物(例: H.264 vs AV1)なので見分けられるようにする"""
     labels = [_codec_label(fmt.get("vcodec")), _codec_label(fmt.get("acodec"))]
@@ -228,7 +228,7 @@ _MISMATCHED_ACODEC_BY_EXT = {
 }
 
 
-def is_codec_container_mismatch(fmt: dict) -> bool:
+def is_codec_container_mismatch(fmt: Format) -> bool:
     """コンテナ(ext)と実際のコーデックが一致しない、実質的に劣化コピーでしかない
     フォーマットかどうかを判定する"""
     ext = fmt.get("ext")
@@ -242,12 +242,12 @@ def is_codec_container_mismatch(fmt: dict) -> bool:
     return False
 
 
-def filter_mismatched_formats(formats: list[dict]) -> list[dict]:
+def filter_mismatched_formats(formats: list[Format]) -> list[Format]:
     """自動設定の選択候補からコンテナ/コーデック不一致のフォーマットを完全に除外する"""
     return [f for f in formats if not is_codec_container_mismatch(f)]
 
 
-def format_protocol(fmt: dict) -> str:
+def format_protocol(fmt: Format) -> str:
     """配信方式を表す短いラベル。HLS(m3u8)配信はContent-Lengthが分からずサイズが
     不明になりやすいなど、進捗表示の挙動に関わるためユーザーに区別できるようにする"""
     protocol = fmt.get("protocol") or ""
@@ -267,7 +267,7 @@ def format_protocol(fmt: dict) -> str:
 _PROTOCOL_RANK = {"HTTPS": 2, "HTTP": 2, "DASH": 1, "HLS": 0}
 
 
-def protocol_rank(fmt: dict) -> int:
+def protocol_rank(fmt: Format) -> int:
     return _PROTOCOL_RANK.get(format_protocol(fmt), 1)
 
 
@@ -309,5 +309,5 @@ def format_columns(fmt: Format) -> list[str]:
     return [f"[{format_id}]", ext, kind, quality_text, fps_text, format_codec(fmt), format_protocol(fmt), size, note]
 
 
-def describe_format_plain(fmt: dict) -> str:
+def describe_format_plain(fmt: Format) -> str:
     return " | ".join(c for c in format_columns(fmt) if c)

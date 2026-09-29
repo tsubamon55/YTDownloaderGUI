@@ -11,7 +11,7 @@ from paths import append_log_entry, find_bundled_file, get_log_file_path
 APP_ICON_PATH = os.path.join("downloader-icon", "app-icon-1024.png")
 
 
-def install_exception_hook():
+def install_exception_hook() -> None:
     """Qtのスロット内(main_window.pyのon_xxxハンドラ等)で起きた想定外の例外は
     通常のtry/exceptでは捕まらずイベントループの外側まで伝播し、デフォルトでは
     ダイアログも出さずに abort() でアプリごと落ちる。sys.excepthookを差し替えて
@@ -46,7 +46,7 @@ def install_exception_hook():
     sys.excepthook = handle_exception
 
 
-def main():
+def main() -> None:
     install_exception_hook()
     app = QApplication(sys.argv)
 

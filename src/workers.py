@@ -16,7 +16,7 @@ from clip_range import clip_range_label, format_clip_time
 from clip_trimmer import trim_clip
 from config import CONFIG
 from errors import describe_error
-from formats import format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
+from formats import Format, format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug, remove_file_quietly
 from yt_dlp_selection import make_filtering_format_selector
 
@@ -67,12 +67,12 @@ class FormatListWorker(QThread):
     # config.jsonのthumbnail_fetch_timeout_secondsで調整可能)
     THUMBNAIL_FETCH_TIMEOUT_SECONDS = CONFIG.thumbnail_fetch_timeout_seconds
 
-    def __init__(self, url: str):
+    def __init__(self, url: str) -> None:
         super().__init__()
         self.url = url
 
     @staticmethod
-    def _thumbnail_url_candidates(info: dict) -> list[str]:
+    def _thumbnail_url_candidates(info: Format) -> list[str]:
         """画質が高い順にサムネイルURL候補を返す(重複除去済み)"""
         candidates = []
         seen = set()
@@ -98,7 +98,7 @@ class FormatListWorker(QThread):
 
         return candidates
 
-    def run(self):
+    def run(self) -> None:
         try:
             ydl_opts = _base_ydl_opts(ffmpeg_location=get_ffmpeg_location())
             ydl_opts["skip_download"] = True
@@ -141,11 +141,11 @@ class StoryboardFragmentWorker(QThread):
     finished_ok = pyqtSignal(bytes)
     finished_error = pyqtSignal(str)
 
-    def __init__(self, url: str):
+    def __init__(self, url: str) -> None:
         super().__init__()
         self.url = url
 
-    def run(self):
+    def run(self) -> None:
         try:
             with urllib.request.urlopen(self.url, timeout=CONFIG.storyboard_fetch_timeout_seconds) as resp:
                 data = resp.read()
@@ -183,10 +183,10 @@ class DownloadWorker(QThread):
         r"\.(part|ytdl|temp)(-Frag\d+)?$|\.f\d+\.[^.]+$", re.IGNORECASE
     )
 
-    def cancel(self):
+    def cancel(self) -> None:
         self._is_cancelled = True
 
-    def _snapshot_preexisting_files(self):
+    def _snapshot_preexisting_files(self) -> None:
         """ダウンロード開始前から保存先に存在していた、同名(拡張子違いを含む)の
         完成済みファイルを記録する。
 
@@ -212,7 +212,7 @@ class DownloadWorker(QThread):
             if name.startswith(prefix) and not self._INCOMPLETE_NAME_PATTERN.search(name)
         }
 
-    def _cleanup_leftover_files(self, preserve_final: bool = False):
+    def _cleanup_leftover_files(self, preserve_final: bool = False) -> None:
         """キャンセル時・エラー時に、今回のダウンロードで保存先へ残った未完成ファイル
         (.part等)を削除する。開始前から存在していたファイルは今回の生成物ではないため
         削除しない(_snapshot_preexisting_files参照)。
@@ -239,7 +239,7 @@ class DownloadWorker(QThread):
                 self.log.emit(f"未完了ファイルを削除しました: {name}")
 
     @staticmethod
-    def _describe_selected_format(info: dict) -> str:
+    def _describe_selected_format(info: Format) -> str:
         vcodec = info.get("vcodec") or "none"
         acodec = info.get("acodec") or "none"
         video = has_video(info)
@@ -263,7 +263,7 @@ class DownloadWorker(QThread):
 
         return " / ".join(parts)
 
-    def _init_component_weights(self, probe_info: dict):
+    def _init_component_weights(self, probe_info: Format) -> None:
         """映像+音声を別々にダウンロードする形式向けに、各コンポーネントの
         推定サイズ比から全体進捗に対する重みを求めておく(サイズ不明な場合は均等割り)"""
         components = probe_info.get("requested_formats") or [probe_info]
@@ -365,7 +365,7 @@ class DownloadWorker(QThread):
             if count == 0:
                 self.log.emit(f"後処理完了: {name}")
 
-    def _expected_ext(self, probe_info: dict) -> str | None:
+    def _expected_ext(self, probe_info: Format) -> str | None:
         for pp in self.request.postprocessors:
             if pp.get("key") != "FFmpegExtractAudio":
                 continue
@@ -381,7 +381,7 @@ class DownloadWorker(QThread):
             ext = "mkv"
         return ext
 
-    def _build_title(self, probe_info: dict) -> str:
+    def _build_title(self, probe_info: Format) -> str:
         """フル動画のダウンロードと保存先ファイルが混同されないよう、クリップ範囲を
         指定した場合はタイトルに範囲を付記する(例: "Title [1:00-2:00]")"""
         title = probe_info.get("title") or "video"
@@ -424,7 +424,7 @@ class DownloadWorker(QThread):
         """ダウンロード済みの最終ファイルを切り抜き範囲で切り出す(詳細はclip_trimmer参照)"""
         trim_clip(self._final_filepath, self.request.clip_start, self.request.clip_end, self.log.emit)
 
-    def run(self):
+    def run(self) -> None:
         self._started_at = time.monotonic()
         try:
             ffmpeg_location = get_ffmpeg_location()
@@ -466,14 +466,14 @@ class DownloadWorker(QThread):
             end_text = format_clip_time(end) if end is not None else "末尾"
             self.log.emit(f"切り抜き範囲: {start_text} 〜 {end_text}")
 
-    def _probe(self, format_selector) -> dict:
+    def _probe(self, format_selector) -> Format:
         """実ダウンロードの前に情報だけを取得し、保存ファイル名・拡張子・進捗の重み付けに使う"""
         probe_opts = _base_ydl_opts(self.request.format_sort)
         probe_opts["format"] = format_selector
         with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
             return probe_ydl.extract_info(self.request.url, download=False)
 
-    def _prepare_output_name(self, probe_info: dict) -> str | None:
+    def _prepare_output_name(self, probe_info: Format) -> str | None:
         """保存ファイル名(拡張子除く)を確定し、失敗時の後片付けの準備をする。最終拡張子の見込みを返す"""
         expected_ext = self._expected_ext(probe_info)
         self._unique_title = self._resolve_unique_title(self._build_title(probe_info), expected_ext)
