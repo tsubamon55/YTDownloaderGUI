@@ -25,7 +25,7 @@ from formats import (
     protocol_rank,
 )
 from paths import get_ffmpeg_location, log_debug, remove_file_quietly
-from yt_dlp_selection import make_filtering_format_selector
+from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY, add_format_exclusion
 
 
 def _base_ydl_opts(format_sort: list[str] | None = None, ffmpeg_location: str | None = None) -> dict[str, Any]:
@@ -358,6 +358,9 @@ class DownloadWorker(QThread):
     def _postprocessor_hook(self, hook_info: dict) -> None:
         status = hook_info.get("status")
         name = hook_info.get("postprocessor", "")
+        if name == EXCLUDE_FORMATS_PP_KEY:
+            # フォーマット選択前の候補除外(add_format_exclusion)はユーザーから見た後処理ではないため表示しない
+            return
         if status == "started":
             count = self._active_postprocessors.get(name, 0)
             self._active_postprocessors[name] = count + 1
@@ -420,13 +423,12 @@ class DownloadWorker(QThread):
                 return candidate
             counter += 1
 
-    def _build_format_selector(self):
-        """自動設定ではコンテナ/コーデックが一致しない非推奨フォーマットを候補から
-        完全に除外した上でformat_specを解決する。手動設定でユーザーが明示的にIDを
+    def _register_format_exclusion(self, ydl: yt_dlp.YoutubeDL) -> None:
+        """自動設定ではコンテナ/コーデックが一致しない非推奨フォーマットを、format_specの
+        解決より前に候補から完全に除外する。手動設定でユーザーが明示的にIDを
         指定した場合はexclude_mismatched=Falseとなり、そのまま尊重する。"""
-        if not self.request.exclude_mismatched:
-            return self.request.format_spec
-        return make_filtering_format_selector(self.request.format_spec, is_codec_container_mismatch)
+        if self.request.exclude_mismatched:
+            add_format_exclusion(ydl, is_codec_container_mismatch)
 
     def _trim_clip_locally(self) -> None:
         """ダウンロード済みの最終ファイルを切り抜き範囲で切り出す(詳細はclip_trimmer参照)"""
@@ -443,12 +445,12 @@ class DownloadWorker(QThread):
                 FFmpegPostProcessor._ffmpeg_location.set(ffmpeg_location)
 
             self._log_request()
-            format_selector = self._build_format_selector()
-            probe_info = self._probe(format_selector)
+            probe_info = self._probe()
             expected_ext = self._prepare_output_name(probe_info)
 
-            download_opts = self._build_download_opts(format_selector, expected_ext, ffmpeg_location)
+            download_opts = self._build_download_opts(expected_ext, ffmpeg_location)
             with yt_dlp.YoutubeDL(download_opts) as ydl:
+                self._register_format_exclusion(ydl)
                 ydl.download([self.request.url])
 
             if self._is_cancelled:
@@ -474,11 +476,12 @@ class DownloadWorker(QThread):
             end_text = format_clip_time(end) if end is not None else "末尾"
             self.log.emit(f"切り抜き範囲: {start_text} 〜 {end_text}")
 
-    def _probe(self, format_selector) -> Format:
+    def _probe(self) -> Format:
         """実ダウンロードの前に情報だけを取得し、保存ファイル名・拡張子・進捗の重み付けに使う"""
         probe_opts = _base_ydl_opts(self.request.format_sort)
-        probe_opts["format"] = format_selector
+        probe_opts["format"] = self.request.format_spec
         with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
+            self._register_format_exclusion(probe_ydl)
             return probe_ydl.extract_info(self.request.url, download=False)
 
     def _prepare_output_name(self, probe_info: Format) -> str | None:
@@ -490,13 +493,13 @@ class DownloadWorker(QThread):
         self._init_component_weights(probe_info)
         return expected_ext
 
-    def _build_download_opts(self, format_selector, expected_ext: str | None, ffmpeg_location: str | None) -> dict:
+    def _build_download_opts(self, expected_ext: str | None, ffmpeg_location: str | None) -> dict:
         opts = _base_ydl_opts(self.request.format_sort, ffmpeg_location)
         opts.update({
             "outtmpl": os.path.join(self.request.out_dir, f"{self._unique_title}.%(ext)s"),
             "progress_hooks": [self._progress_hook],
             "postprocessor_hooks": [self._postprocessor_hook],
-            "format": format_selector,
+            "format": self.request.format_spec,
             "writethumbnail": True,
             "postprocessors": list(self.request.postprocessors),
         })

@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
+from formats import is_codec_container_mismatch
 from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker, _base_ydl_opts
+from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY
 
 
 def make_worker(**kwargs):
@@ -501,6 +503,16 @@ class PostprocessorHookTest(unittest.TestCase):
         self.assertEqual(logs, ["後処理開始: Merger", "後処理完了: Merger"])
         self.assertEqual(worker._final_filepath, "C:/out/video.mp4")
 
+    def test_ignores_format_exclusion_preprocessor(self):
+        """フォーマット除外の前処理はユーザーから見た後処理ではないため、ログに出さない"""
+        worker = make_worker()
+        logs = []
+        worker.log.connect(logs.append)
+        worker._postprocessor_hook({"status": "started", "postprocessor": EXCLUDE_FORMATS_PP_KEY, "info_dict": {}})
+        worker._postprocessor_hook({"status": "finished", "postprocessor": EXCLUDE_FORMATS_PP_KEY, "info_dict": {}})
+        self.assertEqual(logs, [])
+        self.assertEqual(worker._active_postprocessors, {})
+
 
 class CleanupLeftoverFilesTest(unittest.TestCase):
     def test_removes_files_matching_title_prefix(self):
@@ -523,15 +535,45 @@ class CleanupLeftoverFilesTest(unittest.TestCase):
             self.assertEqual(os.listdir(tmp), ["Other.mp4"])
 
 
-class BuildFormatSelectorTest(unittest.TestCase):
-    def test_returns_raw_spec_when_not_excluding_mismatched(self):
-        worker = make_worker(format_spec="137+140", exclude_mismatched=False)
-        self.assertEqual(worker._build_format_selector(), "137+140")
+class FormatExclusionRegistrationTest(unittest.TestCase):
+    """自動設定ではprobe用・ダウンロード用の両方のYoutubeDLに非推奨フォーマットの除外を登録し、
+    手動設定では登録しない。formatには常に文字列のformat_specを渡す"""
 
-    def test_returns_callable_selector_when_excluding_mismatched(self):
-        worker = make_worker(format_spec="b", exclude_mismatched=True)
-        selector = worker._build_format_selector()
-        self.assertTrue(callable(selector))
+    def _run(self, exclude_mismatched):
+        created = []
+
+        def factory(opts):
+            ydl = MagicMock()
+            ydl.__enter__.return_value = ydl
+            ydl.__exit__.return_value = False
+            ydl.extract_info.return_value = {"title": "My Video", "ext": "mp4"}
+            created.append((opts, ydl))
+            return ydl
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, format_spec="bv*+ba/b", exclude_mismatched=exclude_mismatched)
+            with patch("workers.get_ffmpeg_location", return_value=None), \
+                 patch("workers.yt_dlp.YoutubeDL", side_effect=factory), \
+                 patch("workers.add_format_exclusion") as add_mock:
+                worker.run()
+        return created, add_mock
+
+    def test_auto_mode_registers_exclusion_on_probe_and_download(self):
+        created, add_mock = self._run(exclude_mismatched=True)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(
+            [c.args for c in add_mock.call_args_list],
+            [(ydl, is_codec_container_mismatch) for _, ydl in created],
+        )
+
+    def test_manual_mode_does_not_register_exclusion(self):
+        _, add_mock = self._run(exclude_mismatched=False)
+        add_mock.assert_not_called()
+
+    def test_format_option_is_plain_spec_string(self):
+        for exclude_mismatched in (True, False):
+            created, _ = self._run(exclude_mismatched=exclude_mismatched)
+            self.assertEqual([opts["format"] for opts, _ in created], ["bv*+ba/b", "bv*+ba/b"])
 
 
 class TrimClipLocallyDelegatesTest(unittest.TestCase):

@@ -1,8 +1,8 @@
 """yt_dlp_selection.py の回帰テスト。
 
-format_engine.pyとworkers.pyが共有するyt-dlp内部の非公開の契約
-(build_format_selectorが要求するctxの形)をここで直接検証する。
-yt-dlpの更新でこの契約が変わった場合、真っ先にこのテストが落ちることを意図している。
+format_engine.pyとworkers.pyが共有する、yt-dlpによるフォーマット選択と
+pre_processでの候補除外が期待どおりに働くことを、実際のyt-dlpで(ネットワークなしで)検証する。
+yt-dlpの更新で挙動が変わった場合、真っ先にこのテストが落ちることを意図している。
 """
 
 import copy
@@ -18,7 +18,6 @@ from yt_dlp_selection import (
     EXCLUDE_FORMATS_PP_KEY,
     ExcludeFormatsPP,
     add_format_exclusion,
-    make_filtering_format_selector,
     select_formats,
 )
 
@@ -94,36 +93,6 @@ class SelectFormatsTest(unittest.TestCase):
         """同じ解像度ならformat_sortで指定したコーデック(avc)が優先される"""
         selected = select_formats(self.formats, "bv*", ["res", "codec:avc:m4a"])
         self.assertEqual(selected[0]["format_id"], "137")
-
-
-class MakeFilteringFormatSelectorTest(unittest.TestCase):
-    def setUp(self):
-        self.formats = [
-            make_video("137", "mp4", "avc1.640028", height=1080),
-            make_video("248", "webm", "vp9", height=1080),
-            make_audio("140", "m4a", "mp4a.40.2"),
-        ]
-
-    def test_excludes_matching_formats_before_selection(self):
-        selector = make_filtering_format_selector(
-            "b", lambda f: f["format_id"] == "137"
-        )
-        ctx = {
-            "formats": self.formats,
-            "has_merged_format": False,
-            "incomplete_formats": False,
-        }
-        selected = selector(ctx)
-        selected_ids = {f["format_id"] for f in selected} | {
-            component["format_id"]
-            for f in selected
-            for component in f.get("requested_formats", [])
-        }
-        self.assertNotIn("137", selected_ids)
-
-    def test_returns_callable(self):
-        selector = make_filtering_format_selector("b", lambda f: False)
-        self.assertTrue(callable(selector))
 
 
 class ExcludeFormatsPPTest(unittest.TestCase):
