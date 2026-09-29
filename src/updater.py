@@ -127,6 +127,8 @@ class UpdateDownloadWorker(QThread):
     progress = pyqtSignal(float)
     finished_ok = pyqtSignal(str)
     finished_error = pyqtSignal(str)
+    # ユーザーによるキャンセル。エラーとは区別し、呼び出し側がエラー表示を出さずに済むようにする
+    cancelled = pyqtSignal()
 
     # サムネイル等の小さい取得と異なり数十MB単位のインストーラーを読むため、チャンクは大きめにする
     _CHUNK_SIZE = 256 * 1024
@@ -166,7 +168,7 @@ class UpdateDownloadWorker(QThread):
             self.finished_ok.emit(self.dest_path)
         except UpdateCancelledError:
             self._cleanup_partial_file()
-            self.finished_error.emit("キャンセルされました")
+            self.cancelled.emit()
         except Exception as e:
             self._cleanup_partial_file()
             self.finished_error.emit(str(e))

@@ -600,6 +600,9 @@ class MainWindow(Ui_MainWindow):
         worker.finished_error.connect(
             lambda message, w=worker, p=progress: self.on_update_download_error(message, w, p)
         )
+        worker.cancelled.connect(
+            lambda w=worker, p=progress: self.on_update_download_cancelled(w, p)
+        )
         worker.start()
         progress.show()
 
@@ -640,8 +643,13 @@ class MainWindow(Ui_MainWindow):
             return
         self.update_download_worker = None
         progress.close()
-        if message != "キャンセルされました":
-            QMessageBox.critical(self, "アップデートのダウンロードに失敗しました", message)
+        QMessageBox.critical(self, "アップデートのダウンロードに失敗しました", message)
+
+    def on_update_download_cancelled(self, worker: UpdateDownloadWorker, progress: QProgressDialog) -> None:
+        if worker is not self.update_download_worker:
+            return
+        self.update_download_worker = None
+        progress.close()
 
     def set_inputs_enabled(self, enabled: bool) -> None:
         for widget in self.input_widgets:

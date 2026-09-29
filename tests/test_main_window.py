@@ -1111,10 +1111,17 @@ class UpdateDownloadCallbackTest(MainWindowTestCase):
         self.window.update_download_worker = worker
 
         with patch.object(QMessageBox, "critical") as critical_mock:
-            self.window.on_update_download_error("キャンセルされました", worker, progress)
+            self.window.on_update_download_cancelled(worker, progress)
 
         progress.close.assert_called_once()
         critical_mock.assert_not_called()
+        self.assertIsNone(self.window.update_download_worker)
+
+    def test_stale_cancellation_is_ignored(self):
+        self.window.update_download_worker = MagicMock()
+        progress = MagicMock()
+        self.window.on_update_download_cancelled(MagicMock(), progress)
+        progress.close.assert_not_called()
 
 
 class CloseEventUpdateApplyTest(MainWindowTestCase):

@@ -252,14 +252,16 @@ class UpdateDownloadWorkerTest(unittest.TestCase):
                 return b"a" * 10
 
             resp.read.side_effect = fake_read
-            results = {"ok": [], "error": []}
+            results = {"ok": [], "error": [], "cancelled": []}
             worker.finished_ok.connect(lambda p: results["ok"].append(p))
             worker.finished_error.connect(lambda m: results["error"].append(m))
+            worker.cancelled.connect(lambda: results["cancelled"].append(True))
 
             with patch("updater.urllib.request.urlopen", return_value=resp):
                 worker.run()
 
-            self.assertEqual(results["error"], ["キャンセルされました"])
+            self.assertEqual(results["cancelled"], [True])
+            self.assertEqual(results["error"], [])
             self.assertFalse(os.path.isfile(dest))
 
     def test_network_failure_is_reported_and_cleans_up_partial_file(self):
