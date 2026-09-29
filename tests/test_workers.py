@@ -14,13 +14,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
-from workers import DownloadWorker, FormatListWorker, StoryboardFragmentWorker
+from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker, _base_ydl_opts
 
 
 def make_worker(**kwargs):
     defaults = dict(url="https://example.com/watch?v=x", out_dir="C:/out", format_spec="b")
     defaults.update(kwargs)
-    return DownloadWorker(**defaults)
+    return DownloadWorker(DownloadRequest(**defaults))
 
 
 class ThumbnailUrlCandidatesTest(unittest.TestCase):
@@ -378,15 +378,15 @@ class BuildTitleTest(unittest.TestCase):
         self.assertEqual(worker._build_title({}), "video")
 
     def test_clip_range_appends_label_to_distinguish_from_full_video(self):
-        worker = make_worker(start_time=60.0, end_time=120.0)
+        worker = make_worker(clip_start=60.0, clip_end=120.0)
         self.assertEqual(worker._build_title({"title": "My Video"}), "My Video [1:00-2:00]")
 
     def test_open_ended_clip_range_leaves_end_side_empty(self):
-        worker = make_worker(start_time=60.0)
+        worker = make_worker(clip_start=60.0)
         self.assertEqual(worker._build_title({"title": "My Video"}), "My Video [1:00-]")
 
     def test_open_start_clip_range_leaves_start_side_empty(self):
-        worker = make_worker(end_time=120.0)
+        worker = make_worker(clip_end=120.0)
         self.assertEqual(worker._build_title({"title": "My Video"}), "My Video [-2:00]")
 
 
@@ -435,7 +435,7 @@ class ProgressHookTest(unittest.TestCase):
 
     def test_downloading_emits_progress_and_logs_format_once(self):
         worker = make_worker()
-        worker._start_time = 0.0
+        worker._started_at = 0.0
         worker._component_ids = ["137"]
         worker._component_weights = [1.0]
         progress_events = []
@@ -459,7 +459,7 @@ class ProgressHookTest(unittest.TestCase):
 
     def test_finished_status_advances_completed_weight_and_component_index(self):
         worker = make_worker()
-        worker._start_time = 0.0
+        worker._started_at = 0.0
         worker._component_ids = ["137", "140"]
         worker._component_weights = [0.7, 0.3]
         progress_events = []
@@ -537,7 +537,7 @@ class BuildFormatSelectorTest(unittest.TestCase):
 
 class TrimClipLocallyDelegatesTest(unittest.TestCase):
     def test_passes_final_file_and_clip_range_to_trim_clip(self):
-        worker = make_worker(start_time=10.0, end_time=30.0)
+        worker = make_worker(clip_start=10.0, clip_end=30.0)
         worker._final_filepath = "C:/out/My Video.mp4"
         with patch("workers.trim_clip") as trim_mock:
             worker._trim_clip_locally()
@@ -694,6 +694,57 @@ class RunErrorHandlingTest(unittest.TestCase):
             self._run_with(tmp, RuntimeError("boom"))
 
             self.assertEqual(os.listdir(tmp), [])
+
+
+class DownloadRequestTest(unittest.TestCase):
+    def test_has_clip(self):
+        base = dict(url="u", out_dir="o", format_spec="b")
+        self.assertFalse(DownloadRequest(**base).has_clip)
+        self.assertTrue(DownloadRequest(**base, clip_start=1.0).has_clip)
+        self.assertTrue(DownloadRequest(**base, clip_end=2.0).has_clip)
+
+
+class BaseYdlOptsTest(unittest.TestCase):
+    def test_minimal(self):
+        self.assertEqual(_base_ydl_opts(), {"quiet": True, "no_warnings": True, "noplaylist": True})
+
+    def test_optional_keys(self):
+        opts = _base_ydl_opts(["res"], "C:/ffmpeg")
+        self.assertEqual(opts["format_sort"], ["res"])
+        self.assertEqual(opts["ffmpeg_location"], "C:/ffmpeg")
+
+
+class CancelDuringPostprocessKeepsFinalFileTest(unittest.TestCase):
+    """Review Focus 2: download()が例外なく戻った後にキャンセル済みだった場合
+    (後処理中のキャンセル)、完成済みファイルは残し.partだけを消す"""
+
+    def test_keeps_final_and_removes_part(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            final_path = os.path.join(tmp, "My Video.mp4")
+
+            def fake_download(urls):
+                open(final_path, "w").close()
+                open(os.path.join(tmp, "My Video.f137.mp4.part"), "w").close()
+                worker._final_filepath = final_path
+                worker.cancel()
+
+            def factory(opts):
+                ydl = MagicMock()
+                ydl.__enter__.return_value = ydl
+                ydl.__exit__.return_value = False
+                ydl.extract_info.return_value = {"title": "My Video", "ext": "mp4"}
+                ydl.download.side_effect = fake_download
+                return ydl
+
+            errors = []
+            worker.finished_error.connect(errors.append)
+            with patch("workers.get_ffmpeg_location", return_value=None), \
+                 patch("workers.yt_dlp.YoutubeDL", side_effect=factory):
+                worker.run()
+
+            self.assertEqual(errors, ["キャンセルされました"])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
 
 
 if __name__ == "__main__":

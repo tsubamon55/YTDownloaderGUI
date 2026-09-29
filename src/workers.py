@@ -4,19 +4,52 @@ import os
 import re
 import time
 import urllib.request
+from dataclasses import dataclass, field
+from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
-from clip_range import clip_range_label
+from clip_range import clip_range_label, format_clip_time
 from clip_trimmer import trim_clip
 from config import CONFIG
 from errors import describe_error
 from formats import format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug, remove_file_quietly
 from yt_dlp_selection import make_filtering_format_selector
+
+def _base_ydl_opts(format_sort: list[str] | None = None, ffmpeg_location: str | None = None) -> dict[str, Any]:
+    """このアプリの全てのYoutubeDL呼び出しに共通するオプション(出力の抑止・プレイリスト展開の無効化)"""
+    opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    if format_sort:
+        opts["format_sort"] = format_sort
+    if ffmpeg_location:
+        opts["ffmpeg_location"] = ffmpeg_location
+    return opts
+
+
+@dataclass(frozen=True)
+class DownloadRequest:
+    """DownloadWorkerに渡す、ダウンロード1件分の指定"""
+
+    url: str
+    out_dir: str
+    format_spec: str
+    postprocessors: list[dict] = field(default_factory=list)
+    format_sort: list[str] | None = None
+    # 自動設定ではコンテナ/コーデック不一致の非推奨フォーマットを候補から外す
+    # (手動設定でユーザーが明示的に選んだIDはそのまま尊重するためFalse)
+    exclude_mismatched: bool = False
+    # 切り抜き範囲(秒)。Noneは「先頭から」「末尾まで」
+    clip_start: float | None = None
+    clip_end: float | None = None
+
+    @property
+    def has_clip(self) -> bool:
+        return self.clip_start is not None or self.clip_end is not None
+
 
 class FormatListWorker(QThread):
     # 4番目の要素(動画の長さ・秒)はNoneを取り得るためobject型で宣言する
@@ -67,15 +100,8 @@ class FormatListWorker(QThread):
 
     def run(self):
         try:
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "skip_download": True,
-            }
-            ffmpeg_location = get_ffmpeg_location()
-            if ffmpeg_location:
-                ydl_opts["ffmpeg_location"] = ffmpeg_location
+            ydl_opts = _base_ydl_opts(ffmpeg_location=get_ffmpeg_location())
+            ydl_opts["skip_download"] = True
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(self.url, download=False)
@@ -134,30 +160,13 @@ class DownloadWorker(QThread):
     finished_ok = pyqtSignal()
     finished_error = pyqtSignal(str)
 
-    def __init__(
-        self,
-        url: str,
-        out_dir: str,
-        format_spec: str,
-        postprocessors: list | None = None,
-        format_sort: list | None = None,
-        exclude_mismatched: bool = False,
-        start_time: float | None = None,
-        end_time: float | None = None,
-    ):
+    def __init__(self, request: DownloadRequest):
         super().__init__()
-        self.url = url
-        self.out_dir = out_dir
-        self.format_spec = format_spec
-        self.postprocessors = postprocessors or []
-        self.format_sort = format_sort
-        self.exclude_mismatched = exclude_mismatched
-        self.start_time = start_time
-        self.end_time = end_time
+        self.request = request
         self._is_cancelled = False
         self._logged_format_ids: set[str] = set()
         self._final_filepath: str | None = None
-        self._start_time: float | None = None
+        self._started_at: float | None = None
         self._active_postprocessors: dict[str, int] = {}
         self._unique_title: str | None = None
         self._preexisting_names: set[str] = set()
@@ -189,11 +198,11 @@ class DownloadWorker(QThread):
         前回の失敗の残骸であり今回も消してよいので、保護対象から外す。
         """
         self._preexisting_names = set()
-        if not self._unique_title or not os.path.isdir(self.out_dir):
+        if not self._unique_title or not os.path.isdir(self.request.out_dir):
             return
         prefix = f"{self._unique_title}."
         try:
-            names = os.listdir(self.out_dir)
+            names = os.listdir(self.request.out_dir)
         except OSError as e:
             log_debug(f"_snapshot_preexisting_files: 保存先の一覧取得に失敗 ({e!r})")
             return
@@ -212,18 +221,18 @@ class DownloadWorker(QThread):
         削除対象から除外する。本編の生成自体は成功し、その後のサムネイル埋め込み等の
         後処理だけが失敗したケースで、完成済みファイルまで消してしまわないようにするため。
         """
-        if not self._unique_title or not os.path.isdir(self.out_dir):
+        if not self._unique_title or not os.path.isdir(self.request.out_dir):
             return
         prefix = f"{self._unique_title}."
         keep_path = None
         if preserve_final and self._final_filepath and os.path.isfile(self._final_filepath):
             keep_path = os.path.normcase(os.path.abspath(self._final_filepath))
-        for name in os.listdir(self.out_dir):
+        for name in os.listdir(self.request.out_dir):
             if not name.startswith(prefix):
                 continue
             if os.path.normcase(name) in self._preexisting_names:
                 continue
-            path = os.path.join(self.out_dir, name)
+            path = os.path.join(self.request.out_dir, name)
             if keep_path and os.path.normcase(os.path.abspath(path)) == keep_path:
                 continue
             if remove_file_quietly(path, "_cleanup_leftover_files"):
@@ -277,75 +286,77 @@ class DownloadWorker(QThread):
             return f"{hours}:{minutes:02d}:{secs:02d}"
         return f"{minutes:02d}:{secs:02d}"
 
-    def _progress_hook(self, d):
+    def _component_index(self, fmt_id: str | None) -> int:
+        """進捗フックが報告しているのが何番目のコンポーネント(映像/音声)かを求める"""
+        if fmt_id in self._component_ids:
+            return self._component_ids.index(fmt_id)
+        return self._current_component_index
+
+    def _progress_hook(self, hook_info: dict) -> None:
         if self._is_cancelled:
             raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
 
-        status = d.get("status")
+        status = hook_info.get("status")
         if status == "downloading":
-            info = d.get("info_dict") or {}
-            fmt_id = info.get("format_id")
-            if fmt_id and fmt_id not in self._logged_format_ids:
-                self._logged_format_ids.add(fmt_id)
-                self.log.emit(self._describe_selected_format(info))
-
-            if fmt_id in self._component_ids:
-                component_index = self._component_ids.index(fmt_id)
-            else:
-                component_index = self._current_component_index
-            component_weight = (
-                self._component_weights[component_index]
-                if component_index < len(self._component_weights)
-                else 0.0
-            )
-
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            downloaded = d.get("downloaded_bytes", 0)
-            component_percent = downloaded / total if total else 0.0
-            percent = min((self._completed_weight + component_weight * component_percent) * 100, 100.0)
-
-            # コンポーネント切り替え時に残り時間表示が乱高下しないよう、
-            # 全体の経過時間と進捗率から残り時間を推定する
-            elapsed = time.monotonic() - self._start_time if self._start_time else 0.0
-            if percent > 0:
-                eta = self._format_eta(elapsed * (100 - percent) / percent)
-            else:
-                eta = "--:--"
-            speed = d.get("_speed_str", "").strip()
-            self.progress.emit(percent, f"{percent:.1f}% 速度:{speed} 残り:{eta}")
+            self._on_component_downloading(hook_info)
         elif status == "finished":
-            filename = d.get("filename")
-            if filename:
-                self.log.emit(f"コンポーネントのダウンロード完了: {os.path.basename(filename)}")
-            info = d.get("info_dict") or {}
-            fmt_id = info.get("format_id")
-            if fmt_id in self._component_ids:
-                component_index = self._component_ids.index(fmt_id)
-            else:
-                component_index = self._current_component_index
-            if component_index < len(self._component_weights):
-                self._completed_weight += self._component_weights[component_index]
-            self._current_component_index = component_index + 1
+            self._on_component_finished(hook_info)
 
-            if self._current_component_index >= len(self._component_weights):
-                self.progress.emit(100.0, "ダウンロード完了、後処理中...")
-            else:
-                self.progress.emit(min(self._completed_weight * 100, 100.0), "次のコンポーネントを準備中...")
+    def _on_component_downloading(self, hook_info: dict) -> None:
+        info = hook_info.get("info_dict") or {}
+        fmt_id = info.get("format_id")
+        if fmt_id and fmt_id not in self._logged_format_ids:
+            self._logged_format_ids.add(fmt_id)
+            self.log.emit(self._describe_selected_format(info))
+
+        component_index = self._component_index(fmt_id)
+        component_weight = (
+            self._component_weights[component_index]
+            if component_index < len(self._component_weights)
+            else 0.0
+        )
+
+        total = hook_info.get("total_bytes") or hook_info.get("total_bytes_estimate")
+        downloaded = hook_info.get("downloaded_bytes", 0)
+        component_percent = downloaded / total if total else 0.0
+        percent = min((self._completed_weight + component_weight * component_percent) * 100, 100.0)
+
+        # コンポーネント切り替え時に残り時間表示が乱高下しないよう、
+        # 全体の経過時間と進捗率から残り時間を推定する
+        elapsed = time.monotonic() - self._started_at if self._started_at else 0.0
+        eta = self._format_eta(elapsed * (100 - percent) / percent) if percent > 0 else "--:--"
+        speed = hook_info.get("_speed_str", "").strip()
+        self.progress.emit(percent, f"{percent:.1f}% 速度:{speed} 残り:{eta}")
+
+    def _on_component_finished(self, hook_info: dict) -> None:
+        filename = hook_info.get("filename")
+        if filename:
+            self.log.emit(f"コンポーネントのダウンロード完了: {os.path.basename(filename)}")
+        info = hook_info.get("info_dict") or {}
+        component_index = self._component_index(info.get("format_id"))
+        if component_index < len(self._component_weights):
+            self._completed_weight += self._component_weights[component_index]
+        self._current_component_index = component_index + 1
+
+        if self._current_component_index >= len(self._component_weights):
+            self.progress.emit(100.0, "ダウンロード完了、後処理中...")
+        else:
+            self.progress.emit(min(self._completed_weight * 100, 100.0), "次のコンポーネントを準備中...")
 
     THUMBNAIL_EMBEDDABLE_EXTS = {
         "mp3", "mkv", "mka", "ogg", "opus", "flac", "m4a", "mp4", "m4v", "mov",
     }
 
-    def _postprocessor_hook(self, d):
-        status = d.get("status")
-        name = d.get("postprocessor", "")
+    def _postprocessor_hook(self, hook_info: dict) -> None:
+        status = hook_info.get("status")
+        name = hook_info.get("postprocessor", "")
         if status == "started":
             count = self._active_postprocessors.get(name, 0)
             self._active_postprocessors[name] = count + 1
             if count == 0:
                 self.log.emit(f"後処理開始: {name}")
         elif status == "finished":
-            info = d.get("info_dict") or {}
+            info = hook_info.get("info_dict") or {}
             filepath = info.get("filepath")
             if filepath:
                 self._final_filepath = filepath
@@ -355,7 +366,7 @@ class DownloadWorker(QThread):
                 self.log.emit(f"後処理完了: {name}")
 
     def _expected_ext(self, probe_info: dict) -> str | None:
-        for pp in self.postprocessors:
+        for pp in self.request.postprocessors:
             if pp.get("key") != "FFmpegExtractAudio":
                 continue
             preferred = pp.get("preferredcodec")
@@ -374,23 +385,23 @@ class DownloadWorker(QThread):
         """フル動画のダウンロードと保存先ファイルが混同されないよう、クリップ範囲を
         指定した場合はタイトルに範囲を付記する(例: "Title [1:00-2:00]")"""
         title = probe_info.get("title") or "video"
-        clip_label = clip_range_label(self.start_time, self.end_time)
+        clip_label = clip_range_label(self.request.clip_start, self.request.clip_end)
         if clip_label:
             title = f"{title} [{clip_label}]"
         return title
 
     def _resolve_unique_title(self, title: str, expected_ext: str | None) -> str:
         sanitized = yt_dlp.utils.sanitize_filename(title, restricted=False)
-        if not os.path.isdir(self.out_dir):
+        if not os.path.isdir(self.request.out_dir):
             return sanitized
 
         def conflicts(stem: str) -> bool:
             if expected_ext is None:
                 # 最終拡張子が特定できない場合は、同名の拡張子違いも含めて衝突とみなす
                 return any(
-                    os.path.splitext(name)[0] == stem for name in os.listdir(self.out_dir)
+                    os.path.splitext(name)[0] == stem for name in os.listdir(self.request.out_dir)
                 )
-            return os.path.isfile(os.path.join(self.out_dir, f"{stem}.{expected_ext}"))
+            return os.path.isfile(os.path.join(self.request.out_dir, f"{stem}.{expected_ext}"))
 
         if not conflicts(sanitized):
             return sanitized
@@ -405,16 +416,16 @@ class DownloadWorker(QThread):
         """自動設定ではコンテナ/コーデックが一致しない非推奨フォーマットを候補から
         完全に除外した上でformat_specを解決する。手動設定でユーザーが明示的にIDを
         指定した場合はexclude_mismatched=Falseとなり、そのまま尊重する。"""
-        if not self.exclude_mismatched:
-            return self.format_spec
-        return make_filtering_format_selector(self.format_spec, is_codec_container_mismatch)
+        if not self.request.exclude_mismatched:
+            return self.request.format_spec
+        return make_filtering_format_selector(self.request.format_spec, is_codec_container_mismatch)
 
     def _trim_clip_locally(self) -> None:
         """ダウンロード済みの最終ファイルを切り抜き範囲で切り出す(詳細はclip_trimmer参照)"""
-        trim_clip(self._final_filepath, self.start_time, self.end_time, self.log.emit)
+        trim_clip(self._final_filepath, self.request.clip_start, self.request.clip_end, self.log.emit)
 
     def run(self):
-        self._start_time = time.monotonic()
+        self._started_at = time.monotonic()
         try:
             ffmpeg_location = get_ffmpeg_location()
             if ffmpeg_location:
@@ -423,72 +434,19 @@ class DownloadWorker(QThread):
                 # そちらが参照するcontextvarにも明示的に設定しておく
                 FFmpegPostProcessor._ffmpeg_location.set(ffmpeg_location)
 
-            self.log.emit(f"開始: {self.url}")
-            if self.start_time is not None or self.end_time is not None:
-                start_text = self._format_eta(self.start_time) if self.start_time is not None else "先頭"
-                end_text = self._format_eta(self.end_time) if self.end_time is not None else "末尾"
-                self.log.emit(f"切り抜き範囲: {start_text} 〜 {end_text}")
-
+            self._log_request()
             format_selector = self._build_format_selector()
-            probe_opts = {
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "format": format_selector,
-            }
-            if self.format_sort:
-                probe_opts["format_sort"] = self.format_sort
-            with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
-                probe_info = probe_ydl.extract_info(self.url, download=False)
-            expected_ext = self._expected_ext(probe_info)
-            self._unique_title = self._resolve_unique_title(self._build_title(probe_info), expected_ext)
-            self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
-            self._snapshot_preexisting_files()
-            self._init_component_weights(probe_info)
+            probe_info = self._probe(format_selector)
+            expected_ext = self._prepare_output_name(probe_info)
 
-            ydl_opts = {
-                "outtmpl": os.path.join(self.out_dir, f"{self._unique_title}.%(ext)s"),
-                "progress_hooks": [self._progress_hook],
-                "postprocessor_hooks": [self._postprocessor_hook],
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "format": format_selector,
-                "writethumbnail": True,
-                "postprocessors": list(self.postprocessors),
-            }
-            if expected_ext in self.THUMBNAIL_EMBEDDABLE_EXTS:
-                ydl_opts["postprocessors"].append({"key": "EmbedThumbnail"})
-            else:
-                ydl_opts["writethumbnail"] = False
-
-            if self.format_sort:
-                ydl_opts["format_sort"] = self.format_sort
-
-            if ffmpeg_location:
-                ydl_opts["ffmpeg_location"] = ffmpeg_location
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([self.url])
+            download_opts = self._build_download_opts(format_selector, expected_ext, ffmpeg_location)
+            with yt_dlp.YoutubeDL(download_opts) as ydl:
+                ydl.download([self.request.url])
 
             if self._is_cancelled:
-                # download()が例外を投げずに戻ってきた=本編のダウンロードも後処理も
-                # 完了している。後処理中にキャンセルを押した場合がこれにあたるため、
-                # 完成済みの最終ファイルは削除せずに残す(未完成の中間ファイルのみ削除)
-                self._cleanup_leftover_files(preserve_final=True)
-                if self._final_filepath and os.path.isfile(self._final_filepath):
-                    self.log.emit(f"完成済みのファイルは残しました: {self._final_filepath}")
-                self.finished_error.emit("キャンセルされました")
+                self._finish_cancelled_after_download()
             else:
-                if self.start_time is not None or self.end_time is not None:
-                    self._trim_clip_locally()
-                elapsed = time.monotonic() - self._start_time
-                if self._final_filepath and os.path.isfile(self._final_filepath):
-                    size = format_size(os.path.getsize(self._final_filepath))
-                    self.log.emit(f"保存先: {self._final_filepath} ({size})")
-                self.log.emit(f"所要時間: {elapsed:.1f}秒")
-                self.log.emit("完了しました")
-                self.finished_ok.emit()
+                self._finish_success()
         except Exception as e:
             # キャンセル・ネットワーク切断・その他の失敗いずれの場合も、保存先に
             # 中途半端な.part等のファイルが残らないよう必ず削除する。ただし本編の
@@ -498,3 +456,64 @@ class DownloadWorker(QThread):
             message = str(e) if self._is_cancelled else describe_error(e, "ダウンロード")
             self.log.emit(f"エラー: {message}")
             self.finished_error.emit(message)
+
+    def _log_request(self) -> None:
+        self.log.emit(f"開始: {self.request.url}")
+        if self.request.has_clip:
+            start = self.request.clip_start
+            end = self.request.clip_end
+            start_text = format_clip_time(start) if start is not None else "先頭"
+            end_text = format_clip_time(end) if end is not None else "末尾"
+            self.log.emit(f"切り抜き範囲: {start_text} 〜 {end_text}")
+
+    def _probe(self, format_selector) -> dict:
+        """実ダウンロードの前に情報だけを取得し、保存ファイル名・拡張子・進捗の重み付けに使う"""
+        probe_opts = _base_ydl_opts(self.request.format_sort)
+        probe_opts["format"] = format_selector
+        with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
+            return probe_ydl.extract_info(self.request.url, download=False)
+
+    def _prepare_output_name(self, probe_info: dict) -> str | None:
+        """保存ファイル名(拡張子除く)を確定し、失敗時の後片付けの準備をする。最終拡張子の見込みを返す"""
+        expected_ext = self._expected_ext(probe_info)
+        self._unique_title = self._resolve_unique_title(self._build_title(probe_info), expected_ext)
+        self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
+        self._snapshot_preexisting_files()
+        self._init_component_weights(probe_info)
+        return expected_ext
+
+    def _build_download_opts(self, format_selector, expected_ext: str | None, ffmpeg_location: str | None) -> dict:
+        opts = _base_ydl_opts(self.request.format_sort, ffmpeg_location)
+        opts.update({
+            "outtmpl": os.path.join(self.request.out_dir, f"{self._unique_title}.%(ext)s"),
+            "progress_hooks": [self._progress_hook],
+            "postprocessor_hooks": [self._postprocessor_hook],
+            "format": format_selector,
+            "writethumbnail": True,
+            "postprocessors": list(self.request.postprocessors),
+        })
+        if expected_ext in self.THUMBNAIL_EMBEDDABLE_EXTS:
+            opts["postprocessors"].append({"key": "EmbedThumbnail"})
+        else:
+            opts["writethumbnail"] = False
+        return opts
+
+    def _finish_cancelled_after_download(self) -> None:
+        # download()が例外を投げずに戻ってきた=本編のダウンロードも後処理も
+        # 完了している。後処理中にキャンセルを押した場合がこれにあたるため、
+        # 完成済みの最終ファイルは削除せずに残す(未完成の中間ファイルのみ削除)
+        self._cleanup_leftover_files(preserve_final=True)
+        if self._final_filepath and os.path.isfile(self._final_filepath):
+            self.log.emit(f"完成済みのファイルは残しました: {self._final_filepath}")
+        self.finished_error.emit("キャンセルされました")
+
+    def _finish_success(self) -> None:
+        if self.request.has_clip:
+            self._trim_clip_locally()
+        elapsed = time.monotonic() - self._started_at
+        if self._final_filepath and os.path.isfile(self._final_filepath):
+            size = format_size(os.path.getsize(self._final_filepath))
+            self.log.emit(f"保存先: {self._final_filepath} ({size})")
+        self.log.emit(f"所要時間: {elapsed:.1f}秒")
+        self.log.emit("完了しました")
+        self.finished_ok.emit()

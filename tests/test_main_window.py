@@ -653,9 +653,9 @@ class StartDownloadValidationTest(MainWindowTestCase):
             worker_cls.return_value = MagicMock()
             self.window.start_download()
 
-        _, kwargs = worker_cls.call_args
-        self.assertEqual(kwargs["start_time"], 60.0)
-        self.assertEqual(kwargs["end_time"], 120.0)
+        request = worker_cls.call_args.args[0]
+        self.assertEqual(request.clip_start, 60.0)
+        self.assertEqual(request.clip_end, 120.0)
 
     def test_invalid_clip_range_shows_warning_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")

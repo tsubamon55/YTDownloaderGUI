@@ -41,7 +41,7 @@ from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_locat
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
 from updater import UpdateCheckWorker, UpdateDownloadWorker, apply_downloaded_update, download_dir
 from widgets import ScrubPreviewPopup
-from workers import DownloadWorker, FormatListWorker, StoryboardFragmentWorker
+from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
 
 class MainWindow(Ui_MainWindow):
@@ -785,11 +785,16 @@ class MainWindow(Ui_MainWindow):
         self.status_label.setText("ダウンロード中...")
         self.spinner.start()
 
-        self.worker = DownloadWorker(
-            url, out_dir, format_spec, postprocessors, format_sort,
+        self.worker = DownloadWorker(DownloadRequest(
+            url=url,
+            out_dir=out_dir,
+            format_spec=format_spec,
+            postprocessors=postprocessors,
+            format_sort=format_sort,
             exclude_mismatched=not self.manual_toggle_btn.isChecked(),
-            start_time=clip_start, end_time=clip_end,
-        )
+            clip_start=clip_start,
+            clip_end=clip_end,
+        ))
         self.worker.progress.connect(self.on_progress)
         self.worker.log.connect(self.append_log)
         self.worker.finished_ok.connect(self.on_finished_ok)
