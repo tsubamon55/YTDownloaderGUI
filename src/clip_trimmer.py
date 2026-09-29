@@ -209,9 +209,9 @@ def _trim_output_options(
 
     -map 0で全ストリーム(本編映像・音声に加えmkvの添付ファイルなど)を出力対象に
     含めつつ、埋め込みサムネイル(attached_pic)だけは-map -0:Nで除外する
-    (理由は_extract_attached_pics参照: 出力側の正確シークは低pts(通常0)の
+    (理由はextract_attached_pics参照: 出力側の正確シークは低pts(通常0)の
     静止画1コマも問答無用で切り捨ててしまうため、切り抜き本体には含めず
-    後段のos.replace後に_reattach_thumbnailsで単純コピーのみで付け直す)。
+    後段のos.replace後にreattach_thumbnailsで単純コピーのみで付け直す)。
     音声・添付ファイルは常にコピーする。本編映像(-c:v:0)は、対応コーデックなら
     専用エンコーダ+CRFで、非対応コーデック(HEVC/AV1等)は何も指定せずffmpeg既定の
     エンコーダにフォールバックさせる(ここを"-c copy"にすると非対応コーデック時に
