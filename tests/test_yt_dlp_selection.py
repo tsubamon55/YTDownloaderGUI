@@ -11,7 +11,15 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from yt_dlp_selection import make_filtering_format_selector, select_formats
+import yt_dlp
+
+from yt_dlp_selection import (
+    EXCLUDE_FORMATS_PP_KEY,
+    ExcludeFormatsPP,
+    add_format_exclusion,
+    make_filtering_format_selector,
+    select_formats,
+)
 
 
 def make_video(format_id, ext, vcodec, height, width=None):
@@ -23,6 +31,7 @@ def make_video(format_id, ext, vcodec, height, width=None):
         "height": height,
         "width": width or int(height * 16 / 9),
         "protocol": "https",
+        "url": f"https://example.com/{format_id}",
     }
 
 
@@ -34,7 +43,13 @@ def make_audio(format_id, ext, acodec, abr=128):
         "acodec": acodec,
         "abr": abr,
         "protocol": "https",
+        "url": f"https://example.com/{format_id}",
     }
+
+
+def make_info(formats):
+    """process_ie_resultに渡せる最小限の動画情報(extractorは候補が無いときのエラー組み立てに必須)"""
+    return {"id": "x", "title": "x", "extractor": "generic", "extractor_key": "Generic", "formats": formats}
 
 
 class SelectFormatsTest(unittest.TestCase):
@@ -90,6 +105,73 @@ class MakeFilteringFormatSelectorTest(unittest.TestCase):
     def test_returns_callable(self):
         selector = make_filtering_format_selector("b", lambda f: False)
         self.assertTrue(callable(selector))
+
+
+class ExcludeFormatsPPTest(unittest.TestCase):
+    def test_removes_matching_formats(self):
+        pp = ExcludeFormatsPP(lambda f: f["format_id"] == "137")
+        files, info = pp.run({"formats": [
+            make_video("137", "mp4", "avc1.640028", height=1080),
+            make_audio("140", "m4a", "mp4a.40.2"),
+        ]})
+        self.assertEqual(files, [])
+        self.assertEqual([f["format_id"] for f in info["formats"]], ["140"])
+
+    def test_info_without_formats_is_returned_unchanged(self):
+        pp = ExcludeFormatsPP(lambda f: True)
+        files, info = pp.run({"id": "x"})
+        self.assertEqual(files, [])
+        self.assertEqual(info, {"id": "x"})
+
+    def test_pp_key_matches_constant(self):
+        self.assertEqual(EXCLUDE_FORMATS_PP_KEY, "ExcludeFormats")
+
+
+class AddFormatExclusionTest(unittest.TestCase):
+    """実際のyt-dlpで、pre_processで除いたフォーマットが選択候補から外れることを確認する(ネットワークなし)"""
+
+    def setUp(self):
+        self.formats = [
+            make_video("137", "mp4", "avc1.640028", height=1080),
+            # YouTubeが高解像度で出す「mp4だが中身はVP9」のフォーマット
+            make_video("616", "mp4", "vp09.00.50.08", height=2160),
+            make_audio("140", "m4a", "mp4a.40.2"),
+        ]
+
+    def _select(self, formats, format_spec, exclude=None, extra_opts=None):
+        opts = {"quiet": True, "no_warnings": True, "format": format_spec, **(extra_opts or {})}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            if exclude is not None:
+                add_format_exclusion(ydl, exclude)
+            return ydl.process_ie_result(make_info(formats), download=False)
+
+    def test_without_exclusion_highest_resolution_is_selected(self):
+        """対照: 除外しなければ2160pが選ばれる(下のテストが意味を持つことの確認)"""
+        self.assertEqual(self._select(self.formats, "bv*+ba/b")["format_id"], "616+140")
+
+    def test_excluded_format_is_not_selected(self):
+        selected = self._select(self.formats, "bv*+ba/b", exclude=lambda f: f["format_id"] == "616")
+        self.assertEqual(selected["format_id"], "137+140")
+
+    def test_audio_with_mismatched_codec_is_excluded(self):
+        formats = [
+            make_audio("140", "m4a", "mp4a.40.2", abr=128),
+            make_audio("999", "m4a", "opus", abr=160),
+        ]
+        selected = self._select(formats, "ba[ext=m4a]", exclude=lambda f: f["format_id"] == "999")
+        self.assertEqual(selected["format_id"], "140")
+
+    def test_error_when_all_candidates_are_excluded(self):
+        with self.assertRaises((yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError)):
+            self._select(self.formats, "bv*+ba/b", exclude=lambda f: True)
+
+    def test_hook_reports_pp_key(self):
+        seen = []
+        self._select(
+            self.formats, "bv*+ba/b", exclude=lambda f: False,
+            extra_opts={"postprocessor_hooks": [lambda d: seen.append(d["postprocessor"])]},
+        )
+        self.assertEqual(set(seen), {EXCLUDE_FORMATS_PP_KEY})
 
 
 if __name__ == "__main__":

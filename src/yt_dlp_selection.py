@@ -13,8 +13,8 @@ ctx dictを引数に取る。このctxの組み立て自体はyt_dlp.YoutubeDL._
 一本化し、tests/test_yt_dlp_selection.pyで直接検証することで、yt-dlpの更新時に
 真っ先にここで検知できるようにする。
 
-運用ルール: requirements.txtのyt-dlpはバージョンを固定している。更新する際は
-バージョンを上げてから`python -m unittest discover -s tests`を実行し、
+運用ルール: requirements.inのyt-dlpはバージョンを固定している。更新する際は
+バージョンを上げてロックファイルを再生成してから`python -m unittest discover -s tests`を実行し、
 tests/test_yt_dlp_selection.pyが通ることを確認すること。落ちた場合はyt-dlp側の
 YoutubeDL._select_formats/build_format_selectorの実装差分を確認し、このファイルの
 _build_ctxを追従させる。
@@ -24,6 +24,7 @@ from collections.abc import Callable
 from typing import Any
 
 import yt_dlp
+from yt_dlp.postprocessor import PostProcessor
 
 
 def _build_ctx(formats: list[dict]) -> dict:
@@ -73,3 +74,31 @@ def make_filtering_format_selector(
         return base_selector(_build_ctx(filtered_formats))
 
     return selector
+
+
+class ExcludeFormatsPP(PostProcessor):
+    """フォーマット選択の直前(when="pre_process")に、excludeに一致するフォーマットを候補から取り除く。
+
+    yt-dlpはpre_processの実行後に info["formats"] を読み直してから選択するため
+    (YoutubeDL.process_video_resultの "The pre-processors may have modified the formats")、
+    ここで取り除いたフォーマットは選ばれない。
+    """
+
+    def __init__(self, exclude: Callable[[dict], bool]):
+        super().__init__()
+        self._exclude = exclude
+
+    def run(self, info: dict) -> tuple[list, dict]:
+        formats = info.get("formats")
+        if formats is not None:
+            info["formats"] = [f for f in formats if not self._exclude(f)]
+        return [], info
+
+
+# postprocessor_hooksに通知される名前(クラス名から末尾の"PP"を除いたもの)
+EXCLUDE_FORMATS_PP_KEY: str = ExcludeFormatsPP.pp_key()
+
+
+def add_format_exclusion(ydl: yt_dlp.YoutubeDL, exclude: Callable[[dict], bool]) -> None:
+    """ydlのフォーマット選択で、excludeに一致するフォーマットを候補から完全に除外する"""
+    ydl.add_post_processor(ExcludeFormatsPP(exclude), when="pre_process")
