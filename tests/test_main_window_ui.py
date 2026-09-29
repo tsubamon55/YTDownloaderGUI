@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from formats import FORMAT_OPTIONS
-from main_window_ui import IDLE_STATUS_TEXT, THUMBNAIL_SIZE, Ui_MainWindow, toggle_button_text
+from main_window_ui import APP_TITLE, IDLE_STATUS_TEXT, THUMBNAIL_SIZE, Ui_MainWindow, toggle_button_text, window_title
 
 _app = QApplication.instance() or QApplication(sys.argv)
 
@@ -66,6 +66,19 @@ class SetupUiTest(unittest.TestCase):
         self.assertFalse(self.window.download_btn.isEnabled())
         self.assertFalse(self.window.cancel_btn.isEnabled())
         self.assertFalse(self.window.open_folder_btn.isEnabled())
+
+    def test_window_title_without_version_is_app_name(self):
+        self.assertEqual(self.window.windowTitle(), APP_TITLE)
+
+    def test_window_title_shows_version(self):
+        window = Ui_MainWindow()
+        self.addCleanup(window.deleteLater)
+        window.setup_ui("C:/Downloads", "1.2.1")
+        self.assertEqual(window.windowTitle(), f"{APP_TITLE} v1.2.1")
+
+    def test_window_title_helper_ignores_empty_version(self):
+        self.assertEqual(window_title(None), APP_TITLE)
+        self.assertEqual(window_title(""), APP_TITLE)
 
     def test_status_label_starts_idle(self):
         self.assertEqual(self.window.status_label.text(), IDLE_STATUS_TEXT)

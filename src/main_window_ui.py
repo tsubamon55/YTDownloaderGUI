@@ -28,6 +28,8 @@ from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, Rang
 
 IDLE_STATUS_TEXT = "待機中"
 
+APP_TITLE = "YouTube 動画ダウンローダー"
+
 THUMBNAIL_SIZE = QSize(120, 68)
 
 LINK_BUTTON_STYLE = f"""
@@ -39,6 +41,11 @@ QPushButton {{
 }}
 QPushButton:hover {{ text-decoration: underline; }}
 """
+
+
+def window_title(version: str | None) -> str:
+    """ウィンドウタイトル(バージョンが分からない場合はアプリ名のみ)"""
+    return f"{APP_TITLE} v{version}" if version else APP_TITLE
 
 
 def toggle_button_text(label: str, expanded: bool) -> str:
@@ -102,8 +109,8 @@ class Ui_MainWindow(QMainWindow):
         combo.setMinimumWidth(min_width)
         return combo
 
-    def setup_ui(self, saved_out_dir: str) -> None:
-        self.setWindowTitle("YouTube 動画ダウンローダー")
+    def setup_ui(self, saved_out_dir: str, version: str | None = None) -> None:
+        self.setWindowTitle(window_title(version))
         self.resize(760, 420)
 
         central = QWidget()

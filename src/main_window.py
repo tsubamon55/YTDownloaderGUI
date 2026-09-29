@@ -42,7 +42,13 @@ from formats import (
 from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow, toggle_button_text
 from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_location, log_debug
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
-from updater import UpdateCheckWorker, UpdateDownloadWorker, apply_downloaded_update, download_dir
+from updater import (
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+    apply_downloaded_update,
+    download_dir,
+    get_current_version,
+)
 from widgets import HandleName, ScrubPreviewPopup
 from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
@@ -91,7 +97,7 @@ class MainWindow(Ui_MainWindow):
         default_out_dir = get_downloads_folder()
         saved_out_dir = self.settings.value("last_output_dir", default_out_dir, type=str)
 
-        self.setup_ui(saved_out_dir)
+        self.setup_ui(saved_out_dir, get_current_version())
         self._connect_signals()
         # 入力欄をクリックした後、ラベルや背景などフォーカスを持たない場所をクリックしても
         # カーソル/フォーカス枠が残り続けるため、アプリ全体のクリックを監視して解除する
