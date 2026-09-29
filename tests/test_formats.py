@@ -7,6 +7,10 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from formats import (
+    codec_prefix,
+    format_filesize,
+    has_audio,
+    has_video,
     describe_format_plain,
     filter_mismatched_formats,
     format_codec,
@@ -217,6 +221,45 @@ class FormatSpec1080pTest(unittest.TestCase):
         spec = format_spec_1080p("動画 (最高画質)", portrait=False)
         self.assertNotIn("ext=mp4", spec)
         self.assertTrue(spec.endswith("/b"))
+
+
+
+class FormatPredicatesTest(unittest.TestCase):
+    def test_has_video_true_for_real_codec(self):
+        self.assertTrue(has_video({"vcodec": "avc1.640028"}))
+
+    def test_has_video_false_for_none_missing_and_null(self):
+        for fmt in ({"vcodec": "none"}, {}, {"vcodec": None}):
+            self.assertFalse(has_video(fmt))
+
+    def test_has_audio_true_for_real_codec(self):
+        self.assertTrue(has_audio({"acodec": "mp4a.40.2"}))
+
+    def test_has_audio_false_for_none_missing_and_null(self):
+        for fmt in ({"acodec": "none"}, {}, {"acodec": None}):
+            self.assertFalse(has_audio(fmt))
+
+
+class FormatFilesizeTest(unittest.TestCase):
+    def test_prefers_exact_filesize(self):
+        self.assertEqual(format_filesize({"filesize": 100, "filesize_approx": 90}), 100)
+
+    def test_falls_back_to_approx(self):
+        self.assertEqual(format_filesize({"filesize": None, "filesize_approx": 90}), 90)
+
+    def test_none_when_unknown(self):
+        self.assertIsNone(format_filesize({}))
+        self.assertIsNone(format_filesize({"filesize": 0, "filesize_approx": 0}))
+
+
+class CodecPrefixTest(unittest.TestCase):
+    def test_takes_lowercased_head_before_dot(self):
+        self.assertEqual(codec_prefix("avc1.640028"), "avc1")
+        self.assertEqual(codec_prefix("VP09.00.40.08"), "vp09")
+
+    def test_empty_for_none_or_missing(self):
+        self.assertEqual(codec_prefix("none"), "")
+        self.assertEqual(codec_prefix(None), "")
 
 
 if __name__ == "__main__":

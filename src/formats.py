@@ -1,6 +1,29 @@
 """フォーマット選択肢の定義と、フォーマット情報の整形ロジック"""
 
+from typing import Any
+
 from PyQt6.QtCore import Qt
+
+# yt-dlpが返すフォーマット/動画情報の辞書。キーは動的なためdictのまま扱う
+Format = dict[str, Any]
+
+
+def has_video(fmt: Format) -> bool:
+    """映像ストリームを含むか(vcodecが未設定・"none"なら含まない)"""
+    vcodec = fmt.get("vcodec")
+    return bool(vcodec and vcodec != "none")
+
+
+def has_audio(fmt: Format) -> bool:
+    """音声ストリームを含むか(acodecが未設定・"none"なら含まない)"""
+    acodec = fmt.get("acodec")
+    return bool(acodec and acodec != "none")
+
+
+def format_filesize(fmt: Format) -> int | None:
+    """確定サイズ(filesize)、無ければ推定サイズ(filesize_approx)。どちらも不明ならNone"""
+    return fmt.get("filesize") or fmt.get("filesize_approx") or None
+
 
 FORMAT_OPTIONS = {
     # ext=mp4/m4aだけではコーデックまでは保証されない(高解像度ではYouTubeがH.264を提供せず、
@@ -103,14 +126,14 @@ CODEC_LABELS = {
 }
 
 
-def _codec_prefix(codec: str | None) -> str:
+def codec_prefix(codec: str | None) -> str:
     if not codec or codec == "none":
         return ""
     return codec.split(".")[0].lower()
 
 
 def _codec_label(codec: str | None) -> str:
-    prefix = _codec_prefix(codec)
+    prefix = codec_prefix(codec)
     if not prefix:
         return ""
     return CODEC_LABELS.get(prefix, prefix.upper())
@@ -142,8 +165,8 @@ def is_codec_container_mismatch(fmt: dict) -> bool:
     """コンテナ(ext)と実際のコーデックが一致しない、実質的に劣化コピーでしかない
     フォーマットかどうかを判定する"""
     ext = fmt.get("ext")
-    vcodec_prefix = _codec_prefix(fmt.get("vcodec"))
-    acodec_prefix = _codec_prefix(fmt.get("acodec"))
+    vcodec_prefix = codec_prefix(fmt.get("vcodec"))
+    acodec_prefix = codec_prefix(fmt.get("acodec"))
 
     if vcodec_prefix and vcodec_prefix in _MISMATCHED_VCODEC_BY_EXT.get(ext, ()):
         return True
@@ -181,46 +204,42 @@ def protocol_rank(fmt: dict) -> int:
     return _PROTOCOL_RANK.get(format_protocol(fmt), 1)
 
 
-def format_columns(fmt: dict) -> list[str]:
+def format_columns(fmt: Format) -> list[str]:
     format_id = fmt.get("format_id", "?")
     ext = fmt.get("ext", "?")
-    vcodec = fmt.get("vcodec", "none")
-    acodec = fmt.get("acodec", "none")
-    has_video = bool(vcodec and vcodec != "none")
-    has_audio = bool(acodec and acodec != "none")
+    video = has_video(fmt)
+    audio = has_audio(fmt)
 
-    if has_video and has_audio:
+    if video and audio:
         kind = "動画+音声"
-    elif has_video:
+    elif video:
         kind = "動画のみ"
-    elif has_audio:
+    elif audio:
         kind = "音声のみ"
     else:
         kind = "不明"
 
-    info1 = ""
-    info2 = ""
-    if has_video:
+    quality_text = ""
+    fps_text = ""
+    if video:
         resolution = fmt.get("resolution") or (
             f"{fmt.get('width')}x{fmt.get('height')}" if fmt.get("height") else None
         )
-        info1 = resolution or ""
+        quality_text = resolution or ""
         fps = fmt.get("fps")
         if fps:
             fps_display = int(fps) if float(fps).is_integer() else fps
-            info2 = f"{fps_display}fps"
-        else:
-            info2 = ""
-    elif has_audio:
+            fps_text = f"{fps_display}fps"
+    elif audio:
         abr = fmt.get("abr")
-        info1 = f"{abr:.0f}kbps" if abr else ""
+        quality_text = f"{abr:.0f}kbps" if abr else ""
 
-    size = format_size(fmt.get("filesize") or fmt.get("filesize_approx"))
+    size = format_size(format_filesize(fmt))
     note = fmt.get("format_note") or ""
     if is_codec_container_mismatch(fmt):
         note = f"⚠非推奨 {note}".strip()
 
-    return [f"[{format_id}]", ext, kind, info1, info2, format_codec(fmt), format_protocol(fmt), size, note]
+    return [f"[{format_id}]", ext, kind, quality_text, fps_text, format_codec(fmt), format_protocol(fmt), size, note]
 
 
 def describe_format_plain(fmt: dict) -> str:

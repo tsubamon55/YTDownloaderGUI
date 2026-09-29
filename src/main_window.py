@@ -32,6 +32,8 @@ from formats import (
     HIGH_RESOLUTION_CHECK_LABELS,
     describe_format_plain,
     format_columns,
+    has_audio,
+    has_video,
     is_codec_container_mismatch,
 )
 from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow
@@ -283,15 +285,10 @@ class MainWindow(Ui_MainWindow):
         # 元々の解像度順は各グループ内で保たれる)
         sorted_formats = sorted(formats, key=is_codec_container_mismatch)
         for fmt in sorted_formats:
-            vcodec = fmt.get("vcodec", "none")
-            acodec = fmt.get("acodec", "none")
-            has_video = bool(vcodec and vcodec != "none")
-            has_audio = bool(acodec and acodec != "none")
-
-            if has_video:
+            if has_video(fmt):
                 combo = self.video_format_combo
                 video_count += 1
-            elif has_audio:
+            elif has_audio(fmt):
                 combo = self.audio_format_combo
                 audio_count += 1
             else:

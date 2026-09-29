@@ -14,6 +14,7 @@ from formats import (
     BEST_QUALITY_COMPATIBLE_SORT,
     FORMAT_OPTIONS,
     filter_mismatched_formats,
+    format_filesize,
     format_size,
     format_spec_1080p,
     is_codec_container_mismatch,
@@ -103,7 +104,7 @@ def estimate_selection_size(selected: dict | None) -> int | None:
         return None
     total = 0
     for part in selected.get("requested_formats") or [selected]:
-        size = part.get("filesize") or part.get("filesize_approx")
+        size = format_filesize(part)
         if not size:
             # いずれかの構成要素のサイズが不明な場合、合計値も不正確になるため不明として扱う
             return None

@@ -17,7 +17,7 @@ from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_range import clip_range_label
 from config import CONFIG
-from formats import format_size, is_codec_container_mismatch, protocol_rank
+from formats import codec_prefix, format_filesize, format_size, has_audio, has_video, is_codec_container_mismatch, protocol_rank
 from paths import get_ffmpeg_location, log_debug
 from yt_dlp_selection import make_filtering_format_selector
 
@@ -295,22 +295,22 @@ class DownloadWorker(QThread):
     def _describe_selected_format(info: dict) -> str:
         vcodec = info.get("vcodec") or "none"
         acodec = info.get("acodec") or "none"
-        has_video = vcodec != "none"
-        has_audio = acodec != "none"
-        kind = "映像+音声" if has_video and has_audio else ("映像" if has_video else "音声")
+        video = has_video(info)
+        audio = has_audio(info)
+        kind = "映像+音声" if video and audio else ("映像" if video else "音声")
 
         parts = [f"使用フォーマット: [{info.get('format_id')}] {kind} ({info.get('ext')})"]
-        if has_video:
+        if video:
             width, height = info.get("width"), info.get("height")
             resolution = info.get("resolution") or (f"{width}x{height}" if width and height else "不明")
             fps = info.get("fps")
             parts.append(f"解像度:{resolution}" + (f" {fps}fps" if fps else ""))
             parts.append(f"映像コーデック:{vcodec}")
-        if has_audio:
+        if audio:
             abr = info.get("abr")
             parts.append(f"音声コーデック:{acodec}" + (f" 約{round(abr)}kbps" if abr else ""))
 
-        size = info.get("filesize") or info.get("filesize_approx")
+        size = format_filesize(info)
         if size:
             parts.append(f"サイズ:{format_size(size)}")
 
@@ -321,7 +321,7 @@ class DownloadWorker(QThread):
         推定サイズ比から全体進捗に対する重みを求めておく(サイズ不明な場合は均等割り)"""
         components = probe_info.get("requested_formats") or [probe_info]
         self._component_ids = [c.get("format_id") for c in components]
-        sizes = [c.get("filesize") or c.get("filesize_approx") or 0 for c in components]
+        sizes = [format_filesize(c) or 0 for c in components]
         total_size = sum(sizes)
         if total_size > 0 and all(sizes):
             self._component_weights = [s / total_size for s in sizes]
@@ -700,8 +700,7 @@ class DownloadWorker(QThread):
             for idx in attached_pic_indices:
                 output_opts += ["-map", f"-0:{idx}"]
             output_opts += ["-c:a", "copy", "-c:t", "copy"]
-            codec_prefix = (vcodec or "").split(".")[0].lower()
-            video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix)
+            video_encoder = self._CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX.get(codec_prefix(vcodec))
             if video_encoder:
                 encoder_name, crf = video_encoder
                 output_opts += ["-c:v:0", encoder_name, "-crf", crf]
