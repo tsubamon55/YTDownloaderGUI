@@ -266,6 +266,36 @@ class FetchFormatsTest(MainWindowTestCase):
         self.assertIsNone(self.window.video_duration)
 
 
+class UrlChangeDuringFetchTest(MainWindowTestCase):
+    """取得中にURLを変えた場合、前のURLに対する取得結果を新しいURLの情報として
+    扱ってはならない(古い動画のフォーマットIDや長さで別URLをダウンロードしてしまう)"""
+
+    def _start_fetch(self, url):
+        worker = MagicMock()
+        with patch.object(main_window_module, "FormatListWorker", return_value=worker):
+            self.window.url_edit.setText(url)
+            self.window.fetch_formats()
+        return worker
+
+    def test_result_of_fetch_started_for_previous_url_is_discarded(self):
+        worker = self._start_fetch("https://example.com/watch?v=A")
+
+        self.window.url_edit.setText("youtube.com/watch?v=B")
+        self.window.on_formats_fetched([make_video()], "Video A", b"", 60.0, worker, auto=True)
+
+        self.assertFalse(self.window.info_ready)
+        self.assertFalse(self.window.download_btn.isEnabled())
+        self.assertEqual(self.window.title_label.text(), "")
+
+    def test_url_change_stops_spinner_of_abandoned_fetch(self):
+        self._start_fetch("https://example.com/watch?v=A")
+        self.assertTrue(self.window.spinner.isVisible())
+
+        self.window.url_edit.setText("")
+
+        self.assertFalse(self.window.spinner.isVisible())
+
+
 class OnManualToggledTest(MainWindowTestCase):
     def test_checked_shows_manual_container_and_hides_auto(self):
         self.window.manual_toggle_btn.setChecked(True)
@@ -1035,6 +1065,49 @@ class CloseEventTest(MainWindowTestCase):
         log_debug_mock.assert_called_once()
         event.accept.assert_called_once()
 
+    def test_superseded_fetch_worker_is_still_waited_on(self):
+        """再取得でformat_workerが差し替わっても、前の取得スレッドはまだ動いている。
+        終了待ちから外れると、実行中のまま破棄されてプロセスが異常終了しうる"""
+        old_worker = self._running_worker()
+        new_worker = self._running_worker()
+        with patch.object(main_window_module, "FormatListWorker", side_effect=[old_worker, new_worker]):
+            self.window.url_edit.setText("https://example.com/watch?v=A")
+            self.window.fetch_formats()
+            self.window.url_edit.setText("https://example.com/watch?v=B")
+            self.window.fetch_formats()
+        event = self._event()
+
+        self.window.closeEvent(event)
+
+        old_worker.wait.assert_called_once()
+        new_worker.wait.assert_called_once()
+
+    def test_wait_time_is_shared_across_workers(self):
+        """待機の上限はワーカーごとではなく全体で1つにする。ワーカー数に比例して
+        UIが固まる時間が伸びないようにするため"""
+        clock = [0.0]
+
+        def slow_wait(ms):
+            clock[0] += ms / 1000
+            return False
+
+        first = self._running_worker()
+        first.wait.side_effect = slow_wait
+        second = self._running_worker()
+        second.wait.side_effect = slow_wait
+        self.window.format_worker = first
+        self.window._storyboard_workers.add(second)
+        event = self._event()
+
+        with (
+            patch.object(main_window_module.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(main_window_module, "log_debug"),
+        ):
+            self.window.closeEvent(event)
+
+        self.assertLessEqual(clock[0] * 1000, MainWindow._WORKER_SHUTDOWN_WAIT_MS)
+        event.accept.assert_called_once()
+
     def test_finished_worker_is_not_waited_on(self):
         worker = MagicMock()
         worker.isRunning.return_value = False
@@ -1212,6 +1285,46 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
 
         critical_mock.assert_called_once()
         event.accept.assert_called_once()
+
+    def test_update_is_not_applied_while_a_worker_is_still_running(self):
+        """待ち切れずにスレッドが残っている状態でインストーラーを起動すると、
+        処理中のダウンロードや後処理を強制終了させてしまうため、適用は見送る"""
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        worker.wait.return_value = False
+        self.window.download_worker = worker
+        self.window._pending_update_path = "C:/tmp/Setup.exe"
+        event = CloseEventTest._event()
+
+        with (
+            patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            patch.object(main_window_module, "apply_downloaded_update") as apply_mock,
+            patch.object(main_window_module, "log_debug"),
+        ):
+            self.window.closeEvent(event)
+
+        apply_mock.assert_not_called()
+        event.accept.assert_called_once()
+
+    def test_declining_close_after_update_download_dismisses_applying_dialog(self):
+        """アップデート完了後の終了で「いいえ」を選ぶと、キャンセルボタンを外した
+        「適用中」ダイアログ(ウィンドウモーダル)が残り、ウィンドウを操作できなくなる"""
+        download = MagicMock()
+        download.isRunning.return_value = True
+        self.window.download_worker = download
+        update_worker = MagicMock()
+        progress = MagicMock()
+        self.window.update_download_worker = update_worker
+
+        with patch.object(MainWindow, "close"):
+            self.window.on_update_download_finished("C:/tmp/Setup.exe", update_worker, progress)
+        with (
+            patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No),
+            patch.object(QMessageBox, "information"),
+        ):
+            self.window.closeEvent(CloseEventTest._event())
+
+        progress.close.assert_called_once()
 
     def test_declining_download_cancellation_prompt_also_cancels_pending_update(self):
         """動画ダウンロード中に終了確認で「いいえ」を選んだ場合、適用予定だった

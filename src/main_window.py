@@ -6,6 +6,7 @@
 
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Any
 
@@ -74,11 +75,16 @@ class MainWindow(Ui_MainWindow):
         super().__init__()
 
         self.download_worker: DownloadWorker | None = None
+        # 結果を反映する対象の取得ワーカー。URL変更・再取得で差し替わる(古い結果は捨てる)
         self.format_worker: FormatListWorker | None = None
+        # 差し替え済みも含め、まだ走っている取得ワーカー(終了時に待つ対象)
+        self._format_workers: set[FormatListWorker] = set()
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
         # ダウンロード済みで、アプリ終了時(closeEvent)に適用するアップデートのパス
         self._pending_update_path: str | None = None
+        # 適用待ちの間に表示している「適用中」ダイアログ。終了が取り消された場合に閉じる
+        self._update_progress_dialog: QProgressDialog | None = None
         self.last_output_dir: str | None = None
         self.info_ready = False
         self.available_formats: list[Format] = []
@@ -176,6 +182,9 @@ class MainWindow(Ui_MainWindow):
 
     def on_url_changed(self, text: str) -> None:
         self._info_fetch_timer.stop()
+        # 取得中だった前のURLの結果が、新しいURLの情報として反映されないよう無効にする
+        self.format_worker = None
+        self.spinner.stop()
         # URLが削除・変更・別のものに貼り替えられた場合、直前の動画に対する選択
         # (フォーマット・mp3変換・クリップ範囲・進捗バー等)が次の動画にそのまま
         # 引き継がれてしまわないよう、都度すべての入力内容をリセットする
@@ -269,6 +278,7 @@ class MainWindow(Ui_MainWindow):
 
         worker = FormatListWorker(url)
         self.format_worker = worker
+        self._format_workers.add(worker)
         worker.finished_ok.connect(
             lambda formats, title, thumb, duration, w=worker: self.on_formats_fetched(
                 formats, title, thumb, duration, w, auto
@@ -288,6 +298,7 @@ class MainWindow(Ui_MainWindow):
         worker: FormatListWorker,
         auto: bool = False,
     ) -> None:
+        self._format_workers.discard(worker)
         if worker is not self.format_worker:
             return
 
@@ -357,8 +368,10 @@ class MainWindow(Ui_MainWindow):
         return scaled.copy(x, y, target_size.width(), target_size.height())
 
     def on_formats_error(self, message: str, worker: FormatListWorker | None = None, auto: bool = False) -> None:
-        if worker is not None and worker is not self.format_worker:
-            return
+        if worker is not None:
+            self._format_workers.discard(worker)
+            if worker is not self.format_worker:
+                return
 
         self.spinner.stop()
         if auto:
@@ -627,6 +640,7 @@ class MainWindow(Ui_MainWindow):
         # 終了確認で「いいえ」を選ばれた場合でも実行中のアプリがインストーラーに
         # 強制終了され、進行中の動画ダウンロードが壊れてしまうため
         self._pending_update_path = local_path
+        self._update_progress_dialog = progress
         self.close()
 
     def on_update_download_error(
@@ -851,6 +865,9 @@ class MainWindow(Ui_MainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 if self._pending_update_path is not None:
                     self._pending_update_path = None
+                    if self._update_progress_dialog is not None:
+                        self._update_progress_dialog.close()
+                        self._update_progress_dialog = None
                     QMessageBox.information(
                         self, "アップデート", "アップデートを中止しました。次回起動時に改めて確認します。"
                     )
@@ -862,15 +879,26 @@ class MainWindow(Ui_MainWindow):
         if self.update_download_worker is not None:
             self.update_download_worker.cancel()
 
+        # cancel()は進捗フック経由でしか効かず、後処理(ffmpegの結合・切り抜き)の最中は
+        # 区切りが来るまで止まらないため、待ち時間には上限を設ける。上限はワーカーごとでなく
+        # 全体で1つにして、走っているワーカーの数だけUIが固まる時間が伸びないようにする。
+        # 時間切れの場合はこれ以上UIスレッドからできることがないので、記録だけ残して終了する
+        deadline = time.monotonic() + self._WORKER_SHUTDOWN_WAIT_MS / 1000
+        all_stopped = True
         for worker in self._running_workers():
-            # cancel()は進捗フック経由でしか効かず、後処理(ffmpegの結合・切り抜き)の最中は
-            # 区切りが来るまで止まらないため、待ち時間には上限を設ける。時間切れの場合は
-            # これ以上UIスレッドからできることがないので、記録だけ残して終了する
-            if not worker.wait(self._WORKER_SHUTDOWN_WAIT_MS):
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if not worker.wait(remaining_ms):
+                all_stopped = False
                 log_debug(
                     f"closeEvent: {type(worker).__name__} が"
                     f"{self._WORKER_SHUTDOWN_WAIT_MS}ms以内に終了しませんでした"
                 )
+
+        if self._pending_update_path is not None and not all_stopped:
+            # 残ったスレッドが処理中のままインストーラーに強制終了されると、ダウンロードや
+            # 後処理の途中のファイルが壊れるため、適用は見送って次回起動時の確認に任せる
+            log_debug("closeEvent: 終了していないワーカーがあるためアップデートの適用を見送りました")
+            self._pending_update_path = None
 
         if self._pending_update_path is not None:
             update_path = self._pending_update_path
@@ -892,11 +920,14 @@ class MainWindow(Ui_MainWindow):
         candidates = [
             self.download_worker,
             self.format_worker,
+            *self._format_workers,
             self.update_check_worker,
             self.update_download_worker,
             *self._storyboard_workers,
         ]
-        return [w for w in candidates if w is not None and w.isRunning()]
+        # format_workerは_format_workersにも含まれるため、同じワーカーを二重に待たないようにする
+        unique = list(dict.fromkeys(w for w in candidates if w is not None))
+        return [w for w in unique if w.isRunning()]
 
     def on_progress(self, percent: float, text: str) -> None:
         self.progress_bar.setValue(int(percent))
