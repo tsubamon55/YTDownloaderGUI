@@ -284,7 +284,10 @@ class UpdateDownloadWorkerTest(unittest.TestCase):
 
 class ApplyDownloadedUpdateTest(unittest.TestCase):
     def test_windows_launches_detached_silent_installer(self):
+        # DETACHED_PROCESS等はWindows版のsubprocessにしか無いため、他OSで実行する場合(CIのmacOS等)は仮の値を置く
         with patch.object(updater.sys, "platform", "win32"), \
+             patch.object(updater.subprocess, "DETACHED_PROCESS", 0x8, create=True), \
+             patch.object(updater.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True), \
              patch.object(updater.subprocess, "Popen") as popen_mock:
             apply_downloaded_update("C:/tmp/Setup.exe")
 

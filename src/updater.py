@@ -182,6 +182,9 @@ def _launch_windows_installer(installer_path: str) -> None:
     このアプリのプロセスグループから切り離しておくことで、この直後にアプリが終了しても
     インストーラーの実行(サイレントインストール→installer.issの[Run]セクションに
     よる再起動)がそのまま継続する"""
+    # 下の定数はWindows版のsubprocessにしか無いため、mypyに他OSでの型チェックを省かせる
+    if sys.platform != "win32":
+        raise RuntimeError("Windows以外ではインストーラーを起動できません")
     subprocess.Popen(
         [installer_path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
