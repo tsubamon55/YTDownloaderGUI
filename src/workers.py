@@ -235,7 +235,14 @@ class DownloadWorker(QThread):
         keep_path = None
         if preserve_final and self._final_filepath and os.path.isfile(self._final_filepath):
             keep_path = os.path.normcase(os.path.abspath(self._final_filepath))
-        for name in os.listdir(self.request.out_dir):
+        try:
+            names = os.listdir(self.request.out_dir)
+        except OSError as e:
+            # 権限やネットワークドライブの切断で一覧を取れない場合も、呼び出し元の
+            # エラー通知(finished_error)まで到達させるため、例外は外へ出さない
+            log_debug(f"_cleanup_leftover_files: 保存先の一覧取得に失敗 ({e!r})")
+            return
+        for name in names:
             if not name.startswith(prefix):
                 continue
             if os.path.normcase(name) in self._preexisting_names:
@@ -470,10 +477,13 @@ class DownloadWorker(QThread):
             # 中途半端な.part等のファイルが残らないよう必ず削除する。ただし本編の
             # ダウンロード/マージ自体は完了しており、後続の後処理だけが失敗した
             # ケースでは、完成済みファイルは残す
-            self._cleanup_leftover_files(preserve_final=True)
-            message = str(e) if self._is_cancelled else describe_error(e, "ダウンロード")
-            self.log.emit(f"エラー: {message}")
-            self.finished_error.emit(message)
+            try:
+                self._cleanup_leftover_files(preserve_final=True)
+            finally:
+                # 後片付けが想定外に失敗しても、UIがダウンロード中のまま固まらないよう必ず通知する
+                message = str(e) if self._is_cancelled else describe_error(e, "ダウンロード")
+                self.log.emit(f"エラー: {message}")
+                self.finished_error.emit(message)
 
     def _log_request(self) -> None:
         self.log.emit(f"開始: {self.request.url}")

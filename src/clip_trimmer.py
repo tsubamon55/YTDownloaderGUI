@@ -28,6 +28,18 @@ CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX = CONFIG.clip_video_encoder_by_codec_prefix
 _ATTACHED_PIC_EXT_BY_CODEC = {"png": "png", "mjpeg": "jpg", "jpeg": "jpg"}
 
 
+def _unused_path(root: str, tag: str, ext: str) -> str:
+    """"{root}.{tag}{ext}"形式の中間ファイル名のうち、まだ存在しないものを返す。
+    ffmpegは出力先を-yで無確認に上書きし、失敗時の後片付けでも削除するため、
+    保存先に偶然同名のユーザーのファイルがあると壊してしまう。その場合は番号を付けて避ける"""
+    path = f"{root}.{tag}{ext}"
+    counter = 1
+    while os.path.exists(path):
+        path = f"{root}.{tag}{counter}{ext}"
+        counter += 1
+    return path
+
+
 def _is_attached_pic(stream: dict) -> bool:
     """埋め込みサムネイル(disposition=attached_picの映像ストリーム)か"""
     return stream.get("codec_type") == "video" and bool(stream.get("disposition", {}).get("attached_pic"))
@@ -99,7 +111,7 @@ def extract_attached_pics(
     for idx in absolute_indices:
         codec_name = metadata["streams"][idx].get("codec_name") or ""
         ext = _ATTACHED_PIC_EXT_BY_CODEC.get(codec_name.lower(), "jpg")
-        thumb_path = f"{root}.thumb{idx}.{ext}"
+        thumb_path = _unused_path(root, f"thumb{idx}", f".{ext}")
         try:
             ffpp.real_run_ffmpeg(
                 [(filepath, [])],
@@ -119,7 +131,7 @@ def reattach_thumbnails(
     video_stream_countは切り抜き後の動画自体が持つ出力ストリーム数(attached_pic除く)で、
     disposition指定に使う出力側の絶対インデックスを組み立てるのに必要"""
     root, ext = os.path.splitext(video_path)
-    merged_path = f"{root}.thumbmerge{ext}"
+    merged_path = _unused_path(root, "thumbmerge", ext)
     input_specs: list[tuple[str, list[str]]] = [(video_path, [])]
     input_specs += [(path, []) for path in thumbnail_paths]
     output_opts = ["-map", "0"]
@@ -256,7 +268,7 @@ def trim_clip(
     log("切り抜き範囲を切り出し中...")
     ffpp = FFmpegPostProcessor(downloader=None)
     root, ext = os.path.splitext(filepath)
-    trimmed_path = f"{root}.clip{ext}"
+    trimmed_path = _unused_path(root, "clip", ext)
     thumbnail_paths: list[str] = []
 
     try:

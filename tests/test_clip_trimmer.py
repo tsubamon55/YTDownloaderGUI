@@ -212,6 +212,70 @@ class ReattachThumbnailsTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(video_path))
 
 
+class TempFileNameCollisionTest(unittest.TestCase):
+    """切り抜きの中間ファイル名(.clip / .thumbmerge / .thumbN)と同名のファイルが保存先に
+    既にあっても、ffmpegの-yで上書きしたり、後片付けで削除したりしない"""
+
+    USER_DATA = "user's own file"
+
+    def _user_file(self, tmp, name):
+        path = os.path.join(tmp, name)
+        with open(path, "w") as f:
+            f.write(self.USER_DATA)
+        return path
+
+    def _assert_untouched(self, path):
+        self.assertTrue(os.path.isfile(path))
+        with open(path) as f:
+            self.assertEqual(f.read(), self.USER_DATA)
+
+    def test_trim_does_not_overwrite_existing_clip_named_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = os.path.join(tmp, "My Video.mp4")
+            open(video, "w").close()
+            existing = self._user_file(tmp, "My Video.clip.mp4")
+
+            with patch("clip_trimmer.FFmpegPostProcessor", return_value=TrimClipTest._make_fake_ffpp()):
+                trim_clip(video, None, 20.0, lambda _: None)
+
+            self._assert_untouched(existing)
+
+    def test_failed_trim_does_not_delete_existing_clip_named_file(self):
+        ffpp = TrimClipTest._make_fake_ffpp()
+        ffpp.real_run_ffmpeg.side_effect = RuntimeError("ffmpeg failed")
+        with tempfile.TemporaryDirectory() as tmp:
+            video = os.path.join(tmp, "My Video.mp4")
+            open(video, "w").close()
+            existing = self._user_file(tmp, "My Video.clip.mp4")
+
+            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+                trim_clip(video, None, 20.0, lambda _: None)
+
+            self._assert_untouched(existing)
+
+    def test_reattach_does_not_touch_existing_thumbmerge_named_file(self):
+        ffpp = MagicMock()
+        ffpp.real_run_ffmpeg.side_effect = RuntimeError("ffmpeg failed")
+        with tempfile.TemporaryDirectory() as tmp:
+            video = os.path.join(tmp, "clip.mp4")
+            open(video, "w").close()
+            existing = self._user_file(tmp, "clip.thumbmerge.mp4")
+
+            with self.assertRaises(RuntimeError):
+                clip_trimmer.reattach_thumbnails(ffpp, video, 1, [os.path.join(tmp, "t.png")])
+
+            self._assert_untouched(existing)
+
+    def test_extracted_thumbnail_does_not_reuse_existing_file_name(self):
+        metadata = {"streams": [{"codec_type": "video", "codec_name": "png", "disposition": {"attached_pic": 1}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = self._user_file(tmp, "clip.thumb0.png")
+
+            paths = clip_trimmer.extract_attached_pics(MagicMock(), os.path.join(tmp, "clip.mp4"), metadata, [0])
+
+            self.assertNotIn(existing, paths)
+
+
 class NearestKeyframeAtOrBeforeTest(unittest.TestCase):
     """nearest_keyframe_at_or_beforeは、入力側の高速-ssが実際に着地する時刻
     (targetを超えない最も近いキーフレーム)を求める。trim_clipはこれと

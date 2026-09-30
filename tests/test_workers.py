@@ -688,6 +688,27 @@ class RunErrorHandlingTest(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
 
+    def test_error_is_reported_even_if_cleanup_cannot_list_folder(self):
+        """失敗時の後片付けで保存先の一覧取得が失敗しても(権限・ネットワークドライブの切断等)、
+        finished_errorは必ず送る。送られないとUIがダウンロード中のまま固まる"""
+        with tempfile.TemporaryDirectory() as tmp:
+            real_listdir = os.listdir
+            state = {"downloading": False}
+
+            def failing_download(urls):
+                state["downloading"] = True
+                raise RuntimeError("unsupported format")
+
+            def listdir(path):
+                if state["downloading"]:
+                    raise PermissionError("access denied")
+                return real_listdir(path)
+
+            with patch("workers.os.listdir", side_effect=listdir):
+                errors, _ = self._run_with(tmp, failing_download)
+
+            self.assertEqual(errors, ["unsupported format"])
+
     def test_network_error_message_is_user_friendly(self):
         with tempfile.TemporaryDirectory() as tmp:
             errors, _ = self._run_with(tmp, TimeoutError("timed out"))
