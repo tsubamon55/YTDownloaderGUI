@@ -426,6 +426,23 @@ class ResolveUniqueTitleTest(unittest.TestCase):
         self.assertEqual(title, "My Video")
 
 
+class PrepareOutputNameTest(unittest.TestCase):
+    def test_audio_conversion_avoids_existing_source_file(self):
+        """mp3変換時、yt-dlpは変換前の名前(Title.webm)が既にあるとダウンロード済みとみなして
+        それを変換の入力に使い、変換後に削除する。既存のユーザーファイルを消さないよう、
+        最終拡張子だけでなく変換前の拡張子の同名ファイルも衝突とみなす"""
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "My Video.webm"), "w").close()
+            worker = make_worker(
+                out_dir=tmp,
+                postprocessors=[{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+            )
+
+            worker._prepare_output_name({"title": "My Video", "ext": "webm"})
+
+            self.assertEqual(worker._unique_title, "My Video (1)")
+
+
 class ProgressHookTest(unittest.TestCase):
     def test_cancelled_raises_download_error(self):
         import yt_dlp

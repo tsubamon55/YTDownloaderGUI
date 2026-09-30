@@ -24,7 +24,10 @@ def install_exception_hook() -> None:
             return
 
         message = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        sys.stderr.write(message)
+        # PyInstallerのwindowedビルド(console=False)ではsys.stderrがNoneになるため、
+        # ここで例外を出してログ記録やダイアログ表示まで到達しない事態を避ける
+        if sys.stderr is not None:
+            sys.stderr.write(message)
 
         # 書き込みに失敗してもアプリは継続させるが、案内の文言は実際の結果に合わせる。
         # 残っていないログの場所を案内すると、調査の際に誤った手がかりを与えてしまう

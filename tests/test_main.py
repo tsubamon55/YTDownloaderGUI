@@ -63,6 +63,27 @@ class InstallExceptionHookTest(unittest.TestCase):
                     sys.excepthook(*sys.exc_info())
                 critical_mock.assert_called_once()
 
+    def test_logs_and_shows_dialog_when_stderr_is_none(self):
+        """PyInstallerのwindowedビルド(console=False)ではsys.stderrがNoneになる。
+        その環境でもログ記録とダイアログ表示まで到達しなければならない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, "crash.log")
+            with patch.object(main, "get_log_file_path", return_value=log_path):
+                main.install_exception_hook()
+
+            with (
+                patch.object(sys, "stderr", None),
+                patch.object(main.QApplication, "instance", return_value=object()),
+                patch.object(main.QMessageBox, "critical") as critical_mock,
+            ):
+                try:
+                    raise ValueError("boom")
+                except ValueError:
+                    sys.excepthook(*sys.exc_info())
+
+            self.assertTrue(os.path.isfile(log_path))
+            critical_mock.assert_called_once()
+
     def test_logging_failure_does_not_raise(self):
         # ログ用ディレクトリが作成できない(親がファイルである)場合でも例外を投げない
         with tempfile.TemporaryDirectory() as tmp:

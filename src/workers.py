@@ -401,10 +401,16 @@ class DownloadWorker(QThread):
             title = f"{title} [{clip_label}]"
         return title
 
-    def _resolve_unique_title(self, title: str, expected_ext: str | None) -> str:
+    def _resolve_unique_title(
+        self, title: str, expected_ext: str | None, source_ext: str | None = None
+    ) -> str:
+        """source_extは後処理(音声抽出等)で変換される前の拡張子。yt-dlpはその名前の
+        ファイルが既にあるとダウンロード済みとみなして変換の入力に使い、変換後に削除して
+        しまうため、最終拡張子と同様に衝突とみなす"""
         sanitized = yt_dlp.utils.sanitize_filename(title, restricted=False)
         if not os.path.isdir(self.request.out_dir):
             return sanitized
+        exts = {ext for ext in (expected_ext, source_ext) if ext}
 
         def conflicts(stem: str) -> bool:
             if expected_ext is None:
@@ -412,7 +418,9 @@ class DownloadWorker(QThread):
                 return any(
                     os.path.splitext(name)[0] == stem for name in os.listdir(self.request.out_dir)
                 )
-            return os.path.isfile(os.path.join(self.request.out_dir, f"{stem}.{expected_ext}"))
+            return any(
+                os.path.isfile(os.path.join(self.request.out_dir, f"{stem}.{ext}")) for ext in exts
+            )
 
         if not conflicts(sanitized):
             return sanitized
@@ -487,7 +495,9 @@ class DownloadWorker(QThread):
     def _prepare_output_name(self, probe_info: Format) -> str | None:
         """保存ファイル名(拡張子除く)を確定し、失敗時の後片付けの準備をする。最終拡張子の見込みを返す"""
         expected_ext = self._expected_ext(probe_info)
-        self._unique_title = self._resolve_unique_title(self._build_title(probe_info), expected_ext)
+        self._unique_title = self._resolve_unique_title(
+            self._build_title(probe_info), expected_ext, probe_info.get("ext")
+        )
         self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
         self._snapshot_preexisting_files()
         self._init_component_weights(probe_info)
