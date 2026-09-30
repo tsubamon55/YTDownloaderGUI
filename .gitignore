@@ -17,3 +17,6 @@ __pycache__/
 
 # IDE
 .idea/
+
+# Debug log written by the app and tests (paths.log_debug)
+crash.log

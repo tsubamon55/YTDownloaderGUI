@@ -1,0 +1,7 @@
+# 開発・ビルド時のみ使うツール(アプリの実行には不要)。インストールするのは、ここから生成した
+# requirements-dev.txt。アプリの依存はrequirements.txtと同じバージョンに揃える
+-c requirements.txt
+-r requirements.in
+ruff
+mypy
+pyinstaller

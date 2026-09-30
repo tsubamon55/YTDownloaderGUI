@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # release.ymlからビルド前のチェックとして呼び出す
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # ruffだけで足りるため、ロックファイルのバージョンに合わせてそれだけを入れる
+      - run: python -m pip install -c requirements-dev.txt ruff
+      - run: python -m ruff check src tests
+
+  test:
+    # 配布対象のOS(Windows/macOS)で実行する。pywin32のようにOSで入る依存が変わるため、
+    # mypyもOSごとに走らせる
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # ランナーには画面が無いため、Qtをオフスクリーンで動かす
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m mypy
+      - run: python -m unittest discover -s tests

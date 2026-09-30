@@ -1,0 +1,10 @@
+# アプリの実行に必要な直接の依存。実際にインストールするのは、ここから生成した
+# requirements.txt(間接依存も含めて全バージョンを固定したロックファイル)。
+# 編集したらREADME「依存関係の更新」の手順でrequirements.txtを再生成すること。
+#
+# yt-dlpはフォーマット選択の挙動に依存しているため、ロックファイルを再生成して版が上がったら
+# `python -m unittest discover -s tests` を実行し、tests/test_yt_dlp_selection.py が通ることを確認すること。
+yt-dlp>=2026.8.19
+PyQt6
+mutagen
+pywin32; sys_platform == "win32"

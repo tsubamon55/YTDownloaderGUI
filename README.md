@@ -35,7 +35,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-`requirements.txt` の `pywin32` はWindows専用パッケージで、`sys_platform == "win32"` の条件付きのためmacOSにはインストールされません。
+`requirements.txt` は、全パッケージのバージョンを固定したロックファイルです(後述の「依存関係の更新」参照)。
+`pywin32` はWindows専用パッケージで、`sys_platform == "win32"` の条件付きのためmacOSにはインストールされません。
 
 ### 2. ffmpegの配置
 
@@ -90,13 +91,50 @@ macOS: `brew install ffmpeg`
 ### 4. テストとコードチェック
 
 テストは標準ライブラリのunittestで実行します。書式と型のチェックには開発用ツール(ruff / mypy)を使います。
-アプリの実行・ビルドには不要なので、依存関係は `requirements-dev.txt` に分けています。
+アプリの実行には不要なので、依存関係は `requirements-dev.txt` に分けています(配布用ビルドに使うPyInstallerもここに含みます)。
 
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests
 python -m ruff check src tests
 python -m mypy
+```
+
+### 5. 依存関係の更新
+
+依存関係は、直接使うパッケージを書く `.in` ファイルと、そこから生成するロックファイル(`.txt`)に分けています。
+ロックファイルには間接依存を含む全パッケージのバージョンが固定されているため、どのPCやCIでも同じ環境を再現できます。
+
+| ファイル | 内容 | 編集 |
+| --- | --- | --- |
+| `requirements.in` | アプリの実行に必要なパッケージ | 手で編集する |
+| `requirements-dev.in` | 開発・ビルド用のツール(ruff / mypy / PyInstaller) | 手で編集する |
+| `requirements.txt` / `requirements-dev.txt` | 上記から生成したロックファイル | 手で編集しない |
+
+パッケージを追加・更新するときは、`.in` を編集してからロックファイルを再生成し、`.in` と `.txt` を一緒にコミットします。
+再生成には [uv](https://docs.astral.sh/uv/) を使います(`pip install uv` か、公式のインストーラーで入れてください)。
+`--universal` を付けているため、どのOSで生成してもWindows/macOS両方で使えるロックファイルになります。
+
+```bash
+uv pip compile requirements.in -o requirements.txt --universal --python-version 3.13
+uv pip compile requirements-dev.in -o requirements-dev.txt --universal --python-version 3.13
+python -m pip install -r requirements-dev.txt
+```
+
+既存パッケージを新しいバージョンに上げる場合は、上のコマンドに `--upgrade`(特定のパッケージだけなら `--upgrade-package <名前>`)を付けます。
+yt-dlpは `requirements.in` で意図的にバージョンを固定しているため、上げる場合は `requirements.in` の値を書き換えてください。
+
+## CI/CD (GitHub Actions)
+
+- **CI** (`.github/workflows/ci.yml`): `master` へのpushとPull Requestで、ruffをUbuntu上で、mypyとunittestをWindows/macOS上で実行します。
+- **リリース** (`.github/workflows/release.yml`): `VERSION` と同じ番号の `v<バージョン>` タグをpushすると、CIを通したうえで
+  `YTDownloaderGUI-Setup-<バージョン>.exe`(Windows)と `YTDownloaderGUI-<バージョン>.dmg`(macOS, Apple Silicon)をビルドし、
+  GitHub Releasesに**下書き**として添付します。公開した時点で既存ユーザーの自動アップデートが始まるため、
+  アセットを確認してから手動で公開してください。
+
+```bash
+git tag v$(cat VERSION)
+git push origin v$(cat VERSION)
 ```
 
 ## 設定ファイル (config.json)
@@ -178,7 +216,7 @@ Python未インストールの環境でも動く実行ファイルを作成で�
 **Windows (PowerShell)**
 
 ```powershell
-.venv\Scripts\pip install pyinstaller
+.venv\Scripts\pip install -r requirements-dev.txt
 .venv\Scripts\pyinstaller YTDownloaderGUI.spec --noconfirm
 ```
 
@@ -190,7 +228,7 @@ Python未インストールの環境でも動く実行ファイルを作成で�
 **macOS**
 
 ```bash
-.venv/bin/pip install pyinstaller
+.venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pyinstaller YTDownloaderGUI.spec --noconfirm
 ```
 
