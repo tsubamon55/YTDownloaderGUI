@@ -103,7 +103,8 @@ python -m mypy
 ### 5. 依存関係の更新
 
 依存関係は、直接使うパッケージを書く `.in` ファイルと、そこから生成するロックファイル(`.txt`)に分けています。
-ロックファイルには間接依存を含む全パッケージのバージョンが固定されているため、どのPCやCIでも同じ環境を再現できます。
+ロックファイルには間接依存を含む全パッケージのバージョンとハッシュが固定されているため、どのPCやCIでも同じ環境を再現でき、
+PyPI上のファイルが差し替えられていた場合はインストールが失敗します。
 
 | ファイル | 内容 | 編集 |
 | --- | --- | --- |
@@ -116,13 +117,14 @@ python -m mypy
 `--universal` を付けているため、どのOSで生成してもWindows/macOS両方で使えるロックファイルになります。
 
 ```bash
-uv pip compile requirements.in -o requirements.txt --universal --python-version 3.13
-uv pip compile requirements-dev.in -o requirements-dev.txt --universal --python-version 3.13
+uv pip compile requirements.in -o requirements.txt --universal --python-version 3.13 --generate-hashes
+uv pip compile requirements-dev.in -o requirements-dev.txt --universal --python-version 3.13 --generate-hashes
 python -m pip install -r requirements-dev.txt
 ```
 
 既存パッケージを新しいバージョンに上げる場合は、上のコマンドに `--upgrade`(特定のパッケージだけなら `--upgrade-package <名前>`)を付けます。
-yt-dlpは `requirements.in` で意図的にバージョンを固定しているため、上げる場合は `requirements.in` の値を書き換えてください。
+yt-dlpは `requirements.in` で下限だけを指定しているため、`--upgrade` を付けて再生成すると新しい版に上がります。
+上がった場合は、`requirements.in` の注意書きの通り `tests/test_yt_dlp_selection.py` を含むテストが通ることを確認してからコミットしてください。
 
 ## CI/CD (GitHub Actions)
 
@@ -130,7 +132,8 @@ yt-dlpは `requirements.in` で意図的にバージョンを固定している�
 - **リリース** (`.github/workflows/release.yml`): `VERSION` と同じ番号の `v<バージョン>` タグをpushすると、CIを通したうえで
   `YTDownloaderGUI-Setup-<バージョン>.exe`(Windows)と `YTDownloaderGUI-<バージョン>.dmg`(macOS, Apple Silicon)をビルドし、
   GitHub Releasesに**下書き**として添付します。公開した時点で既存ユーザーの自動アップデートが始まるため、
-  アセットを確認してから手動で公開してください。
+  アセットを確認してから手動で公開してください。各アセットのSHA256を記した `SHA256SUMS` も添付されます。
+  同梱するffmpegは版とSHA256を `release.yml` に固定しており、更新する場合はURLとハッシュを一緒に書き換えます。
 
 ```bash
 git tag v$(cat VERSION)

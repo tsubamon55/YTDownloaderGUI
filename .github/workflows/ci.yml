@@ -7,12 +7,19 @@ on:
   # release.ymlからビルド前のチェックとして呼び出す
   workflow_call:
 
+# GITHUB_TOKENの権限はリポジトリ設定の既定値に任せず、読み取りだけに絞る
+permissions:
+  contents: read
+
+# actionはタグではなくコミットSHAで固定する(タグは後から別のコミットに付け替えられるため)
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
       # ruffだけで足りるため、ロックファイルのバージョンに合わせてそれだけを入れる
@@ -31,8 +38,10 @@ jobs:
       # ランナーには画面が無いため、Qtをオフスクリーンで動かす
       QT_QPA_PLATFORM: offscreen
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
           cache: pip
