@@ -95,6 +95,20 @@ class SelectFormatsTest(unittest.TestCase):
         self.assertEqual(selected[0]["format_id"], "137")
 
 
+    def test_does_not_test_download_formats_marked_as_needing_testing(self):
+        """YouTubeは投稿直後の動画のフォーマットに__needs_testingを付ける。プレビューは
+        ネットワークアクセスなしで選ぶ前提なので、テストダウンロードで候補を落とさない。
+        (URLは接続できないアドレスにしてあり、テストが走ると1080pが落とされる)"""
+        high = make_video("137", "mp4", "avc1.640028", height=1080)
+        high["url"] = "http://127.0.0.1:9/137"
+        high["__needs_testing"] = True
+        low = make_video("18", "mp4", "avc1.42001E", height=360)
+
+        selected = select_formats([low, high], "bv")
+
+        self.assertEqual([f["format_id"] for f in selected], ["137"])
+
+
 class ExcludeFormatsPPTest(unittest.TestCase):
     def test_removes_matching_formats(self):
         pp = ExcludeFormatsPP(lambda f: f["format_id"] == "137")

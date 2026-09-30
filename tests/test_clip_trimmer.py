@@ -648,5 +648,24 @@ class SeekOptionsTest(unittest.TestCase):
             )
 
 
+class FfmpegTimeFormatTest(unittest.TestCase):
+    """ffmpegの時刻指定は指数表記(9.9e-06 等)を受け付けない。str(float)は1e-4未満で
+    指数表記になるため、ごく小さい余りや長さでも固定小数点で渡すこと"""
+
+    def test_tiny_remainder_is_not_in_exponent_notation(self):
+        metadata = {"streams": [{"codec_type": "video", "codec_name": "h264"}]}
+        with patch("clip_trimmer.nearest_keyframe_at_or_before", return_value=12.99999):
+            _, accurate = clip_trimmer._seek_options(MagicMock(), "C:/v.mp4", metadata, 13.0)
+        self.assertEqual(accurate[0], "-ss")
+        self.assertNotIn("e", accurate[1])
+        self.assertAlmostEqual(float(accurate[1]), 0.00001, places=6)
+
+    def test_tiny_duration_is_not_in_exponent_notation(self):
+        opts = clip_trimmer._trim_output_options({"streams": []}, [], None, 0.00005)
+        duration = opts[opts.index("-t") + 1]
+        self.assertNotIn("e", duration)
+        self.assertAlmostEqual(float(duration), 0.00005, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

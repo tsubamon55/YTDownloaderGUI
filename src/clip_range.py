@@ -35,6 +35,9 @@ def parse_clip_time(text: str) -> float | None:
     seconds = 0.0
     for n in numbers:
         seconds = seconds * 60 + n
+    # 各要素が有限でも、時・分の繰り上げで合計が無限大に溢れることがある("1e308:0:0"等)
+    if not math.isfinite(seconds):
+        raise ValueError(f"時刻の形式が正しくありません: {text}")
     return seconds
 
 

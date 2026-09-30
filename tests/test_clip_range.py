@@ -100,6 +100,12 @@ class ResolveClipRangeNonFiniteTest(unittest.TestCase):
             resolve_clip_range("", "inf")
 
 
+    def test_overflow_from_combining_finite_parts_raises(self):
+        """各要素は有限でも、時・分の繰り上げで合計が無限大に溢れることがある"""
+        with self.assertRaises(ValueError):
+            parse_clip_time("1e308:0:0")
+
+
 class ClipRangeLabelTest(unittest.TestCase):
     def test_both_none_returns_none(self):
         self.assertIsNone(clip_range_label(None, None))

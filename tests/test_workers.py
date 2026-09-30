@@ -443,6 +443,23 @@ class PrepareOutputNameTest(unittest.TestCase):
             self.assertEqual(worker._unique_title, "My Video (1)")
 
 
+class DownloadOutputTemplateTest(unittest.TestCase):
+    """タイトルや保存先に含まれる"%("がyt-dlpの出力テンプレートとして解釈されると、
+    実際の保存名が_unique_titleとずれて、衝突判定や後片付けが効かなくなる"""
+
+    def test_percent_sequences_in_title_and_folder_are_kept_literally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = os.path.join(tmp, "dir %(id)s")
+            worker = make_worker(out_dir=out_dir)
+            worker._unique_title = "50%(half)s [a] 100%"
+
+            opts = worker._build_download_opts("mp4", None)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                filename = ydl.prepare_filename({"id": "x", "title": "t", "ext": "mp4"})
+
+            self.assertEqual(filename, os.path.join(out_dir, "50%(half)s [a] 100%.mp4"))
+
+
 class ProgressHookTest(unittest.TestCase):
     def test_cancelled_raises_download_error(self):
         import yt_dlp

@@ -33,8 +33,17 @@ def select_formats(
     実際のダウンロード(DownloadWorker)と同じ選択結果を得るため、独自の選択ロジックを
     実装せず、formatsだけを持つ最小の動画情報をyt-dlpの通常の処理経路
     (process_ie_result)に通して選ばせる。一致する候補が無ければ空リストを返す。
+
+    yt-dlpは__needs_testing等の印が付いたフォーマットを選ぶ前に実際に取得して確かめるが、
+    プレビューでは通信しないようcheck_formatsを無効にする。そのため、テストに失敗する
+    フォーマットがある場合は、実ダウンロードで選ばれるものと食い違うことがある。
     """
-    ydl_opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "format": format_spec}
+    ydl_opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "format": format_spec,
+        "check_formats": False,
+    }
     if format_sort:
         ydl_opts["format_sort"] = format_sort
     info = {**_PREVIEW_INFO, "formats": copy.deepcopy(formats)}

@@ -170,6 +170,13 @@ def nearest_keyframe_at_or_before(
     return max(candidates) if candidates else 0.0
 
 
+def _ffmpeg_time(seconds: float) -> str:
+    """ffmpegの時刻指定用の文字列。str(float)は1e-4未満で指数表記(9.9e-06等)になり、
+    ffmpegが時刻として受け付けないため、固定小数点で表す(末尾の余分な0は落とす)"""
+    text = f"{seconds:.6f}".rstrip("0")
+    return text + "0" if text.endswith(".") else text
+
+
 def _seek_options(
     ffpp: FFmpegPostProcessor, filepath: str, metadata: dict, clip_start: float | None
 ) -> tuple[list[str], list[str]]:
@@ -198,8 +205,8 @@ def _seek_options(
         # 入力側シークだけで十分正確なため、そのまま入力側シークに委ねる
         keyframe_time = clip_start
     remainder = clip_start - keyframe_time
-    accurate_seek_opts = ["-ss", str(remainder)] if remainder > 0 else []
-    return ["-ss", str(keyframe_time)], accurate_seek_opts
+    accurate_seek_opts = ["-ss", _ffmpeg_time(remainder)] if remainder > 0 else []
+    return ["-ss", _ffmpeg_time(keyframe_time)], accurate_seek_opts
 
 
 def _trim_output_options(
@@ -227,7 +234,7 @@ def _trim_output_options(
         encoder_name, crf = video_encoder
         opts += ["-c:v:0", encoder_name, "-crf", crf]
     if clip_end is not None:
-        opts += ["-t", str(clip_end - (clip_start or 0))]
+        opts += ["-t", _ffmpeg_time(clip_end - (clip_start or 0))]
     return opts
 
 

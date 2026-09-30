@@ -504,9 +504,13 @@ class DownloadWorker(QThread):
         return expected_ext
 
     def _build_download_opts(self, expected_ext: str | None, ffmpeg_location: str | None) -> dict:
+        assert self._unique_title is not None  # _prepare_output_nameで確定済み
         opts = _base_ydl_opts(self.request.format_sort, ffmpeg_location)
         opts.update({
-            "outtmpl": os.path.join(self.request.out_dir, f"{self._unique_title}.%(ext)s"),
+            # タイトルや保存先の"%("が出力テンプレートとして解釈されないよう、保存先はpathsで
+            # 渡し、タイトルの"%"はエスケープする(ずれると衝突判定・後片付けが効かなくなる)
+            "paths": {"home": self.request.out_dir},
+            "outtmpl": f"{self._unique_title.replace('%', '%%')}.%(ext)s",
             "progress_hooks": [self._progress_hook],
             "postprocessor_hooks": [self._postprocessor_hook],
             "format": self.request.format_spec,
