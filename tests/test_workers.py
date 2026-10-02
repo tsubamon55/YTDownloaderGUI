@@ -1269,3 +1269,101 @@ class LiveFromStartRunTest(unittest.TestCase):
             errors, _ = run_worker(worker, KeyboardInterrupt())
             self.assertEqual(errors, ["録画できたデータがありません"])
             self.assertEqual(os.listdir(tmp), [])
+
+
+class FakeLiveRecorder:
+    """LiveRecorderの代わり。生成時に指定された.tsへ書き、指定の終了コードを返す"""
+
+    data = b"ts-data"
+    returncode = 0
+    created: list = []
+
+    def __init__(self, ffmpeg_location, inputs, output_path, on_progress, should_stop):
+        self.output_path = output_path
+        self.on_progress = on_progress
+        FakeLiveRecorder.created.append(self)
+
+    def record(self):
+        from live_recorder import RecordingProgress
+        if self.data:
+            with open(self.output_path, "wb") as f:
+                f.write(self.data)
+        self.on_progress(RecordingProgress(seconds=754, size_bytes=345 * 1024 * 1024))
+        return self.returncode
+
+
+def fake_remux(ffmpeg_location, ts_path, output_path, extract_audio_codec):
+    with open(ts_path, "rb") as src, open(output_path, "wb") as dst:
+        dst.write(src.read())
+
+
+class LiveFromNowRunTest(unittest.TestCase):
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def _run(self, tmp, **request):
+        worker = make_worker(out_dir=tmp, live_mode="from_now", **request)
+        oks, states, progress = [], [], []
+        worker.finished_ok.connect(oks.append)
+        worker.live_state_changed.connect(states.append)
+        worker.progress.connect(lambda pct, text: progress.append((pct, text)))
+        # run_workerのprobe_infoには配信のURLが無いため、ffmpegへの入力の組み立ても差し替える
+        with patch("workers.LiveRecorder", FakeLiveRecorder), \
+             patch("workers.live_inputs", return_value=[]), \
+             patch("workers.remux_recording", side_effect=fake_remux) as remux_mock:
+            errors, logs = run_worker(worker, RuntimeError("yt-dlpのダウンロードは使わない"), write_part=False)
+        return oks, errors, logs, states, progress, remux_mock
+
+    def test_recording_is_remuxed_and_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, errors, _, states, progress, _ = self._run(tmp)
+            self.assertEqual(errors, [])
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+            self.assertEqual(states, [True, False])
+            self.assertIn((-1.0, "録画中 12:34 · 345.0MB"), progress)
+            self.assertEqual(progress[-1], (-1.0, "配信終了・保存しています..."))
+
+    def test_audio_only_format_is_saved_as_m4a(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            postprocessors = [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}]
+            oks, _, _, _, _, remux_mock = self._run(tmp, postprocessors=postprocessors)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.m4a")])
+            self.assertEqual(remux_mock.call_args.args[3], "best")
+
+    def test_ffmpeg_failure_still_saves_what_was_recorded(self):
+        """通信断等でffmpegが途中で止まっても、録画できた分には価値があるため保存する"""
+        FakeLiveRecorder.returncode = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, errors, logs, _, _, _ = self._run(tmp)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(oks), 1)
+            self.assertTrue(any("録画が途中で止まりました" in msg for msg in logs))
+
+    def test_nothing_recorded_is_reported_as_error(self):
+        FakeLiveRecorder.data = b""
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, errors, _, _, _, _ = self._run(tmp)
+            self.assertEqual(oks, [])
+            self.assertEqual(errors, ["録画できたデータがありません"])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_stop_request_is_passed_to_recorder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            captured = {}
+
+            class CapturingRecorder(FakeLiveRecorder):
+                def __init__(self, ffmpeg_location, inputs, output_path, on_progress, should_stop):
+                    super().__init__(ffmpeg_location, inputs, output_path, on_progress, should_stop)
+                    captured["should_stop"] = should_stop
+
+            with patch("workers.LiveRecorder", CapturingRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=fake_remux):
+                run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertFalse(captured["should_stop"]())
+            worker.cancel()
+            self.assertTrue(captured["should_stop"]())

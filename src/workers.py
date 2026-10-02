@@ -39,6 +39,7 @@ from live import (
     recording_text,
     strip_live_title_suffix,
 )
+from live_recorder import LiveRecorder, RecordingProgress, live_inputs, recording_extension, remux_recording
 from paths import get_ffmpeg_location, hide_path_quietly, log_debug, remove_file_quietly
 from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY, add_format_exclusion
 
@@ -664,12 +665,15 @@ class DownloadWorker(QThread):
             self._raise_if_cancelled()
             self._create_work_dir()
 
-            download_opts = self._build_download_opts(expected_ext, ffmpeg_location)
-            if self.request.live_mode is not None:
-                self._start_live_state(probe_info)
-            with yt_dlp.YoutubeDL(download_opts) as ydl:
-                self._register_format_exclusion(ydl)
-                ydl.download([self.request.url])
+            if self.request.live_mode == "from_now":
+                self._record_live_from_now(probe_info, ffmpeg_location)
+            else:
+                download_opts = self._build_download_opts(expected_ext, ffmpeg_location)
+                if self.request.live_mode is not None:
+                    self._start_live_state(probe_info)
+                with yt_dlp.YoutubeDL(download_opts) as ydl:
+                    self._register_format_exclusion(ydl)
+                    ydl.download([self.request.url])
 
             if self.request.live_mode is not None:
                 # 停止・配信終了のどちらでも、録画できた分を保存する(完了の経路で終わる)
@@ -773,6 +777,48 @@ class DownloadWorker(QThread):
         else:
             opts["writethumbnail"] = False
         return opts
+
+    # 今からの録画で、ffmpegが書く途中経過のファイル名(作業フォルダの中)
+    _LIVE_RECORDING_NAME = "recording.ts"
+
+    def _record_live_from_now(self, probe_info: Format, ffmpeg_location: str | None) -> None:
+        """今からのライブ録画(LiveRecorder)を行い、選ばれた形式のファイルへ入れ替える。
+        通信断等でffmpegが途中で止まっても、録画できた分があれば保存する"""
+        assert self._work_dir is not None and self._file_stem is not None
+        ts_path = os.path.join(self._work_dir, self._LIVE_RECORDING_NAME)
+        for fmt in probe_info.get("requested_formats") or [probe_info]:
+            self.log.emit(self._describe_selected_format(fmt))
+        recorder = LiveRecorder(
+            ffmpeg_location,
+            live_inputs(probe_info),
+            ts_path,
+            on_progress=self._on_live_recording_progress,
+            should_stop=lambda: self._is_cancelled,
+        )
+        self._start_live_state(probe_info)
+        returncode = recorder.record()
+        self._end_live_state()
+
+        if not os.path.isfile(ts_path) or os.path.getsize(ts_path) == 0:
+            raise RuntimeError(self.LIVE_NO_DATA_ERROR)
+        if returncode != 0 and not self._is_cancelled:
+            self.log.emit(f"録画が途中で止まりました(ffmpegの終了コード{returncode})。録画できた分を保存します")
+
+        codec = self._extract_audio_codec()
+        output_path = os.path.join(self._work_dir, f"{self._file_stem}.{recording_extension(codec)}")
+        remux_recording(ffmpeg_location, ts_path, output_path, codec)
+        remove_file_quietly(ts_path, "_record_live_from_now")
+        self._final_filepath = output_path
+
+    def _on_live_recording_progress(self, progress: RecordingProgress) -> None:
+        self.progress.emit(LIVE_RECORDING_PERCENT, recording_text(progress.seconds, progress.size_bytes))
+
+    def _extract_audio_codec(self) -> str | None:
+        """音声のみの形式で指定された、音声を取り出す後処理(FFmpegExtractAudio)の変換先"""
+        for pp in self.request.postprocessors:
+            if pp.get("key") == "FFmpegExtractAudio":
+                return pp.get("preferredcodec") or "best"
+        return None
 
     def _finish_cancelled_after_download(self) -> None:
         # download()が例外を投げずに戻ってきた=本編のダウンロードも後処理も
