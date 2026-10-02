@@ -64,7 +64,6 @@ class SetupUiTest(unittest.TestCase):
 
     def test_download_related_buttons_start_disabled(self):
         self.assertFalse(self.window.download_btn.isEnabled())
-        self.assertFalse(self.window.cancel_btn.isEnabled())
         self.assertFalse(self.window.open_folder_btn.isEnabled())
 
     def test_window_title_without_version_is_app_name(self):
@@ -86,22 +85,8 @@ class SetupUiTest(unittest.TestCase):
     def test_log_view_starts_hidden(self):
         self.assertFalse(self.window.log_view.isVisible())
 
-    def test_input_widgets_lists_expected_widgets(self):
-        expected = {
-            self.window.url_edit,
-            self.window.paste_btn,
-            self.window.out_edit,
-            self.window.browse_btn,
-            self.window.format_combo,
-            self.window.manual_toggle_btn,
-            self.window.video_format_combo,
-            self.window.audio_format_combo,
-            self.window.mp3_checkbox,
-            self.window.mp3_label,
-            self.window.detail_toggle_btn,
-            self.window.detail_container,
-        }
-        self.assertEqual(set(self.window.input_widgets), expected)
+    def test_download_panel_starts_hidden(self):
+        self.assertTrue(self.window.download_panel.isHidden())
 
 
 class ToggleButtonTextTest(unittest.TestCase):

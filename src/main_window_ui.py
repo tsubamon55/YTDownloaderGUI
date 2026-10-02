@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -28,6 +28,7 @@ from theme import (
     ACCENT_DISABLED_COLOR,
     ACCENT_HOVER_COLOR,
     ACCENT_PRESSED_COLOR,
+    LINK_BUTTON_STYLE,
     MUTED_TEXT_COLOR,
     ON_ACCENT_DISABLED_TEXT_COLOR,
     ON_ACCENT_TEXT_COLOR,
@@ -42,15 +43,11 @@ APP_TITLE = "YouTube 動画ダウンローダー"
 
 THUMBNAIL_SIZE = QSize(120, 68)
 
-LINK_BUTTON_STYLE = f"""
-QPushButton {{
-    color: {ACCENT_COLOR};
-    border: none;
-    padding: 2px 4px;
-    background: transparent;
-}}
-QPushButton:hover {{ text-decoration: underline; }}
-"""
+# ウィンドウの既定の幅。ダウンロード一覧を表示するとその分だけ広がるため、入力欄側は控えめにする
+DEFAULT_WINDOW_WIDTH = 560
+
+# 画面右上に並べるダウンロード一覧の幅
+DOWNLOAD_PANEL_WIDTH = 240
 
 
 def window_title(version: str | None) -> str:
@@ -92,14 +89,13 @@ class Ui_MainWindow(QMainWindow):
     out_edit: QLineEdit
     browse_btn: QPushButton
     download_btn: QPushButton
-    cancel_btn: QPushButton
     open_folder_btn: QPushButton
-    progress_bar: QProgressBar
     spinner: SpinnerWidget
     status_label: QLabel
     log_toggle_btn: QPushButton
     log_view: QPlainTextEdit
-    input_widgets: list[QWidget]
+    download_panel: QWidget
+    download_list_layout: QVBoxLayout
 
     @staticmethod
     def _make_toggle_button(text: str, fixed_size: bool = True) -> QPushButton:
@@ -121,13 +117,16 @@ class Ui_MainWindow(QMainWindow):
 
     def setup_ui(self, saved_out_dir: str, version: str | None = None) -> None:
         self.setWindowTitle(window_title(version))
-        self.resize(760, 420)
+        self.resize(DEFAULT_WINDOW_WIDTH, 420)
 
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(16, 14, 16, 14)
+        root_layout = QHBoxLayout(central)
+        root_layout.setContentsMargins(16, 14, 16, 14)
+        root_layout.setSpacing(12)
+        layout = QVBoxLayout()
         layout.setSpacing(8)
+        root_layout.addLayout(layout, stretch=1)
 
         # --- URL入力 ---
         url_row = QHBoxLayout()
@@ -342,22 +341,14 @@ class Ui_MainWindow(QMainWindow):
         )
         self.download_btn.setEnabled(False)
         btn_row.addWidget(self.download_btn, stretch=1)
-        self.cancel_btn = QPushButton("キャンセル")
-        self.cancel_btn.setEnabled(False)
-        btn_row.addWidget(self.cancel_btn)
         self.open_folder_btn = QPushButton("フォルダを開く")
         self.open_folder_btn.setEnabled(False)
         btn_row.addWidget(self.open_folder_btn)
         layout.addLayout(btn_row)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        layout.addWidget(self.progress_bar)
-
         status_row = QHBoxLayout()
         self.spinner = SpinnerWidget()
         status_row.addWidget(self.spinner)
-        # 進捗表示にはyt-dlpが返す速度等の文字列が入る
         self.status_label = QLabel(IDLE_STATUS_TEXT)
         self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         status_row.addWidget(self.status_label)
@@ -371,17 +362,31 @@ class Ui_MainWindow(QMainWindow):
         self.log_view.setVisible(False)
         layout.addWidget(self.log_view)
 
-        self.input_widgets = [
-            self.url_edit,
-            self.paste_btn,
-            self.out_edit,
-            self.browse_btn,
-            self.format_combo,
-            self.manual_toggle_btn,
-            self.video_format_combo,
-            self.audio_format_combo,
-            self.mp3_checkbox,
-            self.mp3_label,
-            self.detail_toggle_btn,
-            self.detail_container,
-        ]
+        root_layout.addWidget(self._build_download_panel())
+
+    def _build_download_panel(self) -> QWidget:
+        """ダウンロード開始ごとに1件ずつ積まれる一覧(画面右上)。1件もない間は隠しておく"""
+        self.download_panel = QWidget()
+        self.download_panel.setFixedWidth(DOWNLOAD_PANEL_WIDTH)
+        # 一覧の件数でウィンドウが縦に伸びないよう、高さは左側の入力欄に合わせて決まるようにする
+        self.download_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
+        panel_layout = QVBoxLayout(self.download_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(4)
+        panel_layout.addWidget(QLabel("ダウンロード"))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        list_container = QWidget()
+        self.download_list_layout = QVBoxLayout(list_container)
+        self.download_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.download_list_layout.setSpacing(6)
+        # 新しいものを上に積み、残りの余白は下に寄せる
+        self.download_list_layout.addStretch(1)
+        scroll.setWidget(list_container)
+        panel_layout.addWidget(scroll, stretch=1)
+
+        self.download_panel.setVisible(False)
+        return self.download_panel

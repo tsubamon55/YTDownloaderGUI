@@ -7,7 +7,11 @@ from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt,
 from PyQt6.QtGui import QColor, QFocusEvent, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFrame,
+    QHBoxLayout,
     QLabel,
+    QProgressBar,
+    QPushButton,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionComboBox,
@@ -28,10 +32,14 @@ from formats import (
 from theme import (
     ACCENT_COLOR,
     DISABLED_CONTROL_RGB,
+    LINK_BUTTON_STYLE,
+    MUTED_TEXT_COLOR,
     NEUTRAL_RGB,
+    PLACEHOLDER_BACKGROUND,
     POPUP_BACKGROUND_COLOR,
     POPUP_IMAGE_BACKGROUND,
     POPUP_TEXT_COLOR,
+    TASK_BORDER_COLOR,
 )
 
 # RangeSliderの2つのハンドル(開始側/終了側)
@@ -438,3 +446,113 @@ class RangeSlider(QWidget):
             radius = self._HANDLE_RADIUS + 2 if emphasized else self._HANDLE_RADIUS
             painter.drawEllipse(QPointF(x, mid_y), radius, radius)
         painter.end()
+
+
+class DownloadTaskWidget(QFrame):
+    """並列ダウンロードの1件分(サムネイル・タイトル・進捗バー・状態・キャンセル/閉じるボタン)を表示する。
+
+    走行中はボタンがキャンセル、終わった後は一覧から取り除く「閉じる」として働く"""
+
+    THUMBNAIL_SIZE = QSize(64, 36)
+
+    cancel_requested = pyqtSignal()
+    dismiss_requested = pyqtSignal()
+
+    def __init__(self, title: str, thumbnail: QPixmap | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._finished = False
+        self.setObjectName("downloadTask")
+        self.setStyleSheet(
+            f"#downloadTask {{ border: 1px solid {TASK_BORDER_COLOR}; border-radius: 4px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 4)
+        layout.setSpacing(4)
+
+        # 折り返すQLabelはheightForWidthの計算がずれて縦に間延びするため、
+        # サムネイルの高さに固定したコンテナで包む(MainWindowの動画プレビューと同じ理由)
+        header = QWidget()
+        header.setFixedHeight(self.THUMBNAIL_SIZE.height())
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setFixedSize(self.THUMBNAIL_SIZE)
+        self.thumbnail_label.setStyleSheet(f"background-color: {PLACEHOLDER_BACKGROUND}; border-radius: 2px;")
+        if thumbnail is not None and not thumbnail.isNull():
+            self.thumbnail_label.setPixmap(self._fit_thumbnail(thumbnail))
+        header_layout.addWidget(self.thumbnail_label)
+        # 動画タイトルは外部由来の文字列のため、HTMLとして描画しない。高さをちょうど2行分にして
+        # 上詰めにし、3行目以降は行の途中で切れずに隠れるようにする(全文はツールチップで見せる)
+        self.title_label = QLabel(title)
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.title_label.setToolTip(title)
+        self.title_label.setWordWrap(True)
+        self.title_label.setMinimumWidth(1)
+        self.title_label.setMaximumHeight(self.title_label.fontMetrics().lineSpacing() * 2)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        header_layout.addWidget(self.title_label, stretch=1, alignment=Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(header)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
+        layout.addWidget(self.progress_bar)
+
+        # 状態とボタンを同じ行に置き、狭い一覧でもタイトルの幅を削らないようにする
+        footer = QHBoxLayout()
+        footer.setSpacing(4)
+        # 進捗表示にはyt-dlpが返す速度等の文字列が入る
+        self.status_label = QLabel("開始待ち...")
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.status_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        self.status_label.setMinimumWidth(1)
+        footer.addWidget(self.status_label, stretch=1)
+        self.action_btn = QPushButton("キャンセル")
+        self.action_btn.setFlat(True)
+        self.action_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        self.action_btn.clicked.connect(self._on_action_clicked)
+        footer.addWidget(self.action_btn)
+        layout.addLayout(footer)
+
+    def _fit_thumbnail(self, pixmap: QPixmap) -> QPixmap:
+        """アスペクト比を保ったまま表示枠いっぱいに縮小し、はみ出た部分を中央基準で切り出す。
+        高DPI画面でぼやけないよう、元画像の画素密度のまま作る"""
+        ratio = pixmap.devicePixelRatio()
+        width = round(self.THUMBNAIL_SIZE.width() * ratio)
+        height = round(self.THUMBNAIL_SIZE.height() * ratio)
+        scaled = pixmap.scaled(
+            width, height, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+        )
+        fitted = scaled.copy((scaled.width() - width) // 2, (scaled.height() - height) // 2, width, height)
+        fitted.setDevicePixelRatio(ratio)
+        return fitted
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
+
+    def set_progress(self, percent: float, text: str) -> None:
+        self.progress_bar.setValue(int(percent))
+        self.status_label.setText(text)
+
+    def set_cancelling(self) -> None:
+        self.action_btn.setEnabled(False)
+        self.status_label.setText("キャンセル中...")
+
+    def mark_finished(self, status: str, success: bool) -> None:
+        """終了状態の表示に切り替え、ボタンを一覧から取り除く「閉じる」に変える"""
+        self._finished = True
+        if success:
+            self.progress_bar.setValue(100)
+        self.status_label.setText(status)
+        self.action_btn.setText("閉じる")
+        self.action_btn.setEnabled(True)
+
+    def _on_action_clicked(self) -> None:
+        if self._finished:
+            self.dismiss_requested.emit()
+        else:
+            self.cancel_requested.emit()

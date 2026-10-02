@@ -257,9 +257,9 @@ def reattach_thumbnails(
         ffmpeg.real_run_ffmpeg(input_specs, [(merged_path, output_opts)])
         os.replace(merged_path, video_path)
     finally:
-        # ffmpegが失敗した場合、部分的に書き込まれた中間ファイルが保存先に残る。
-        # この経路は呼び出し元で握りつぶされて成功扱い(finished_ok)になり
-        # _cleanup_leftover_filesも走らないため、ここで確実に後片付けする
+        # ffmpegが失敗した場合、部分的に書き込まれた中間ファイルが残る。
+        # この経路は呼び出し元で握りつぶされて成功扱い(finished_ok)になり、
+        # 完成品と一緒に保存先へ移されかねないため、ここで確実に後片付けする
         remove_file_quietly(merged_path, "reattach_thumbnails")
 
 
