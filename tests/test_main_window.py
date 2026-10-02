@@ -1752,5 +1752,87 @@ class LiveFormTest(MainWindowTestCase):
         self.assertIsNone(request.clip_start)
 
 
+class LiveTaskPinningTest(MainWindowTestCase):
+    def _start_live_task(self, live_mode_now=False):
+        self.window.url_edit.setText(f"https://www.youtube.com/live/{id(self)}{live_mode_now}")
+        self.window.out_edit.setText(OUT_DIR)
+        fetch_worker = MagicMock()
+        self.window.format_worker = fetch_worker
+        self.window.on_formats_fetched([make_video(), make_audio()], "Stream", b"", None, fetch_worker,
+                                       live_info=LiveInfo(started_at=None, can_record_from_start=True))
+        if live_mode_now:
+            self.window.live_from_now_radio.setChecked(True)
+        worker = MagicMock()
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", return_value=worker) as worker_cls:
+            self.window.start_download()
+        request = worker_cls.call_args.args[0]
+        worker.request = request
+        return worker, self.window._download_tasks[worker]
+
+    def _start_normal_task(self):
+        self.window.url_edit.setText("https://example.com/watch?v=normal")
+        self.window.out_edit.setText(OUT_DIR)
+        self.window.title_label.setText("normal")
+        worker = MagicMock()
+        worker.request.live_mode = None
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", return_value=worker):
+            self.window.start_download()
+        return worker, self.window._download_tasks[worker]
+
+    def test_recording_task_is_pinned_above_the_scrolling_list(self):
+        _, task = self._start_live_task()
+        self.assertGreaterEqual(self.window.pinned_list_layout.indexOf(task), 0)
+        self.assertTrue(self.window.pinned_list_container.isVisible())
+        self.assertTrue(task.is_live)
+
+    def test_normal_task_started_later_does_not_push_recording_down(self):
+        _, live_task = self._start_live_task()
+        _, normal_task = self._start_normal_task()
+        self.assertGreaterEqual(self.window.pinned_list_layout.indexOf(live_task), 0)
+        self.assertEqual(self.window.download_list_layout.indexOf(normal_task), 0)
+
+    def test_live_end_moves_task_to_top_of_normal_list(self):
+        worker, task = self._start_live_task()
+        self._start_normal_task()
+        live_state_slot = worker.live_state_changed.connect.call_args.args[0]
+        live_state_slot(False)
+        self.assertEqual(self.window.pinned_list_layout.indexOf(task), -1)
+        self.assertEqual(self.window.download_list_layout.indexOf(task), 0)
+        self.assertFalse(self.window.pinned_list_container.isVisible())
+
+    def test_failed_recording_is_unpinned_too(self):
+        worker, task = self._start_live_task()
+        with patch.object(dialogs, "critical"):
+            self.window.on_download_error(worker, "録画できたデータがありません")
+        self.assertEqual(self.window.pinned_list_layout.indexOf(task), -1)
+        self.assertEqual(self.window.download_list_layout.indexOf(task), 0)
+
+    def test_dismissing_last_task_hides_panel(self):
+        worker, task = self._start_live_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        self.window._remove_task_widget(task)
+        self.assertFalse(self.window.download_panel.isVisible())
+
+    def test_stop_asks_before_stopping(self):
+        worker, task = self._start_live_task()
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No) as question_mock:
+            task.stop_requested.emit()
+        self.assertIn("録画を停止して保存しますか?", question_mock.call_args.args[2])
+        worker.cancel.assert_not_called()
+
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            task.stop_requested.emit()
+        worker.cancel.assert_called_once()
+        self.assertEqual(task.status_label.text(), "保存しています...")
+
+    def test_request_carries_selected_live_mode(self):
+        worker, _ = self._start_live_task(live_mode_now=True)
+        self.assertEqual(worker.request.live_mode, "from_now")
+
+
 if __name__ == "__main__":
     unittest.main()

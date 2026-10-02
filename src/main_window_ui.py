@@ -108,6 +108,8 @@ class Ui_MainWindow(QMainWindow):
     live_unavailable_label: QLabel
     download_panel: QWidget
     download_list_layout: QVBoxLayout
+    pinned_list_container: QWidget
+    pinned_list_layout: QVBoxLayout
 
     @staticmethod
     def _make_toggle_button(text: str, fixed_size: bool = True) -> QPushButton:
@@ -427,6 +429,15 @@ class Ui_MainWindow(QMainWindow):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(4)
         panel_layout.addWidget(QLabel("ダウンロード"))
+
+        # ライブの録画中のタスクは、スクロール領域の外のここに置く。通常のダウンロードが何件あっても
+        # スクロールで見えなくならないよう、一覧の上部に固定する(録画が終わったら下の一覧へ移す)
+        self.pinned_list_container = QWidget()
+        self.pinned_list_layout = QVBoxLayout(self.pinned_list_container)
+        self.pinned_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.pinned_list_layout.setSpacing(6)
+        self.pinned_list_container.setVisible(False)
+        panel_layout.addWidget(self.pinned_list_container)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

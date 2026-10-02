@@ -888,8 +888,10 @@ class MainWindow(Ui_MainWindow):
         title = self.title_label.text() or request.url
         worker = DownloadWorker(request)
         task = DownloadTaskWidget(title, self.thumbnail_label.pixmap())
+        is_recording = request.live_mode is not None
+        task.set_live(is_recording)
         self._download_tasks[worker] = task
-        self._add_task_widget(task)
+        self._add_task_widget(task, pinned=is_recording)
 
         worker.progress.connect(task.set_progress)
         # 複数のダウンロードのログが混ざるため、どの動画のものか分かるように添える
@@ -897,7 +899,9 @@ class MainWindow(Ui_MainWindow):
         worker.finished_ok.connect(lambda saved_path, w=worker: self.on_download_finished_ok(w, saved_path))
         worker.finished_error.connect(lambda message, w=worker: self.on_download_error(w, message))
         worker.cancelled.connect(lambda w=worker: self.on_download_cancelled(w))
+        worker.live_state_changed.connect(lambda live, t=task: self._on_live_state_changed(t, live))
         task.cancel_requested.connect(lambda w=worker: self.cancel_download(w))
+        task.stop_requested.connect(lambda w=worker: self.request_stop_recording(w))
         task.dismiss_requested.connect(lambda t=task: self._remove_task_widget(t))
         task.reveal_requested.connect(self._reveal_saved_file)
         worker.start()
@@ -916,12 +920,33 @@ class MainWindow(Ui_MainWindow):
     def _running_downloads(self) -> list[DownloadWorker]:
         return [worker for worker in self._download_tasks if worker.isRunning()]
 
-    def _add_task_widget(self, task: DownloadTaskWidget) -> None:
-        # 新しいものほど上に表示する
-        self.download_list_layout.insertWidget(0, task)
+    @staticmethod
+    def _is_recording(worker: DownloadWorker) -> bool:
+        return worker.request.live_mode is not None
+
+    def _add_task_widget(self, task: DownloadTaskWidget, pinned: bool = False) -> None:
+        # 新しいものほど上に表示する。録画中のものはスクロールしない上部の固定領域に置く
+        if pinned:
+            self.pinned_list_layout.insertWidget(0, task)
+            self.pinned_list_container.setVisible(True)
+        else:
+            self.download_list_layout.insertWidget(0, task)
         self._set_download_panel_visible(True)
 
+    def _unpin_task_widget(self, task: DownloadTaskWidget) -> None:
+        """録画が終わったタスクを固定領域から外し、通常の一覧の先頭へ移す(固定されていなければ何もしない)"""
+        if self.pinned_list_layout.indexOf(task) < 0:
+            return
+        self.pinned_list_layout.removeWidget(task)
+        self.pinned_list_container.setVisible(self.pinned_list_layout.count() > 0)
+        self.download_list_layout.insertWidget(0, task)
+
+    def _on_live_state_changed(self, task: DownloadTaskWidget, live: bool) -> None:
+        if not live:
+            self._unpin_task_widget(task)
+
     def _remove_task_widget(self, task: DownloadTaskWidget) -> None:
+        self._unpin_task_widget(task)
         self.download_list_layout.removeWidget(task)
         task.deleteLater()
         # 末尾の伸縮用スペーサーだけが残ったら一覧を隠す
@@ -1071,6 +1096,18 @@ class MainWindow(Ui_MainWindow):
         if task is not None:
             task.set_cancelling()
 
+    def request_stop_recording(self, worker: DownloadWorker) -> None:
+        """今からの録画は止めると取り直せないため、押し間違いでないか確認してから止める"""
+        reply = dialogs.question(
+            self,
+            "録画の停止",
+            "録画を停止して保存しますか?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.cancel_download(worker)
+
     def closeEvent(self, event: QCloseEvent | None) -> None:
         """終了時に、走っているワーカースレッドを止めて終了を待つ。
 
@@ -1159,9 +1196,13 @@ class MainWindow(Ui_MainWindow):
 
     def _release_download_worker(self, worker: DownloadWorker) -> DownloadTaskWidget | None:
         """終わったダウンロードワーカーを手放し、その表示を返す。完了の通知はrun()が
-        戻る直前に届くため、参照を手放す前に終了を待つ(走行中のQThreadが破棄されるとプロセスごと落ちる)"""
+        戻る直前に届くため、参照を手放す前に終了を待つ(走行中のQThreadが破棄されるとプロセスごと落ちる)。
+        録画の表示は、終わり方によらず上部の固定から外す"""
         worker.wait()
-        return self._download_tasks.pop(worker, None)
+        task = self._download_tasks.pop(worker, None)
+        if task is not None:
+            self._unpin_task_widget(task)
+        return task
 
     def on_download_finished_ok(self, worker: DownloadWorker, saved_path: str) -> None:
         """並列に何本も完了するとウィンドウが増え続けるため、フォルダは自動では開かず、
