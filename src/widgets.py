@@ -29,10 +29,13 @@ from formats import (
     FORMAT_MISMATCH_ROLE,
     FORMAT_ROW_HEIGHT,
 )
+from live import LIVE_SAVING_TEXT
 from theme import (
     ACCENT_COLOR,
     DISABLED_CONTROL_RGB,
     LINK_BUTTON_STYLE,
+    LIVE_COLOR,
+    LIVE_PROGRESS_BAR_STYLE,
     MUTED_TEXT_COLOR,
     NEUTRAL_RGB,
     PLACEHOLDER_BACKGROUND,
@@ -452,11 +455,14 @@ class DownloadTaskWidget(QFrame):
     """並列ダウンロードの1件分(サムネイル・タイトル・進捗バー・状態・キャンセル/閉じるボタン)を表示する。
 
     走行中はボタンがキャンセル、終わった後は一覧から取り除く「閉じる」として働く。
-    完了した場合は、保存したファイルを選択した状態でフォルダを開く「フォルダを開く」も出す"""
+    完了した場合は、保存したファイルを選択した状態でフォルダを開く「フォルダを開く」も出す。
+    ライブの録画中(set_live)は赤いLIVEバッジを出し、ボタンはキャンセルではなく停止(それまでの分を保存)として働く"""
 
     THUMBNAIL_SIZE = QSize(64, 36)
 
     cancel_requested = pyqtSignal()
+    # ライブの録画の停止(それまでの分を保存する)。確認は受け取った側で行う
+    stop_requested = pyqtSignal()
     dismiss_requested = pyqtSignal()
     # 保存したファイルのパス
     reveal_requested = pyqtSignal(str)
@@ -465,6 +471,7 @@ class DownloadTaskWidget(QFrame):
         super().__init__(parent)
         self._finished = False
         self._saved_path: str | None = None
+        self._live = False
         self.setObjectName("downloadTask")
         self.setStyleSheet(
             f"#downloadTask {{ border: 1px solid {TASK_BORDER_COLOR}; border-radius: 4px; }}"
@@ -513,6 +520,10 @@ class DownloadTaskWidget(QFrame):
         self.spinner = SpinnerWidget(diameter=14)
         self.spinner.start()
         footer.addWidget(self.spinner)
+        self.live_badge = QLabel("● LIVE")
+        self.live_badge.setStyleSheet(f"color: {LIVE_COLOR}; font-weight: bold;")
+        self.live_badge.setVisible(False)
+        footer.addWidget(self.live_badge)
         # 進捗表示にはyt-dlpが返す速度等の文字列が入る
         self.status_label = QLabel("開始待ち...")
         self.status_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -549,13 +560,31 @@ class DownloadTaskWidget(QFrame):
     def finished(self) -> bool:
         return self._finished
 
+    @property
+    def is_live(self) -> bool:
+        return self._live
+
+    def set_live(self, live: bool) -> None:
+        """ライブの録画の表示(赤いLIVEバッジ・赤い進捗バー・「停止」ボタン)にする。
+        録画が終わって保存した後も、何の録画だったか分かるようバッジと色はそのまま残す"""
+        self._live = live
+        self.live_badge.setVisible(live)
+        self.progress_bar.setStyleSheet(LIVE_PROGRESS_BAR_STYLE if live else "")
+        if not self._finished:
+            self.action_btn.setText("停止" if live else "キャンセル")
+
     def set_progress(self, percent: float, text: str) -> None:
-        self.progress_bar.setValue(int(percent))
+        """percentが負の値なら、割合が無い(ライブの録画中・保存中)ことを表し、進捗バーを動き続ける表示にする"""
+        if percent < 0:
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(int(percent))
         self.status_label.setText(text)
 
     def set_cancelling(self) -> None:
         self.action_btn.setEnabled(False)
-        self.status_label.setText("キャンセル中...")
+        self.status_label.setText(LIVE_SAVING_TEXT if self._live else "キャンセル中...")
 
     def mark_finished(self, status: str, saved_path: str | None = None) -> None:
         """終了状態の表示に切り替え、ボタンを一覧から取り除く「閉じる」に変える。
@@ -563,6 +592,8 @@ class DownloadTaskWidget(QFrame):
         self._finished = True
         self._saved_path = saved_path
         self.spinner.stop()
+        # 録画中の動き続ける表示のまま終わらないよう、割合の表示に戻す
+        self.progress_bar.setRange(0, 100)
         if saved_path is not None:
             self.progress_bar.setValue(100)
             self.reveal_btn.setVisible(True)
@@ -577,5 +608,7 @@ class DownloadTaskWidget(QFrame):
     def _on_action_clicked(self) -> None:
         if self._finished:
             self.dismiss_requested.emit()
+        elif self._live:
+            self.stop_requested.emit()
         else:
             self.cancel_requested.emit()

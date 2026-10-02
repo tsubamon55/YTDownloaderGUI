@@ -334,5 +334,58 @@ class DownloadTaskSpinnerTest(unittest.TestCase):
             self.assertFalse(task.spinner._timer.isActive())
 
 
+class DownloadTaskLiveTest(unittest.TestCase):
+    def setUp(self):
+        self.task = widgets.DownloadTaskWidget("title")
+        self.addCleanup(self.task.deleteLater)
+
+    def test_live_shows_badge_and_stop_button(self):
+        self.task.set_live(True)
+        self.assertFalse(self.task.live_badge.isHidden())
+        self.assertEqual(self.task.live_badge.text(), "● LIVE")
+        self.assertEqual(self.task.action_btn.text(), "停止")
+
+    def test_normal_task_has_no_badge(self):
+        self.assertTrue(self.task.live_badge.isHidden())
+        self.assertEqual(self.task.action_btn.text(), "キャンセル")
+
+    def test_stop_button_requests_stop_instead_of_cancel(self):
+        self.task.set_live(True)
+        stops, cancels = [], []
+        self.task.stop_requested.connect(lambda: stops.append(True))
+        self.task.cancel_requested.connect(lambda: cancels.append(True))
+        self.task.action_btn.click()
+        self.assertEqual((stops, cancels), ([True], []))
+
+    def test_negative_percent_makes_bar_indeterminate(self):
+        self.task.set_progress(-1.0, "録画中 0:05")
+        self.assertEqual(self.task.progress_bar.maximum(), 0)
+        self.assertEqual(self.task.status_label.text(), "録画中 0:05")
+
+    def test_percent_after_indeterminate_restores_range(self):
+        self.task.set_progress(-1.0, "録画中 0:05")
+        self.task.set_progress(37.0, "さかのぼり取得中 37%")
+        self.assertEqual((self.task.progress_bar.maximum(), self.task.progress_bar.value()), (100, 37))
+
+    def test_stopping_live_shows_saving(self):
+        self.task.set_live(True)
+        self.task.set_cancelling()
+        self.assertEqual(self.task.status_label.text(), "保存しています...")
+        self.assertFalse(self.task.action_btn.isEnabled())
+
+    def test_finished_after_indeterminate_shows_full_bar(self):
+        self.task.set_live(True)
+        self.task.set_progress(-1.0, "保存しています...")
+        self.task.mark_finished("完了", saved_path="/out/x.mp4")
+        self.assertEqual((self.task.progress_bar.maximum(), self.task.progress_bar.value()), (100, 100))
+        self.assertEqual(self.task.action_btn.text(), "閉じる")
+        self.assertFalse(self.task.live_badge.isHidden())
+
+    def test_failed_after_indeterminate_stops_animation(self):
+        self.task.set_progress(-1.0, "録画中 0:05")
+        self.task.mark_finished("失敗しました")
+        self.assertEqual(self.task.progress_bar.maximum(), 100)
+
+
 if __name__ == "__main__":
     unittest.main()

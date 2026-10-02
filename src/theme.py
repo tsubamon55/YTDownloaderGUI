@@ -34,3 +34,11 @@ QPushButton {{
 }}
 QPushButton:hover {{ text-decoration: underline; }}
 """
+
+# 配信中のライブを表す赤(YouTubeのLIVE表示に近い色)。LIVEバッジと録画中の進捗バーに使う
+LIVE_COLOR = "#d93025"
+# 録画中の進捗バー。::chunkだけに色を付けるとスタイルシート描画に切り替わって溝が消えるため、溝も合わせて描く
+LIVE_PROGRESS_BAR_STYLE = f"""
+QProgressBar {{ border: none; border-radius: 3px; background-color: {PLACEHOLDER_BACKGROUND}; }}
+QProgressBar::chunk {{ border-radius: 3px; background-color: {LIVE_COLOR}; }}
+"""

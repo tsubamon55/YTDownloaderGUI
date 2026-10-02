@@ -1062,10 +1062,6 @@ class BaseYdlOptsTest(unittest.TestCase):
         self.assertEqual(opts["ffmpeg_location"], "C:/ffmpeg")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _live_ydl_factory(normal_info, from_start_info=None, from_start_error=None):
     """live_from_startの有無で結果を変えるYoutubeDLの代わり。生成時のoptsを記録する"""
     created_opts = []
@@ -1367,3 +1363,7 @@ class LiveFromNowRunTest(unittest.TestCase):
             self.assertFalse(captured["should_stop"]())
             worker.cancel()
             self.assertTrue(captured["should_stop"]())
+
+
+if __name__ == "__main__":
+    unittest.main()
