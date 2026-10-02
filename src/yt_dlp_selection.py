@@ -3,7 +3,7 @@
 プレビュー(format_engine.py)と実ダウンロード(workers.py)で選択結果がズレないよう、
 どちらも独自の選択ロジックを持たず、yt-dlpの通常の処理経路と公式の拡張点だけを使う。
 
-- select_formats: 取得済みのformatsだけを持つ最小の動画情報を
+- select_format: 取得済みのformatsだけを持つ最小の動画情報を
   YoutubeDL.process_ie_result(download=False)に通し、実際に選ばれるフォーマットを求める。
 - add_format_exclusion: when="pre_process"のポストプロセッサでinfo["formats"]を絞り込み、
   指定したフォーマットをformat_specの解決前に候補から外す。yt-dlpはpre_processの後で
@@ -25,14 +25,13 @@ from yt_dlp.postprocessor import PostProcessor
 _PREVIEW_INFO = {"id": "preview", "title": "preview", "extractor": "generic", "extractor_key": "Generic"}
 
 
-def select_formats(
-    formats: list[dict], format_spec: str, format_sort: list | None = None
-) -> list[dict]:
-    """format_specに一致する候補をformatsから選択する(ネットワークアクセスなし)。
+def select_format(formats: list[dict], format_spec: str, format_sort: list | None = None) -> dict | None:
+    """format_specでyt-dlpが選ぶフォーマットを求める(ネットワークアクセスなし)。
 
     実際のダウンロード(DownloadWorker)と同じ選択結果を得るため、独自の選択ロジックを
     実装せず、formatsだけを持つ最小の動画情報をyt-dlpの通常の処理経路
-    (process_ie_result)に通して選ばせる。一致する候補が無ければ空リストを返す。
+    (process_ie_result)に通して選ばせる。戻り値は選ばれた動画情報で、映像と音声を
+    結合する場合は構成要素がrequested_formatsに入る。一致する候補が無ければNoneを返す。
 
     yt-dlpは__needs_testing等の印が付いたフォーマットを選ぶ前に実際に取得して確かめるが、
     プレビューでは通信しないようcheck_formatsを無効にする。そのため、テストに失敗する
@@ -49,9 +48,9 @@ def select_formats(
     info = {**_PREVIEW_INFO, "formats": copy.deepcopy(formats)}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return [ydl.process_ie_result(info, download=False)]
+            return ydl.process_ie_result(info, download=False)
     except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
-        return []
+        return None
 
 
 class ExcludeFormatsPP(PostProcessor):

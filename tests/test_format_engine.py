@@ -60,6 +60,22 @@ class ResolveFormatSpecTest(unittest.TestCase):
         self.assertEqual(postprocessors, [])
         self.assertIsNone(sort)
 
+    def test_manual_mode_quotes_ids_that_collide_with_reserved_words(self):
+        """"b"や"mp4"のようなIDを素のまま書くと「最良」「拡張子mp4」の指定として解釈される"""
+        formats = [
+            make_video("b", "mp4", "avc1.640028", height=360),
+            make_video("mp4", "mp4", "avc1.640028", height=480),
+            make_video('x"y', "mp4", "avc1.640028", height=720),
+            make_video("hi", "mp4", "avc1.640028", height=1080),
+        ]
+        for fmt in formats[:3]:
+            spec, _, _ = resolve_format_spec(True, fmt, None, False, "")
+            self.assertEqual(select_best_format(formats, spec, None)["format_id"], fmt["format_id"])
+
+    def test_manual_mode_keeps_numeric_ids_readable(self):
+        spec, _, _ = resolve_format_spec(True, {"format_id": "137"}, {"format_id": "hls-audio"}, False, "")
+        self.assertEqual(spec, '137+b*[format_id="hls-audio"]')
+
     def test_manual_mode_audio_only_without_mp3_has_no_postprocessor(self):
         audio = {"format_id": "140"}
         spec, postprocessors, _ = resolve_format_spec(True, None, audio, False, "")
@@ -107,6 +123,15 @@ class SelectBestFormatTest(unittest.TestCase):
         video_part = selected["requested_formats"][0]
         self.assertEqual(video_part["format_id"], "137")
 
+    def test_m4a_audio_falls_back_to_combined_format(self):
+        """映像+音声の結合フォーマットしか無いサイトでも「音声のみ (最高音質 m4a)」が失敗しない
+        (音声の取り出しはextract_audioの後処理が行う)"""
+        combined = make_video("18", "mp4", "avc1.42001E", height=360)
+        combined["acodec"] = "mp4a.40.2"
+        spec, postprocessors, sort = resolve_format_spec(False, None, None, False, "音声のみ (最高音質 m4a)")
+        self.assertEqual(select_best_format([combined], spec, sort)["format_id"], "18")
+        self.assertEqual(postprocessors, [extract_audio_postprocessor("best")])
+
     def test_invalid_format_spec_returns_none(self):
         self.assertIsNone(select_best_format(self.formats, "not-a-real-selector[[", None))
 
@@ -145,6 +170,17 @@ class ComputeAutoFormatNoteTest(unittest.TestCase):
         self.assertIn("720p", note)
         self.assertIn("1080p", note)
 
+    def test_portrait_note_uses_short_side(self):
+        """縦型(1080x1920)を「1920p」と表示しない"""
+        formats = [
+            make_video("137", "mp4", "avc1.640028", height=1280, width=720),
+            make_video("399", "mp4", "av01.0.05M.08", height=1920, width=1080),
+        ]
+        note = compute_auto_format_note(formats, "動画 (最高画質 mp4)")
+        self.assertIn("720p", note)
+        self.assertIn("1080p", note)
+        self.assertNotIn("1920p", note)
+
     def test_no_note_when_resolution_matches(self):
         formats = [make_video("137", "mp4", "avc1.640028", height=1080)]
         self.assertEqual(compute_auto_format_note(formats, "動画 (最高画質 mp4)"), "")
@@ -172,14 +208,33 @@ class PlanHighResolutionConfirmationTest(unittest.TestCase):
         self.assertIn("1080", plan.message)
         self.assertIsNotNone(plan.fallback_spec)
 
-    def test_fallback_matches_same_format_when_no_lower_resolution_exists(self):
-        # format_spec_1080pは最終手段として"/b"を含むため、1080p以下の候補が無くても
-        # フォールバック自体は成立し、結果的に同じ解像度が"1080p版"として提示される
-        formats = [make_video("399", "mp4", "avc1.640028", height=1440, width=2560, filesize=80_000_000)]
+    def test_no_fallback_offered_when_no_lower_resolution_exists(self):
+        """format_spec_1080pは最終手段として"/b"を含むため、1080p以下の候補が無いと同じ
+        高解像度が選ばれる。押しても1080pにならない「1080pでダウンロード」は出さない"""
+        formats = [make_video("399", "mp4", "avc1.640028", height=2160, width=3840, filesize=80_000_000)]
         plan = plan_high_resolution_confirmation(formats, "動画 (最高画質 mp4)", "399", None)
         self.assertTrue(plan.needs_confirmation)
+        self.assertFalse(plan.has_fallback)
+        self.assertIsNone(plan.fallback_spec)
+        self.assertNotIn("1080pにすると", plan.message)
+
+    def test_missing_width_is_treated_as_landscape(self):
+        """幅が欠けた横長4Kを、幅0の縦型動画として扱わない(縦型の上限で1080p版を選ばない)"""
+        uhd = make_video("401", "mp4", "avc1.640028", height=2160, filesize=80_000_000)
+        fhd = make_video("137", "mp4", "avc1.640028", height=1080, filesize=50_000_000)
+        uhd["width"] = fhd["width"] = None
+        plan = plan_high_resolution_confirmation([uhd, fhd], "動画 (最高画質 mp4)", "401", None)
+        self.assertTrue(plan.needs_confirmation)
+        self.assertIn("2160p", plan.message)
+        self.assertNotIn("0x2160", plan.message)
+        self.assertIn("1080p(", plan.message)
         self.assertTrue(plan.has_fallback)
-        self.assertIsNotNone(plan.fallback_spec)
+
+    def test_missing_width_is_derived_from_aspect_ratio(self):
+        fmt = make_video("401", "mp4", "avc1.640028", height=1920)
+        fmt["width"] = None
+        fmt["aspect_ratio"] = 0.5625
+        self.assertEqual(selection_resolution(fmt), (1080, 1920))
 
 
 class MismatchedSelectedFormatsTest(unittest.TestCase):

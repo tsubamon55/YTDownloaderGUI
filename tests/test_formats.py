@@ -208,12 +208,12 @@ class DescribeFormatPlainTest(unittest.TestCase):
 class FormatSpec1080pTest(unittest.TestCase):
     def test_landscape_uses_1920x1080_cap(self):
         spec = format_spec_1080p("動画 (最高画質 mp4)", portrait=False)
-        self.assertIn("width<=1920", spec)
+        self.assertIn("width<=?1920", spec)
         self.assertIn("height<=1080", spec)
 
     def test_portrait_swaps_width_and_height_caps(self):
         spec = format_spec_1080p("動画 (最高画質 mp4)", portrait=True)
-        self.assertIn("width<=1080", spec)
+        self.assertIn("width<=?1080", spec)
         self.assertIn("height<=1920", spec)
 
     def test_mp4_label_constrains_container_and_codec(self):

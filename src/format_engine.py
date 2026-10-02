@@ -5,7 +5,8 @@ MainWindowから抜き出した「どのformat_specを使うか」「yt-dlpが�
 QtやQMessageBoxには一切依存しないため、単体テストがそのまま実行できる。
 """
 
-import copy
+import re
+import traceback
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -22,7 +23,7 @@ from formats import (
     is_codec_container_mismatch,
 )
 from paths import log_debug
-from yt_dlp_selection import select_formats
+from yt_dlp_selection import select_format
 
 
 class FormatSelection(NamedTuple):
@@ -63,17 +64,31 @@ def resolve_format_spec(
     return FormatSelection(option.spec, postprocessors, option.sort)
 
 
+def format_id_selector(format_id: str) -> str:
+    """format_idを1つだけ確実に選ぶformat_specの断片を返す。
+
+    format_specに素のIDを書くと、"b"/"best"/"ba"のような予約語や"mp4"のような拡張子名と
+    一致するIDは、そのIDではなく「最良のもの」「その拡張子のもの」の指定として解釈され、
+    別のフォーマットが選ばれてしまう。数字だけのID(YouTube等)はそのどれとも衝突しないため
+    読みやすさを優先してそのまま使い、それ以外はformat_idの一致条件として書く"""
+    if re.fullmatch(r"[0-9]+", format_id):
+        return format_id
+    escaped = format_id.replace("\\", "\\\\").replace('"', '\\"')
+    return f'b*[format_id="{escaped}"]'
+
+
 def _resolve_manual_selection(video_fmt: Format | None, audio_fmt: Format | None, mp3_checked: bool) -> FormatSelection:
     if video_fmt is None and audio_fmt is None:
         raise ValueError("動画または音声のフォーマットを選択してください")
 
     if video_fmt is not None and audio_fmt is not None:
-        return FormatSelection(f"{video_fmt['format_id']}+{audio_fmt['format_id']}", [], None)
+        spec = f"{format_id_selector(video_fmt['format_id'])}+{format_id_selector(audio_fmt['format_id'])}"
+        return FormatSelection(spec, [], None)
     if video_fmt is not None:
-        return FormatSelection(video_fmt["format_id"], [], None)
+        return FormatSelection(format_id_selector(video_fmt["format_id"]), [], None)
     assert audio_fmt is not None  # 動画・音声とも未選択の場合は冒頭で弾いている
     postprocessors = [extract_audio_postprocessor("mp3")] if mp3_checked else []
-    return FormatSelection(audio_fmt["format_id"], postprocessors, None)
+    return FormatSelection(format_id_selector(audio_fmt["format_id"]), postprocessors, None)
 
 
 def select_best_format(
@@ -85,13 +100,16 @@ def select_best_format(
     yt-dlpの選択ロジックそのものを再利用して一貫性を保つ。"""
     if not available_formats:
         return None
-    formats = filter_mismatched_formats(copy.deepcopy(available_formats))
+    # select_formatが内部で複製してから渡すため、ここでは絞り込んだリストを作るだけでよい
+    formats = filter_mismatched_formats(available_formats)
     try:
-        selected = select_formats(formats, format_spec, format_sort)
-    except Exception as e:
-        log_debug(f"select_best_format: format_spec={format_spec!r} の選択に失敗 ({e!r})")
+        return select_format(formats, format_spec, format_sort)
+    except Exception:
+        # 候補が無いことによる失敗はselect_formatがNoneとして返すため、ここに来るのは
+        # yt-dlpのAPI変更などの想定外の失敗。プレビューのために画面操作を止めはしないが、
+        # 原因を追えるようトレースバックごと記録する
+        log_debug(f"select_best_format: format_spec={format_spec!r} の選択に失敗\n{traceback.format_exc()}")
         return None
-    return selected[0] if selected else None
 
 
 def estimate_selection_size(selected: Format | None) -> int | None:
@@ -107,15 +125,39 @@ def estimate_selection_size(selected: Format | None) -> int | None:
     return total
 
 
-def selection_resolution(selected: Format | None) -> tuple[int, int] | None:
+def selection_resolution(selected: Format | None) -> tuple[int | None, int] | None:
+    """選ばれたフォーマット(結合時は映像側)の (幅, 高さ)。高さが分からなければNone。
+
+    幅だけが欠けている場合はaspect_ratioから求め、それも無ければ幅はNone(不明)にする。
+    0で埋めると、横長の動画が「高さ>幅」の縦型として扱われてしまうため"""
     if not selected:
         return None
     for part in selected.get("requested_formats") or [selected]:
         height = part.get("height")
+        if not height:
+            continue
         width = part.get("width")
-        if height:
-            return width or 0, height
+        if not width and part.get("aspect_ratio"):
+            width = round(height * part["aspect_ratio"])
+        return width or None, height
     return None
+
+
+def _resolution_text(width: int | None, height: int) -> str:
+    return f"{width}x{height}" if width else f"{height}p"
+
+
+def _quality_label(width: int | None, height: int) -> int:
+    """「1080p」のような画質表記に使う数値(短辺)。縦型動画(1080x1920)を1920pと呼ばないため。
+    幅が分からない場合は横長とみなして高さを使う"""
+    return min(width, height) if width else height
+
+
+def _within_1080p(width: int | None, height: int) -> bool:
+    """1080p相当(横長1920x1080・縦長1080x1920)の範囲に収まるか。幅が不明なら横長とみなす"""
+    if width is None:
+        return height <= 1080
+    return max(width, height) <= 1920 and min(width, height) <= 1080
 
 
 def compute_auto_format_note(available_formats: list[Format], format_label: str) -> str:
@@ -132,10 +174,10 @@ def compute_auto_format_note(available_formats: list[Format], format_label: str)
     if mp4_resolution is None or best_resolution is None:
         return ""
 
-    _, mp4_height = mp4_resolution
-    _, best_height = best_resolution
-    if mp4_height < best_height:
-        return f"※ 互換性優先のため画質が{mp4_height}pに制限されます(本来の最高画質は{best_height}p)"
+    mp4_label = _quality_label(*mp4_resolution)
+    best_label = _quality_label(*best_resolution)
+    if mp4_label < best_label:
+        return f"※ 互換性優先のため画質が{mp4_label}pに制限されます(本来の最高画質は{best_label}p)"
     return ""
 
 
@@ -170,29 +212,35 @@ def plan_high_resolution_confirmation(
         return HighResolutionPlan(needs_confirmation=False)
 
     width, height = resolution
-    long_side, short_side = max(width, height), min(width, height)
-    if long_side <= 1920 and short_side <= 1080:
+    if _within_1080p(width, height):
         return HighResolutionPlan(needs_confirmation=False)
 
     best_size = estimate_selection_size(best_selected)
 
     # width<=1920/height<=1080のような単純なフィルタでは縦型動画の向きを
     # 判定できないため、実際に選ばれた最高画質フォーマットの向きから判定する
-    is_portrait = height > width
+    # (幅が分からない場合は、大半を占める横長とみなす)
+    is_portrait = width is not None and height > width
     fallback_spec = format_spec_1080p(format_label, is_portrait)
     fallback_selected = select_best_format(available_formats, fallback_spec, format_sort)
     fallback_resolution = selection_resolution(fallback_selected)
+    # 1080p以下の候補が無いと、代替セレクタ末尾の"/b"で結局同じ高解像度が選ばれる。
+    # その場合に「1080pでダウンロード」を出すと、押しても1080pにならないため選択肢から外す
+    if fallback_resolution is not None and not _within_1080p(*fallback_resolution):
+        fallback_resolution = None
     fallback_size = estimate_selection_size(fallback_selected)
 
-    resolution_text = f"{width}x{height}"
     size_text = f"約{format_size(best_size)}" if best_size else "不明"
 
-    message = f"最高画質は {resolution_text}({size_text})です。\n1080pを超える解像度のため、ファイルサイズが大きくなります。"
+    message = (
+        f"最高画質は {_resolution_text(width, height)}({size_text})です。\n"
+        "1080pを超える解像度のため、ファイルサイズが大きくなります。"
+    )
     if fallback_resolution is not None:
-        fallback_width, fallback_height = fallback_resolution
-        fallback_resolution_text = f"{fallback_width}x{fallback_height}"
         fallback_size_text = f"約{format_size(fallback_size)}" if fallback_size else "不明"
-        message += f"\n1080pにすると {fallback_resolution_text}({fallback_size_text})になります。"
+        message += f"\n1080pにすると {_resolution_text(*fallback_resolution)}({fallback_size_text})になります。"
+    else:
+        message += "\nこの動画には1080p以下の形式がありません。"
 
     return HighResolutionPlan(
         needs_confirmation=True,

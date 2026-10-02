@@ -88,9 +88,11 @@ FORMAT_OPTIONS: tuple[FormatOption, ...] = (
         key=FormatKey.AUDIO_BEST_M4A,
         label="音声のみ (最高音質 m4a)",
         tooltip="【推奨】 互換性重視でm4aに限定します。再エンコードは行いません。",
-        spec="ba[ext=m4a]/ba[acodec^=mp4a]/ba",
-        # 音声のみに限定できない場合の"ba"フォールバックで動画結合フォーマットが
-        # 選ばれてしまう事態に備え、常に音声トラックのみを取り出す後処理を付ける
+        # "ba"は音声のみのフォーマットしか選ばないため、映像+音声の結合フォーマットしか
+        # 提供しないサイトでは"ba"まででは必ず失敗する。最後に"/b"へフォールバックさせる
+        spec="ba[ext=m4a]/ba[acodec^=mp4a]/ba/b",
+        # 上の"/b"フォールバックで映像+音声のフォーマットが選ばれた場合に備え、
+        # 常に音声トラックのみを取り出す後処理を付ける
         # (対象が既に音声のみ・良コーデックならffmpegは何もせずスキップする)
         extract_audio_codec="best",
     ),
@@ -137,20 +139,23 @@ def format_spec_1080p(format_label: str, portrait: bool) -> str:
     横長/縦長どちらの上限を使うかをここで決める。
     """
     width_cap, height_cap = (1080, 1920) if portrait else (1920, 1080)
+    # 幅を持たないフォーマットもあるため、幅の条件は"<=?"(不明なら満たすとみなす)にする。
+    # "<="のままだと、幅が欠けているだけの1080p版まで候補から外れてしまう
+    width_filter = f"[width<=?{width_cap}]"
     # 最後の"/b"は本当に候補が皆無だった場合の最終手段であり、解像度上限を守れないため、
     # その手前に「コンテナ/コーデック条件は緩めるが上限は維持する」段階を挟んでおく
     option = find_format_option(format_label)
     if option is not None and option.key is FormatKey.VIDEO_BEST_MP4:
         return (
-            f"bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba[ext=m4a]"
-            f"/bv*[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]+ba*[acodec^=mp4a]"
-            f"/b[ext=mp4][vcodec^=avc1][width<={width_cap}][height<={height_cap}]"
-            f"/b[width<={width_cap}][height<={height_cap}]"
+            f"bv*[ext=mp4][vcodec^=avc1]{width_filter}[height<={height_cap}]+ba[ext=m4a]"
+            f"/bv*[ext=mp4][vcodec^=avc1]{width_filter}[height<={height_cap}]+ba*[acodec^=mp4a]"
+            f"/b[ext=mp4][vcodec^=avc1]{width_filter}[height<={height_cap}]"
+            f"/b{width_filter}[height<={height_cap}]"
             "/b"
         )
     return (
-        f"bv*[width<={width_cap}][height<={height_cap}]+ba"
-        f"/b[width<={width_cap}][height<={height_cap}]"
+        f"bv*{width_filter}[height<={height_cap}]+ba"
+        f"/b{width_filter}[height<={height_cap}]"
         "/b"
     )
 

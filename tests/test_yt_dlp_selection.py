@@ -18,7 +18,7 @@ from yt_dlp_selection import (
     EXCLUDE_FORMATS_PP_KEY,
     ExcludeFormatsPP,
     add_format_exclusion,
-    select_formats,
+    select_format,
 )
 
 
@@ -52,7 +52,7 @@ def make_info(formats):
     return {"id": "x", "title": "x", "extractor": "generic", "extractor_key": "Generic", "formats": formats}
 
 
-class SelectFormatsTest(unittest.TestCase):
+class SelectFormatTest(unittest.TestCase):
     def setUp(self):
         self.formats = [
             make_video("137", "mp4", "avc1.640028", height=1080),
@@ -61,38 +61,38 @@ class SelectFormatsTest(unittest.TestCase):
         ]
 
     def test_selects_single_format_by_id(self):
-        selected = select_formats(self.formats, "137", None)
-        self.assertEqual(selected[0]["format_id"], "137")
+        selected = select_format(self.formats, "137", None)
+        self.assertEqual(selected["format_id"], "137")
 
     def test_merges_video_and_audio(self):
-        selected = select_formats(self.formats, "137+140", None)
-        self.assertEqual(selected[0]["requested_formats"][0]["format_id"], "137")
-        self.assertEqual(selected[0]["requested_formats"][1]["format_id"], "140")
+        selected = select_format(self.formats, "137+140", None)
+        self.assertEqual(selected["requested_formats"][0]["format_id"], "137")
+        self.assertEqual(selected["requested_formats"][1]["format_id"], "140")
 
     def test_fallback_chain_skips_unmatched_alternatives(self):
-        selected = select_formats(self.formats, "bv*[ext=avi]/137", None)
-        self.assertEqual(selected[0]["format_id"], "137")
+        selected = select_format(self.formats, "bv*[ext=avi]/137", None)
+        self.assertEqual(selected["format_id"], "137")
 
-    def test_empty_formats_returns_empty_list(self):
-        self.assertEqual(select_formats([], "b", None), [])
+    def test_empty_formats_returns_none(self):
+        self.assertEqual(select_format([], "b", None), None)
 
-    def test_no_matching_format_returns_empty_list(self):
-        self.assertEqual(select_formats(self.formats, "bv*[ext=avi]", None), [])
+    def test_no_matching_format_returns_none(self):
+        self.assertEqual(select_format(self.formats, "bv*[ext=avi]", None), None)
 
     def test_single_format_has_no_requested_formats(self):
         """単体フォーマットの選択結果にrequested_formatsが付くと、サイズ・解像度の計算を誤る"""
-        selected = select_formats(self.formats, "137", None)
-        self.assertNotIn("requested_formats", selected[0])
+        selected = select_format(self.formats, "137", None)
+        self.assertNotIn("requested_formats", selected)
 
     def test_does_not_modify_input_formats(self):
         before = copy.deepcopy(self.formats)
-        select_formats(self.formats, "137+140", None)
+        select_format(self.formats, "137+140", None)
         self.assertEqual(self.formats, before)
 
     def test_format_sort_is_applied(self):
         """同じ解像度ならformat_sortで指定したコーデック(avc)が優先される"""
-        selected = select_formats(self.formats, "bv*", ["res", "codec:avc:m4a"])
-        self.assertEqual(selected[0]["format_id"], "137")
+        selected = select_format(self.formats, "bv*", ["res", "codec:avc:m4a"])
+        self.assertEqual(selected["format_id"], "137")
 
 
     def test_does_not_test_download_formats_marked_as_needing_testing(self):
@@ -104,9 +104,9 @@ class SelectFormatsTest(unittest.TestCase):
         high["__needs_testing"] = True
         low = make_video("18", "mp4", "avc1.42001E", height=360)
 
-        selected = select_formats([low, high], "bv")
+        selected = select_format([low, high], "bv")
 
-        self.assertEqual([f["format_id"] for f in selected], ["137"])
+        self.assertEqual(selected["format_id"], "137")
 
 
 class ExcludeFormatsPPTest(unittest.TestCase):
