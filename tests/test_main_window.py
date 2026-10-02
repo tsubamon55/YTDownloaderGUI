@@ -1873,9 +1873,9 @@ class LiveFormTest(MainWindowTestCase):
         self.assertIsNone(request.clip_start)
 
 
-class LiveTaskPinningTest(MainWindowTestCase):
-    def _start_live_task(self, live_mode_now=False):
-        self.window.url_edit.setText(f"https://www.youtube.com/live/{id(self)}{live_mode_now}")
+class LiveTaskOrderingTest(MainWindowTestCase):
+    def _start_live_task(self, live_mode_now=False, name="live"):
+        self.window.url_edit.setText(f"https://www.youtube.com/live/{name}{live_mode_now}")
         self.window.out_edit.setText(OUT_DIR)
         fetch_worker = MagicMock()
         self.window.format_worker = fetch_worker
@@ -1893,9 +1893,12 @@ class LiveTaskPinningTest(MainWindowTestCase):
         return worker, self.window._download_tasks[worker]
 
     def _start_normal_task(self):
-        self.window.url_edit.setText("https://example.com/watch?v=normal")
+        return self._start_normal_task_named("normal")
+
+    def _start_normal_task_named(self, name):
+        self.window.url_edit.setText(f"https://example.com/watch?v={name}")
         self.window.out_edit.setText(OUT_DIR)
-        self.window.title_label.setText("normal")
+        self.window.title_label.setText(name)
         worker = MagicMock()
         worker.request.live_mode = None
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
@@ -1904,33 +1907,54 @@ class LiveTaskPinningTest(MainWindowTestCase):
             self.window.start_download()
         return worker, self.window._download_tasks[worker]
 
-    def test_recording_task_is_pinned_above_the_scrolling_list(self):
+    def _list_order(self):
+        layout = self.window.download_list_layout
+        return [layout.itemAt(i).widget() for i in range(layout.count()) if layout.itemAt(i).widget() is not None]
+
+    def test_recording_task_is_placed_at_top_of_scrolling_list(self):
         _, task = self._start_live_task()
-        self.assertGreaterEqual(self.window.pinned_list_layout.indexOf(task), 0)
-        self.assertTrue(self.window.pinned_list_container.isVisible())
+        self.assertEqual(self._list_order(), [task])
         self.assertTrue(task.is_live)
 
-    def test_normal_task_started_later_does_not_push_recording_down(self):
-        _, live_task = self._start_live_task()
-        _, normal_task = self._start_normal_task()
-        self.assertGreaterEqual(self.window.pinned_list_layout.indexOf(live_task), 0)
-        self.assertEqual(self.window.download_list_layout.indexOf(normal_task), 0)
+    def test_normal_task_started_later_goes_below_recordings(self):
+        _, live_a = self._start_live_task(name="a")
+        _, live_b = self._start_live_task(name="b")
+        _, normal = self._start_normal_task()
+        self.assertEqual(self._list_order(), [live_b, live_a, normal])
 
-    def test_live_end_moves_task_to_top_of_normal_list(self):
-        worker, task = self._start_live_task()
-        self._start_normal_task()
-        live_state_slot = worker.live_state_changed.connect.call_args.args[0]
+    def test_many_recordings_share_the_scrolling_list(self):
+        """録画が何件あっても、スクロールする一覧の中に並ぶため押しつぶされない"""
+        tasks = [self._start_live_task(name=str(i))[1] for i in range(4)]
+        self.assertEqual(self._list_order(), list(reversed(tasks)))
+        self.assertFalse(hasattr(self.window, "pinned_list_layout"))
+
+    def test_live_end_moves_task_below_remaining_recordings(self):
+        worker_a, live_a = self._start_live_task(name="a")
+        _, live_b = self._start_live_task(name="b")
+        _, normal = self._start_normal_task()
+        live_state_slot = worker_a.live_state_changed.connect.call_args.args[0]
         live_state_slot(False)
-        self.assertEqual(self.window.pinned_list_layout.indexOf(task), -1)
-        self.assertEqual(self.window.download_list_layout.indexOf(task), 0)
-        self.assertFalse(self.window.pinned_list_container.isVisible())
+        self.assertEqual(self._list_order(), [live_b, live_a, normal])
+        worker_b = next(w for w, t in self.window._download_tasks.items() if t is live_b)
+        worker_b.live_state_changed.connect.call_args.args[0](False)
+        self.assertEqual(self._list_order(), [live_b, live_a, normal])
+        _, normal2 = self._start_normal_task_named("normal2")
+        self.assertEqual(self._list_order(), [normal2, live_b, live_a, normal])
 
-    def test_failed_recording_is_unpinned_too(self):
-        worker, task = self._start_live_task()
+    def test_failed_recording_moves_below_remaining_recordings(self):
+        _, live_a = self._start_live_task(name="a")
+        worker_b, live_b = self._start_live_task(name="b")
         with patch.object(dialogs, "critical"):
-            self.window.on_download_error(worker, "録画できたデータがありません")
-        self.assertEqual(self.window.pinned_list_layout.indexOf(task), -1)
-        self.assertEqual(self.window.download_list_layout.indexOf(task), 0)
+            self.window.on_download_error(worker_b, "録画できたデータがありません")
+        self.assertEqual(self._list_order(), [live_a, live_b])
+
+    def test_dismissing_recording_keeps_order_of_others(self):
+        worker_a, live_a = self._start_live_task(name="a")
+        _, live_b = self._start_live_task(name="b")
+        self.window.on_download_finished_ok(worker_a, SAVED_PATH)
+        self.window._remove_task_widget(live_a)
+        _, normal = self._start_normal_task()
+        self.assertEqual(self._list_order(), [live_b, normal])
 
     def test_dismissing_last_task_hides_panel(self):
         worker, task = self._start_live_task()

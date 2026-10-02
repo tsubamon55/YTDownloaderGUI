@@ -91,6 +91,8 @@ class MainWindow(Ui_MainWindow):
 
         # 並列に走っているダウンロードと、画面右上の一覧でそれぞれを表示しているウィジェット
         self._download_tasks: dict[DownloadWorker, DownloadTaskWidget] = {}
+        # 録画中のタスク。一覧の先頭側にまとめて並べ、通常のダウンロードはその下に積む
+        self._recording_task_widgets: list[DownloadTaskWidget] = []
         # 結果を反映する対象の取得ワーカー。URL変更・再取得で差し替わる(古い結果は捨てる)
         self.format_worker: FormatListWorker | None = None
         # 差し替え済みも含め、まだ走っている取得ワーカー(終了時に待つ対象)
@@ -895,7 +897,7 @@ class MainWindow(Ui_MainWindow):
         is_recording = request.live_mode is not None
         task.set_live(is_recording)
         self._download_tasks[worker] = task
-        self._add_task_widget(task, pinned=is_recording)
+        self._add_task_widget(task, recording=is_recording)
 
         worker.progress.connect(task.set_progress)
         # 複数のダウンロードのログが混ざるため、どの動画のものか分かるように添える
@@ -928,29 +930,30 @@ class MainWindow(Ui_MainWindow):
     def _is_recording(worker: DownloadWorker) -> bool:
         return worker.request.live_mode is not None
 
-    def _add_task_widget(self, task: DownloadTaskWidget, pinned: bool = False) -> None:
-        # 新しいものほど上に表示する。録画中のものはスクロールしない上部の固定領域に置く
-        if pinned:
-            self.pinned_list_layout.insertWidget(0, task)
-            self.pinned_list_container.setVisible(True)
-        else:
+    def _add_task_widget(self, task: DownloadTaskWidget, recording: bool = False) -> None:
+        """新しいものほど上に表示する。録画中のものは通常のダウンロードより上に置き、
+        通常のダウンロードが何件増えてもスクロールしないうちから見えるようにする"""
+        if recording:
             self.download_list_layout.insertWidget(0, task)
+            self._recording_task_widgets.append(task)
+        else:
+            self.download_list_layout.insertWidget(len(self._recording_task_widgets), task)
         self._set_download_panel_visible(True)
 
-    def _unpin_task_widget(self, task: DownloadTaskWidget) -> None:
-        """録画が終わったタスクを固定領域から外し、通常の一覧の先頭へ移す(固定されていなければ何もしない)"""
-        if self.pinned_list_layout.indexOf(task) < 0:
+    def _move_below_recordings(self, task: DownloadTaskWidget) -> None:
+        """録画が終わったタスクを、録画中のものの下(通常の一覧の先頭)へ移す(録画中でなければ何もしない)"""
+        if task not in self._recording_task_widgets:
             return
-        self.pinned_list_layout.removeWidget(task)
-        self.pinned_list_container.setVisible(self.pinned_list_layout.count() > 0)
-        self.download_list_layout.insertWidget(0, task)
+        self._recording_task_widgets.remove(task)
+        self.download_list_layout.removeWidget(task)
+        self.download_list_layout.insertWidget(len(self._recording_task_widgets), task)
 
     def _on_live_state_changed(self, task: DownloadTaskWidget, live: bool) -> None:
         if not live:
-            self._unpin_task_widget(task)
+            self._move_below_recordings(task)
 
     def _remove_task_widget(self, task: DownloadTaskWidget) -> None:
-        self._unpin_task_widget(task)
+        self._move_below_recordings(task)
         self.download_list_layout.removeWidget(task)
         task.deleteLater()
         # 末尾の伸縮用スペーサーだけが残ったら一覧を隠す
@@ -1282,11 +1285,11 @@ class MainWindow(Ui_MainWindow):
     def _release_download_worker(self, worker: DownloadWorker) -> DownloadTaskWidget | None:
         """終わったダウンロードワーカーを手放し、その表示を返す。完了の通知はrun()が
         戻る直前に届くため、参照を手放す前に終了を待つ(走行中のQThreadが破棄されるとプロセスごと落ちる)。
-        録画の表示は、終わり方によらず上部の固定から外す"""
+        録画の表示は、終わり方によらず録画中のまとまりから外す"""
         worker.wait()
         task = self._download_tasks.pop(worker, None)
         if task is not None:
-            self._unpin_task_widget(task)
+            self._move_below_recordings(task)
         return task
 
     def on_download_finished_ok(self, worker: DownloadWorker, saved_path: str) -> None:
