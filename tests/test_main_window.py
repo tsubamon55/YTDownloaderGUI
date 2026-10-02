@@ -119,9 +119,17 @@ class MainWindowTestCase(unittest.TestCase):
         # クラッシュを招く。テスト終了時に必ず止めて、次のイベントループ処理へ
         # 持ち越さないようにする
         self.addCleanup(self.window._info_fetch_timer.stop)
+        # 終了時の録画の保存待ちで出すダイアログはウィンドウモーダルのため、テスト後に開いたまま残ると
+        # QApplication.activeModalWidget()を通じて後続のテスト(アップデートの提案等)の動作を変えてしまう
+        self.addCleanup(self._close_saving_dialog)
         # isVisible()は祖先を含めた実際の表示状態を返すため、offscreenプラットフォームでも
         # トップレベルウィンドウ自体をshowしておく必要がある
         self.window.show()
+
+
+    def _close_saving_dialog(self):
+        if self.window._saving_dialog is not None:
+            self.window._saving_dialog.close()
 
 
 class MainWindowTestIsolationTest(MainWindowTestCase):
@@ -1081,6 +1089,7 @@ class ProgressAndFinishHandlersTest(MainWindowTestCase):
             self.window.thumbnail_label.setPixmap(thumbnail)
         worker = MagicMock()
         worker.request.out_dir = OUT_DIR
+        worker.request.live_mode = None
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
              patch.object(main_window_module.os, "makedirs"), \
              patch.object(main_window_module, "DownloadWorker", return_value=worker):
@@ -1280,10 +1289,11 @@ class CloseEventTest(MainWindowTestCase):
     打ち切られて未完成ファイルが残る"""
 
     @staticmethod
-    def _running_worker():
+    def _running_worker(live_mode=None):
         worker = MagicMock()
         worker.isRunning.return_value = True
         worker.wait.return_value = True
+        worker.request.live_mode = live_mode
         return worker
 
     @staticmethod
@@ -1291,6 +1301,81 @@ class CloseEventTest(MainWindowTestCase):
         event = MagicMock()
         event.accepted = True
         return event
+
+    def test_recording_is_stopped_and_close_waits_for_saving(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        event = self._event()
+
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes) as question_mock:
+            self.window.closeEvent(event)
+
+        self.assertIn("録画中の1件を停止・保存", question_mock.call_args.args[2])
+        recording.cancel.assert_called_once()
+        # 保存(結合・再格納)は数分かかることがあるため、ここでは待たずに終了をいったん取り消す
+        recording.wait.assert_not_called()
+        event.ignore.assert_called_once()
+        self.assertIsNotNone(self.window._saving_dialog)
+
+        recording.isRunning.return_value = False
+        with patch.object(MainWindow, "close") as close_mock:
+            self.window.on_download_finished_ok(recording, SAVED_PATH)
+        close_mock.assert_called_once()
+        self.assertIsNone(self.window._saving_dialog)
+
+    def test_prompt_mentions_both_recordings_and_downloads(self):
+        recording = self._running_worker(live_mode="from_start")
+        download = self._running_worker()
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        self.window._download_tasks[download] = DownloadTaskWidget("video")
+
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No) as question_mock:
+            self.window.closeEvent(self._event())
+
+        self.assertEqual(
+            question_mock.call_args.args[2],
+            "録画中の1件を停止・保存し、ダウンロード中の1件を中止して終了しますか?",
+        )
+
+    def test_second_close_after_saving_does_not_ask_again(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+
+        recording.isRunning.return_value = False
+        with patch.object(MainWindow, "close"):
+            self.window._close_after_recordings()  # 保存が終わり、改めて閉じる
+        event = self._event()
+        with patch.object(dialogs, "question") as question_mock:
+            self.window.closeEvent(event)
+        question_mock.assert_not_called()
+        event.accept.assert_called_once()
+
+    def test_closing_again_while_saving_is_ignored_quietly(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+
+        event = self._event()
+        with patch.object(dialogs, "question") as question_mock:
+            self.window.closeEvent(event)
+        question_mock.assert_not_called()
+        event.ignore.assert_called_once()
+        recording.cancel.assert_called_once()
+
+    def test_recording_error_while_closing_does_not_block_with_dialog(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+
+        recording.isRunning.return_value = False
+        with patch.object(dialogs, "critical") as critical_mock, patch.object(MainWindow, "close") as close_mock:
+            self.window.on_download_error(recording, "録画できたデータがありません")
+        critical_mock.assert_not_called()
+        close_mock.assert_called_once()
 
     def test_no_worker_closes_immediately(self):
         event = self._event()
@@ -1612,6 +1697,7 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         worker = MagicMock()
         worker.isRunning.return_value = True
         worker.wait.return_value = False
+        worker.request.live_mode = None
         self.window._download_tasks[worker] = DownloadTaskWidget("title")
         self.window._pending_update_path = "C:/tmp/Setup.exe"
         event = CloseEventTest._event()

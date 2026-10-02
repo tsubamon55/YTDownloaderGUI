@@ -102,6 +102,10 @@ class MainWindow(Ui_MainWindow):
         self._pending_update_sha256 = ""
         # 適用待ちの間に表示している「適用中」ダイアログ。終了が取り消された場合に閉じる
         self._update_progress_dialog: QProgressDialog | None = None
+        # 終了の確認で「はい」を選んだ後か(録画の保存を待ってから閉じ直すときに、確認を出し直さないため)
+        self._close_confirmed = False
+        # 終了時に録画の保存を待っている間に出す「保存しています」ダイアログ
+        self._saving_dialog: QProgressDialog | None = None
         self.info_ready = False
         self.available_formats: list[Format] = []
         self.video_duration: float | None = None
@@ -1117,12 +1121,17 @@ class MainWindow(Ui_MainWindow):
         未完成ファイルの入った作業フォルダが保存先に残ってしまう。
         """
         assert event is not None
+        if self._saving_dialog is not None:
+            # 録画の保存を待っている間に、もう一度閉じようとした。保存が終われば自動で閉じる
+            event.ignore()
+            return
+
         running_downloads = self._running_downloads()
-        if running_downloads:
+        if running_downloads and not self._close_confirmed:
             reply = dialogs.question(
                 self,
                 "ダウンロード中",
-                f"ダウンロードが{len(running_downloads)}件進行中です。中止して終了しますか?",
+                self._close_confirmation_text(running_downloads),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -1138,8 +1147,17 @@ class MainWindow(Ui_MainWindow):
                     )
                 event.ignore()
                 return
-            for download in running_downloads:
-                self.cancel_download(download)
+            self._close_confirmed = True
+        for download in running_downloads:
+            self.cancel_download(download)
+
+        if any(self._is_recording(w) for w in running_downloads):
+            # 録画の保存(結合・再格納)は長い録画では数分かかることがあり、待ち時間に上限を設けると
+            # 録画を失う。UIスレッドで待つと「保存しています」の表示も描画されないため、終了はいったん
+            # 取り消し、録画が全部終わったところで改めて閉じる(_close_after_recordings)
+            self._show_saving_dialog()
+            event.ignore()
+            return
 
         if self.update_download_worker is not None:
             self.update_download_worker.cancel()
@@ -1180,6 +1198,35 @@ class MainWindow(Ui_MainWindow):
                 )
         event.accept()
 
+    def _close_confirmation_text(self, running_downloads: list[DownloadWorker]) -> str:
+        recordings = sum(1 for w in running_downloads if self._is_recording(w))
+        downloads = len(running_downloads) - recordings
+        parts = []
+        if recordings:
+            parts.append(f"録画中の{recordings}件を停止・保存し")
+        if downloads:
+            parts.append(f"ダウンロード中の{downloads}件を中止し")
+        return "、".join(parts) + "て終了しますか?"
+
+    def _show_saving_dialog(self) -> None:
+        dialog = QProgressDialog("録画を保存しています。保存が終わると自動的に終了します...", None, 0, 0, self)
+        dialog.setWindowTitle("終了")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.show()
+        self._saving_dialog = dialog
+
+    def _close_after_recordings(self) -> None:
+        """終了の待ちの間に録画が全部終わったら、改めてウィンドウを閉じる"""
+        if self._saving_dialog is None:
+            return
+        if any(self._is_recording(w) for w in self._running_downloads()):
+            return
+        self._saving_dialog.close()
+        self._saving_dialog.deleteLater()
+        self._saving_dialog = None
+        self.close()
+
     def _running_workers(self) -> list[QThread]:
         """終了待ちの対象となる、現在走っているワーカースレッドを列挙する"""
         candidates = [
@@ -1210,14 +1257,18 @@ class MainWindow(Ui_MainWindow):
         task = self._release_download_worker(worker)
         if task is not None:
             task.mark_finished("完了", saved_path=saved_path)
+        self._close_after_recordings()
 
     def on_download_error(self, worker: DownloadWorker, message: str) -> None:
         task = self._release_download_worker(worker)
         if task is not None:
             task.mark_finished("失敗しました")
-        # 並列に走っている中のどれが失敗したのか分かるよう、タイトルを添える
-        title = task.title_label.text() if task is not None else worker.request.url
-        dialogs.critical(self, "ダウンロード失敗", f"{title}\n\n{message}")
+        if not self._close_confirmed:
+            # 並列に走っている中のどれが失敗したのか分かるよう、タイトルを添える。終了の待ちの間は、
+            # モーダルのダイアログで終了が止まらないよう出さない(理由はログに残っている)
+            title = task.title_label.text() if task is not None else worker.request.url
+            dialogs.critical(self, "ダウンロード失敗", f"{title}\n\n{message}")
+        self._close_after_recordings()
 
     def on_download_cancelled(self, worker: DownloadWorker) -> None:
         """ユーザーが自分で止めた場合は失敗ではないため、エラーのダイアログは出さない。
@@ -1225,3 +1276,4 @@ class MainWindow(Ui_MainWindow):
         task = self._release_download_worker(worker)
         if task is not None:
             self._remove_task_widget(task)
+        self._close_after_recordings()
