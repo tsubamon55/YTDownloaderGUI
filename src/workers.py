@@ -2,6 +2,8 @@
 
 import os
 import re
+import shutil
+import tempfile
 import time
 import traceback
 import urllib.parse
@@ -26,7 +28,7 @@ from formats import (
     is_codec_container_mismatch,
     protocol_rank,
 )
-from paths import get_ffmpeg_location, log_debug, remove_file_quietly
+from paths import get_ffmpeg_location, hide_path_quietly, log_debug, remove_file_quietly
 from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY, add_format_exclusion
 
 
@@ -190,7 +192,8 @@ class StoryboardFragmentWorker(QThread):
 class DownloadWorker(QThread):
     progress = pyqtSignal(float, str)
     log = pyqtSignal(str)
-    finished_ok = pyqtSignal()
+    # 保存先へ移した完成品のパス(画面から、そのファイルを選択した状態でフォルダを開くため)
+    finished_ok = pyqtSignal(str)
     finished_error = pyqtSignal(str)
     # ユーザーによるキャンセルで止まった。失敗とは区別し、呼び出し側がエラー表示を出さずに済むようにする
     cancelled = pyqtSignal()
@@ -205,17 +208,27 @@ class DownloadWorker(QThread):
         # 残り時間の推定に使う、実際のダウンロード(情報取得の後)が始まった時刻
         self._download_started_at: float | None = None
         self._active_postprocessors: dict[str, int] = {}
-        self._unique_title: str | None = None
-        self._preexisting_names: set[str] = set()
+        # 保存ファイル名(拡張子除く)。作業フォルダの中は空なので、重複番号は保存先へ移すときに付ける
+        self._file_stem: str | None = None
+        # このダウンロード専用の作業フォルダ(保存先の中に作る)。完成品だけを保存先へ移し、
+        # 残りはフォルダごと消すことで、並列に走る他のダウンロードや既存のファイルに触れない
+        self._work_dir: str | None = None
         self._component_ids: list[str | None] = []
         self._component_weights: list[float] = [1.0]
         self._completed_weight: float = 0.0
         self._current_component_index: int = 0
 
+    # 作業フォルダ名の接頭辞。アプリが強制終了して残った場合でも、何のフォルダか見分けられるようにする
+    # TODO: アプリのクラッシュ・強制終了時は_discard_work_dirが走らず、作業フォルダが保存先に残る。
+    #   起動時等に古い作業フォルダを片付ける処理が必要。ただし同じ保存先を別のインスタンスが
+    #   使用中の可能性があるため、使用中かどうかを判別できる仕組み(ロックファイル等)と合わせて実装すること
+    #   (READMEの「既知の問題」にも記載)
+    WORK_DIR_PREFIX = ".ytdl-working-"
+
     # yt-dlpが途中経過として作る未完成・中間ファイルの名前パターン。ダウンロード中の
     # .part / .ytdl / .temp (分割取得時は .part-Frag12 のように連番が付く)と、
     # 映像・音声を別々に取得したときの結合前ファイル(例: "My Video.f137.mp4")。
-    # これらは完成品ではないため、開始前から残っていても保護対象にはしない
+    # 完成品の場所が後処理フックから分からなかった場合に、作業フォルダから完成品を探す際に除外する
     _INCOMPLETE_NAME_PATTERN = re.compile(
         r"\.(part|ytdl|temp)(-Frag\d+)?$|\.f\d+\.[^.]+$", re.IGNORECASE
     )
@@ -223,64 +236,96 @@ class DownloadWorker(QThread):
     def cancel(self) -> None:
         self._is_cancelled = True
 
-    def _snapshot_preexisting_files(self) -> None:
-        """ダウンロード開始前から保存先に存在していた、同名(拡張子違いを含む)の
-        完成済みファイルを記録する。
+    def _create_work_dir(self) -> None:
+        """保存先の中に作業フォルダを作る。最後の移動が同じドライブ内の名前変更で済み、
+        大きな動画でもコピーや追加の空き容量が要らないよう、システムの一時フォルダは使わない。
+        フォルダ名の一意性はmkdtempが保証するため、並列に走る他のダウンロードとは重ならない"""
+        os.makedirs(self.request.out_dir, exist_ok=True)
+        self._work_dir = tempfile.mkdtemp(prefix=self.WORK_DIR_PREFIX, dir=self.request.out_dir)
+        hide_path_quietly(self._work_dir)
 
-        _resolve_unique_titleは最終拡張子が特定できる場合「同じ拡張子」しか衝突と
-        みなさないため、例えば既に My Video.mp3 がある状態で同じ動画をmp4で落とすと
-        タイトルは (1) も付かず My Video のままになる。この状態で失敗すると
-        _cleanup_leftover_filesの前方一致が無関係な過去の完成ファイルまで巻き込んで
-        しまうため、ここで除外対象を控えておく。ただし .part 等の未完成ファイルは
-        前回の失敗の残骸であり今回も消してよいので、保護対象から外す。
-        """
-        self._preexisting_names = set()
-        if not self._unique_title or not os.path.isdir(self.request.out_dir):
+    def _discard_work_dir(self) -> None:
+        """作業フォルダを中身ごと削除する。完成品は先に保存先へ移してあるため、残っているのは
+        未完成・中間ファイルだけ。消せなくても完了・失敗の通知は止めないよう、例外は投げない"""
+        work_dir, self._work_dir = self._work_dir, None
+        if work_dir is None:
             return
-        prefix = f"{self._unique_title}."
+        shutil.rmtree(work_dir, ignore_errors=True)
+        if os.path.exists(work_dir):
+            log_debug(f"_discard_work_dir: 作業フォルダを削除できませんでした ({work_dir})")
+
+    def _completed_files(self, allow_guess: bool) -> list[str]:
+        """作業フォルダ内の、保存先へ移す完成品。
+
+        基本は後処理フックで分かった最終ファイル。後処理が1つも走らない形式ではそれが分からないため、
+        allow_guess=True(本編・後処理とも成功した場合)に限り、未完成・中間ファイル以外を完成品とみなす。
+        失敗時に推測すると、先に書き出されたサムネイル画像等を完成品として残してしまう"""
+        if self._work_dir is None:
+            return []
+        # 保存先へ移した後に失敗した場合、_final_filepathは移動先を指しているため、作業フォルダ内の
+        # ものに限る(移動先のファイルを "Title (1)" へもう一度移し直してしまわないように)
+        if (
+            self._final_filepath
+            and os.path.dirname(self._final_filepath) == self._work_dir
+            and os.path.isfile(self._final_filepath)
+        ):
+            return [self._final_filepath]
+        if not allow_guess:
+            return []
         try:
-            names = os.listdir(self.request.out_dir)
+            names = os.listdir(self._work_dir)
         except OSError as e:
-            log_debug(f"_snapshot_preexisting_files: 保存先の一覧取得に失敗 ({e!r})")
-            return
-        self._preexisting_names = {
-            os.path.normcase(name)
-            for name in names
-            if name.startswith(prefix) and not self._INCOMPLETE_NAME_PATTERN.search(name)
-        }
+            log_debug(f"_completed_files: 作業フォルダの一覧取得に失敗 ({e!r})")
+            return []
+        return [
+            os.path.join(self._work_dir, name)
+            for name in sorted(names)
+            if not self._INCOMPLETE_NAME_PATTERN.search(name)
+        ]
 
-    def _cleanup_leftover_files(self, preserve_final: bool = False) -> None:
-        """キャンセル時・エラー時に、今回のダウンロードで保存先へ残った未完成ファイル
-        (.part等)を削除する。開始前から存在していたファイルは今回の生成物ではないため
-        削除しない(_snapshot_preexisting_files参照)。
+    def _move_to_output(self, path: str) -> str:
+        """作業フォルダの完成品を保存先へ移し、移動先のパスを返す。
 
-        preserve_final=Trueの場合、既に完成している最終出力ファイル(self._final_filepath)は
-        削除対象から除外する。本編の生成自体は成功し、その後のサムネイル埋め込み等の
-        後処理だけが失敗したケースで、完成済みファイルまで消してしまわないようにするため。
-        """
-        if not self._unique_title or not os.path.isdir(self.request.out_dir):
-            return
-        prefix = f"{self._unique_title}."
-        keep_path = None
-        if preserve_final and self._final_filepath and os.path.isfile(self._final_filepath):
-            keep_path = os.path.normcase(os.path.abspath(self._final_filepath))
+        同名のファイルがあれば "Title (1).mp4" のように番号を付ける。名前の確保は空ファイルを
+        排他的に作成(O_EXCL)して行うため、同じタイトルの別の動画が同時に完了しても、
+        別のアプリのインスタンスと重なっても、既存のファイルを上書きしない"""
+        name = os.path.basename(path)
+        stem, ext = os.path.splitext(name)
+        counter = 0
+        while True:
+            candidate = name if counter == 0 else f"{stem} ({counter}){ext}"
+            dest = os.path.join(self.request.out_dir, candidate)
+            try:
+                fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                counter += 1
+                continue
+            os.close(fd)
+            break
         try:
-            names = os.listdir(self.request.out_dir)
+            os.replace(path, dest)
+        except OSError:
+            remove_file_quietly(dest, "_move_to_output")
+            raise
+        return dest
+
+    def _deliver_completed_files(self, allow_guess: bool) -> list[str]:
+        """完成品を保存先へ移し、移動先のパスを返す。最終ファイルの場所も移動先に更新する"""
+        delivered = [self._move_to_output(path) for path in self._completed_files(allow_guess)]
+        if delivered:
+            self._final_filepath = delivered[0]
+        return delivered
+
+    def _keep_completed_file(self) -> None:
+        """キャンセル時でも、本編も後処理も完成済みであれば(後処理の終わり際のキャンセル)
+        保存先へ移して残す。移せなくてもキャンセルの通知は止めない"""
+        try:
+            delivered = self._deliver_completed_files(allow_guess=False)
         except OSError as e:
-            # 権限やネットワークドライブの切断で一覧を取れない場合も、呼び出し元の
-            # エラー通知(finished_error)まで到達させるため、例外は外へ出さない
-            log_debug(f"_cleanup_leftover_files: 保存先の一覧取得に失敗 ({e!r})")
+            log_debug(f"_keep_completed_file: 完成済みのファイルを保存先へ移せませんでした ({e!r})")
             return
-        for name in names:
-            if not name.startswith(prefix):
-                continue
-            if os.path.normcase(name) in self._preexisting_names:
-                continue
-            path = os.path.join(self.request.out_dir, name)
-            if keep_path and os.path.normcase(os.path.abspath(path)) == keep_path:
-                continue
-            if remove_file_quietly(path, "_cleanup_leftover_files"):
-                self.log.emit(f"未完了ファイルを削除しました: {name}")
+        for path in delivered:
+            self.log.emit(f"完成済みのファイルは残しました: {path}")
 
     @staticmethod
     def _describe_selected_format(info: Format) -> str:
@@ -375,8 +420,18 @@ class DownloadWorker(QThread):
             self._download_started_at = now
         elapsed = now - self._download_started_at
         eta = self._format_eta(elapsed * (100 - percent) / percent) if percent > 0 else "--:--"
-        speed = hook_info.get("_speed_str", "").strip()
-        self.progress.emit(percent, f"{percent:.1f}% 速度:{speed} 残り:{eta}")
+        self.progress.emit(percent, self._format_progress_text(percent, hook_info.get("_speed_str", ""), eta))
+
+    @staticmethod
+    def _format_progress_text(percent: float, speed: str, eta: str) -> str:
+        """画面右上の狭い一覧に収まるよう短くした進捗表示(例: "42% 1.20MiB/s 残り01:00")。
+        割合は進捗バーでも分かるため整数にし、速度が分からない間("Unknown B/s")は省く"""
+        parts = [f"{percent:.0f}%"]
+        speed = speed.strip()
+        if speed and not speed.startswith("Unknown"):
+            parts.append(speed)
+        parts.append(f"残り{eta}")
+        return " ".join(parts)
 
     def _on_component_finished(self, hook_info: dict) -> None:
         filename = hook_info.get("filename")
@@ -443,36 +498,6 @@ class DownloadWorker(QThread):
             title = f"{title} [{clip_label}]"
         return title
 
-    def _resolve_unique_title(
-        self, title: str, expected_ext: str | None, source_ext: str | None = None
-    ) -> str:
-        """source_extは後処理(音声抽出等)で変換される前の拡張子。yt-dlpはその名前の
-        ファイルが既にあるとダウンロード済みとみなして変換の入力に使い、変換後に削除して
-        しまうため、最終拡張子と同様に衝突とみなす"""
-        sanitized = yt_dlp.utils.sanitize_filename(title, restricted=False)
-        if not os.path.isdir(self.request.out_dir):
-            return sanitized
-        exts = {ext for ext in (expected_ext, source_ext) if ext}
-
-        def conflicts(stem: str) -> bool:
-            if expected_ext is None:
-                # 最終拡張子が特定できない場合は、同名の拡張子違いも含めて衝突とみなす
-                return any(
-                    os.path.splitext(name)[0] == stem for name in os.listdir(self.request.out_dir)
-                )
-            return any(
-                os.path.isfile(os.path.join(self.request.out_dir, f"{stem}.{ext}")) for ext in exts
-            )
-
-        if not conflicts(sanitized):
-            return sanitized
-        counter = 1
-        while True:
-            candidate = f"{sanitized} ({counter})"
-            if not conflicts(candidate):
-                return candidate
-            counter += 1
-
     def _register_format_exclusion(self, ydl: yt_dlp.YoutubeDL) -> None:
         """自動設定ではコンテナ/コーデックが一致しない非推奨フォーマットを、format_specの
         解決より前に候補から完全に除外する。手動設定でユーザーが明示的にIDを
@@ -508,6 +533,13 @@ class DownloadWorker(QThread):
             raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
 
     def run(self) -> None:
+        try:
+            self._run()
+        finally:
+            # 通知の前に片付け済みだが、想定外の経路で抜けた場合も作業フォルダを残さない
+            self._discard_work_dir()
+
+    def _run(self) -> None:
         self._started_at = time.monotonic()
         ffmpeg_location: str | None = None
         try:
@@ -519,8 +551,8 @@ class DownloadWorker(QThread):
             probe_info = self._probe(ffmpeg_location)
             expected_ext = self._prepare_output_name(probe_info)
             # 情報取得(通信)の最中は止められないため、終わった時点でキャンセルを確かめる
-            # (保存ファイル名が決まった後に確かめ、前回の未完成ファイルの後片付けも効かせる)
             self._raise_if_cancelled()
+            self._create_work_dir()
 
             download_opts = self._build_download_opts(expected_ext, ffmpeg_location)
             with yt_dlp.YoutubeDL(download_opts) as ydl:
@@ -533,23 +565,28 @@ class DownloadWorker(QThread):
                 self._finish_success(ffmpeg_location)
         except ClipCancelledError:
             # 切り抜きの途中で止めた場合、残っているのは切り抜く前の動画全体で、
-            # 要求された範囲のファイルではないため、完成品として残さず片付ける
+            # 要求された範囲のファイルではないため、完成品として保存先へ移さずに片付ける
             self._finish_with_cleanup(preserve_final=False)
         except Exception as e:
             if self._is_cancelled:
-                self._finish_with_cleanup(preserve_final=True)
+                # 後処理の途中で止まった場合も、要求どおりのファイルにはなっていないため残さない
+                self._finish_with_cleanup(preserve_final=False)
                 return
             _log_traceback(f"DownloadWorker: ダウンロードに失敗 ({self.request.url!r})")
-            # ネットワーク切断・その他の失敗いずれの場合も、保存先に中途半端な.part等の
-            # ファイルが残らないよう必ず削除する。ただし本編のダウンロード/マージ自体は
-            # 完了しており、後続の後処理だけが失敗したケースでは、完成済みファイルは残す
-            self._finish_with_cleanup(preserve_final=True, error=describe_error(e, "ダウンロード"))
+            # ネットワーク切断・その他の失敗いずれの場合も、作業フォルダごと削除する。
+            # 本編のダウンロード/結合が済み、サムネイル埋め込み・切り抜き等の後処理だけが
+            # 失敗した場合も、要求どおりのファイルにはなっていないため完全な失敗とみなし、
+            # 中途半端な完成品は保存先へ移さない
+            self._finish_with_cleanup(preserve_final=False, error=describe_error(e, "ダウンロード"))
 
     def _finish_with_cleanup(self, preserve_final: bool, error: str | None = None) -> None:
-        """後片付けをしてから、キャンセル(errorがNone)または失敗を通知する"""
+        """後片付けをしてから、キャンセル(errorがNone)または失敗を通知する。
+        preserve_final=Trueの場合、完成済みの最終ファイルだけは保存先へ移して残す"""
         try:
-            self._cleanup_leftover_files(preserve_final=preserve_final)
+            if preserve_final:
+                self._keep_completed_file()
         finally:
+            self._discard_work_dir()
             # 後片付けが想定外に失敗しても、UIがダウンロード中のまま固まらないよう必ず通知する
             if error is None:
                 self.log.emit("キャンセルしました")
@@ -578,24 +615,24 @@ class DownloadWorker(QThread):
             return probe_ydl.extract_info(self.request.url, download=False)
 
     def _prepare_output_name(self, probe_info: Format) -> str | None:
-        """保存ファイル名(拡張子除く)を確定し、失敗時の後片付けの準備をする。最終拡張子の見込みを返す"""
+        """保存ファイル名(拡張子除く)を決め、最終拡張子の見込みを返す。作業フォルダの中は空なので
+        ここでは重複を気にせず、既存のファイルとの重複は保存先へ移すとき(_move_to_output)に避ける。
+        (mp3変換時にyt-dlpが変換前の名前のファイルを「ダウンロード済み」とみなして流用・削除してしまう
+        問題も、空の作業フォルダでは起きない)"""
         expected_ext = self._expected_ext(probe_info)
-        self._unique_title = self._resolve_unique_title(
-            self._build_title(probe_info), expected_ext, probe_info.get("ext")
-        )
-        self.log.emit(f"保存ファイル名(拡張子除く): {self._unique_title}")
-        self._snapshot_preexisting_files()
+        self._file_stem = yt_dlp.utils.sanitize_filename(self._build_title(probe_info), restricted=False)
         self._init_component_weights(probe_info)
         return expected_ext
 
     def _build_download_opts(self, expected_ext: str | None, ffmpeg_location: str | None) -> dict:
-        assert self._unique_title is not None  # _prepare_output_nameで確定済み
+        assert self._file_stem is not None  # _prepare_output_nameで確定済み
+        assert self._work_dir is not None  # _create_work_dirで作成済み
         opts = _base_ydl_opts(self.request.format_sort, ffmpeg_location)
         opts.update({
             # タイトルや保存先の"%("が出力テンプレートとして解釈されないよう、保存先はpathsで
-            # 渡し、タイトルの"%"はエスケープする(ずれると衝突判定・後片付けが効かなくなる)
-            "paths": {"home": self.request.out_dir},
-            "outtmpl": f"{self._unique_title.replace('%', '%%')}.%(ext)s",
+            # 渡し、タイトルの"%"はエスケープする(ずれると保存されるファイル名が変わってしまう)
+            "paths": {"home": self._work_dir},
+            "outtmpl": f"{self._file_stem.replace('%', '%%')}.%(ext)s",
             "progress_hooks": [self._progress_hook],
             "postprocessor_hooks": [self._postprocessor_hook],
             "format": self.request.format_spec,
@@ -612,18 +649,19 @@ class DownloadWorker(QThread):
         # download()が例外を投げずに戻ってきた=本編のダウンロードも後処理も
         # 完了している。後処理中にキャンセルを押した場合がこれにあたるため、
         # 完成済みの最終ファイルは削除せずに残す(未完成の中間ファイルのみ削除)
-        if self._final_filepath and os.path.isfile(self._final_filepath):
-            self.log.emit(f"完成済みのファイルは残しました: {self._final_filepath}")
         self._finish_with_cleanup(preserve_final=True)
 
     def _finish_success(self, ffmpeg_location: str | None = None) -> None:
         if self.request.has_clip:
             self._trim_clip_locally(ffmpeg_location)
+        delivered = self._deliver_completed_files(allow_guess=True)
+        if not delivered:
+            raise RuntimeError("ダウンロードしたファイルが見つかりませんでした")
+        self._discard_work_dir()
         assert self._started_at is not None  # run()の冒頭で設定済み
         elapsed = time.monotonic() - self._started_at
-        if self._final_filepath and os.path.isfile(self._final_filepath):
-            size = format_size(os.path.getsize(self._final_filepath))
-            self.log.emit(f"保存先: {self._final_filepath} ({size})")
+        for path in delivered:
+            self.log.emit(f"保存先: {path} ({format_size(os.path.getsize(path))})")
         self.log.emit(f"所要時間: {elapsed:.1f}秒")
         self.log.emit("完了しました")
-        self.finished_ok.emit()
+        self.finished_ok.emit(delivered[0])
