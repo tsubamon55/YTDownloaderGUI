@@ -128,8 +128,10 @@ class MainWindowTestCase(unittest.TestCase):
 
 
     def _close_saving_dialog(self):
-        if self.window._saving_dialog is not None:
-            self.window._saving_dialog.close()
+        # 保存待ちの間は閉じても出し直されるため、先に参照を外してから閉じる
+        dialog, self.window._saving_dialog = self.window._saving_dialog, None
+        if dialog is not None:
+            dialog.close()
 
 
 class MainWindowTestIsolationTest(MainWindowTestCase):
@@ -1322,6 +1324,39 @@ class CloseEventTest(MainWindowTestCase):
             self.window.on_download_finished_ok(recording, SAVED_PATH)
         close_mock.assert_called_once()
         self.assertIsNone(self.window._saving_dialog)
+
+    def test_recording_that_ends_while_confirming_does_not_leave_window_unclosable(self):
+        """確認ダイアログを出している間に録画が終わった場合、保存待ちに入らずにそのまま閉じる"""
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        event = self._event()
+
+        def answer_after_recording_ended(*args, **kwargs):
+            recording.isRunning.return_value = False
+            self.window.on_download_finished_ok(recording, SAVED_PATH)
+            return QMessageBox.StandardButton.Yes
+
+        with patch.object(dialogs, "question", side_effect=answer_after_recording_ended):
+            self.window.closeEvent(event)
+
+        self.assertIsNone(self.window._saving_dialog)
+        event.accept.assert_called_once()
+
+    def test_saving_dialog_cannot_be_dismissed(self):
+        """保存待ちのダイアログをEsc等で閉じられると、操作を続けた後に突然アプリが終了してしまう"""
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+        dialog = self.window._saving_dialog
+
+        dialog.reject()
+        QApplication.processEvents()
+        self.assertTrue(dialog.isVisible())
+
+        dialog.close()
+        QApplication.processEvents()
+        self.assertTrue(dialog.isVisible())
 
     def test_prompt_mentions_both_recordings_and_downloads(self):
         recording = self._running_worker(live_mode="from_start")

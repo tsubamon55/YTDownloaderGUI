@@ -1392,5 +1392,46 @@ class LiveFromNowFormatFallbackTest(unittest.TestCase):
         self.assertEqual(self._probe_format(None), "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b")
 
 
+class LiveReviewFixesTest(unittest.TestCase):
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def test_remux_failure_keeps_the_recording_as_ts(self):
+        """何時間もの録画を、入れ替え(mp4等)の失敗で失わない。録画した.tsのまま保存する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            oks = []
+            worker.finished_ok.connect(oks.append)
+            with patch("workers.LiveRecorder", FakeLiveRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=RuntimeError("Unknown encoder 'libmp3lame'")):
+                errors, logs = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(errors, [])
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.ts")])
+            self.assertEqual(os.listdir(tmp), ["My Video.ts"])
+            self.assertTrue(any("libmp3lame" in msg for msg in logs))
+
+    def test_stop_before_first_fragment_reports_no_data(self):
+        """最初の区切りが取れる前に停止すると、yt-dlpは英語のエラー(The downloaded file is empty)を送出する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.cancel()
+                raise yt_dlp.utils.DownloadError("ERROR: The downloaded file is empty")
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, ["録画できたデータがありません"])
+
+    def test_stop_during_probe_reports_no_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            worker.cancel()
+            errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(errors, ["録画できたデータがありません"])
+
+
 if __name__ == "__main__":
     unittest.main()

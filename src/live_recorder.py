@@ -4,6 +4,7 @@ yt-dlpはライブのHLSをffmpegに渡して終わるまで待つだけで、�
 yt-dlpからは録画するURLだけを受け取り、ffmpegをここで直接動かす。録画中は、途中で途切れても
 再生できるmpegts(.ts)に書き、終わってからmp4等へ入れ替える"""
 
+import contextlib
 import subprocess
 import threading
 import time
@@ -132,7 +133,11 @@ class LiveRecorder:
             proc.stdin.write("q")
             proc.stdin.flush()
         except OSError:
-            # 既に終わり際でパイプが閉じている
+            # 既に終わり際でパイプが閉じている。書けなかった"q"が残ったままだと、Popenの後片付けで
+            # 標準入力を閉じる際に再び書き出そうとしてBrokenPipeErrorになり、録画全体が失敗扱いになるため、
+            # ここで閉じておく(閉じる際の同じエラーは無視する)
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
             return
         try:
             proc.wait(timeout=self.STOP_TIMEOUT_SECONDS)

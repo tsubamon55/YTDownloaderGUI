@@ -699,6 +699,11 @@ class DownloadWorker(QThread):
                 self._finish_with_cleanup(preserve_final=False)
                 return
             _log_traceback(f"DownloadWorker: ダウンロードに失敗 ({self.request.url!r})")
+            if self.request.live_mode is not None and self._is_cancelled:
+                # 録画できた分が無いうちに停止した(情報取得の最中・最初の区切りが取れる前)。yt-dlpの
+                # 英語のエラーや「キャンセルされました」ではなく、何も保存できなかったことを知らせる
+                self._finish_with_cleanup(preserve_final=False, error=self.LIVE_NO_DATA_ERROR)
+                return
             # ネットワーク切断・その他の失敗いずれの場合も、作業フォルダごと削除する。
             # 本編のダウンロード/結合が済み、サムネイル埋め込み・切り抜き等の後処理だけが
             # 失敗した場合も、要求どおりのファイルにはなっていないため完全な失敗とみなし、
@@ -811,8 +816,17 @@ class DownloadWorker(QThread):
 
         codec = self._extract_audio_codec()
         output_path = os.path.join(self._work_dir, f"{self._file_stem}.{recording_extension(codec)}")
-        remux_recording(ffmpeg_location, ts_path, output_path, codec)
-        remove_file_quietly(ts_path, "_record_live_from_now")
+        try:
+            remux_recording(ffmpeg_location, ts_path, output_path, codec)
+        except Exception as e:
+            # 何時間もの録画を、入れ替えの失敗(コーデックの不一致・空き容量不足等)で失わないよう、
+            # 録画した.tsのまま保存する(.tsもそのまま再生できる)
+            _log_traceback("DownloadWorker: 録画の入れ替えに失敗")
+            self.log.emit(f"録画を選んだ形式に変換できなかったため、録画したファイル(.ts)のまま保存します: {e}")
+            output_path = os.path.join(self._work_dir, f"{self._file_stem}.ts")
+            os.replace(ts_path, output_path)
+        else:
+            remove_file_quietly(ts_path, "_record_live_from_now")
         self._final_filepath = output_path
 
     def _on_live_recording_progress(self, progress: RecordingProgress) -> None:

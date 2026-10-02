@@ -1148,6 +1148,9 @@ class MainWindow(Ui_MainWindow):
                 event.ignore()
                 return
             self._close_confirmed = True
+            # 確認ダイアログを出している間に終わったものがあり得るため、改めて数え直す
+            # (終わった録画を待とうとすると、保存待ちのまま二度と閉じられなくなる)
+            running_downloads = self._running_downloads()
         for download in running_downloads:
             self.cancel_download(download)
 
@@ -1213,8 +1216,20 @@ class MainWindow(Ui_MainWindow):
         dialog.setWindowTitle("終了")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
+        # Esc・閉じるボタンで隠されると、操作を続けた後に保存が終わったところで突然アプリが終了してしまうため、
+        # 保存が終わるまで出し続ける
+        dialog.canceled.connect(self._keep_saving_dialog_shown)
+        dialog.rejected.connect(self._keep_saving_dialog_shown)
         dialog.show()
         self._saving_dialog = dialog
+
+    def _keep_saving_dialog_shown(self) -> None:
+        # 隠す処理が終わってから表示し直す
+        QTimer.singleShot(0, self._reshow_saving_dialog)
+
+    def _reshow_saving_dialog(self) -> None:
+        if self._saving_dialog is not None:
+            self._saving_dialog.show()
 
     def _close_after_recordings(self) -> None:
         """終了の待ちの間に録画が全部終わったら、改めてウィンドウを閉じる"""

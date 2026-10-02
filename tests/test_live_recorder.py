@@ -166,5 +166,21 @@ class RemuxTest(unittest.TestCase):
         ])
 
 
+class LiveRecorderStopRaceTest(unittest.TestCase):
+    def test_stop_after_ffmpeg_already_exited_does_not_break_cleanup(self):
+        """停止を押したのと同時にffmpegが終わった(配信終了・通信断)場合、"q"の書き込みが失敗する。
+        書けなかった"q"が残ったままだと、Popenの後片付けで標準入力を閉じる際に再び書こうとして
+        BrokenPipeErrorになり、録画全体が失敗扱いになる"""
+        import subprocess
+
+        from yt_dlp.utils import Popen
+
+        recorder = LiveRecorder(None, [], "unused.ts", on_progress=lambda p: None, should_stop=lambda: True)
+        with Popen([sys.executable, "-c", "pass"], text=True,
+                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+            proc.wait()
+            recorder._stop(proc)
+
+
 if __name__ == "__main__":
     unittest.main()
