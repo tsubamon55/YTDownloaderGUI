@@ -736,6 +736,11 @@ class DownloadWorker(QThread):
         同じffmpeg_locationを渡して選択結果を揃える"""
         probe_opts = _base_ydl_opts(self.request.format_sort, ffmpeg_location)
         probe_opts["format"] = self.request.format_spec
+        if self.request.live_mode == "from_now":
+            # 今から録画するライブのHLSは映像のみ・音声のみに分かれ、音声はext=mp4でacodecも不明なため、
+            # 形式の指定(ba[ext=m4a]や、映像+音声が1本になったものを選ぶ"/b")のどれにも一致しないことがある。
+            # その場合に限り、最良の映像と音声の組み合わせを選ぶ(YouTubeのライブはH.264+AACのためmp4に入る)
+            probe_opts["format"] = f"{self.request.format_spec}/bv*+ba"
         if self.request.live_mode == "from_start":
             # 実ダウンロードと同じく、さかのぼり用のフォーマット(DASH)から選ぶ
             probe_opts["live_from_start"] = True

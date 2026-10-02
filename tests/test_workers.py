@@ -1365,5 +1365,32 @@ class LiveFromNowRunTest(unittest.TestCase):
             self.assertTrue(captured["should_stop"]())
 
 
+class LiveFromNowFormatFallbackTest(unittest.TestCase):
+    """今から録画するライブのHLSは映像のみ・音声のみ(音声はext=mp4でacodec不明)に分かれており、
+    「動画 (最高画質 mp4)」の指定(ba[ext=m4a]や最後の"/b")のどれにも一致しない"""
+
+    def _probe_format(self, live_mode):
+        created = []
+
+        def factory(opts):
+            created.append(opts)
+            ydl = MagicMock()
+            ydl.__enter__.return_value = ydl
+            ydl.__exit__.return_value = False
+            ydl.extract_info.return_value = {"title": "Stream"}
+            return ydl
+
+        worker = make_worker(format_spec="bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b", live_mode=live_mode)
+        with patch("workers.yt_dlp.YoutubeDL", side_effect=factory):
+            worker._probe()
+        return created[0]["format"]
+
+    def test_from_now_falls_back_to_separate_video_and_audio(self):
+        self.assertEqual(self._probe_format("from_now"), "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b/bv*+ba")
+
+    def test_normal_video_spec_is_unchanged(self):
+        self.assertEqual(self._probe_format(None), "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b")
+
+
 if __name__ == "__main__":
     unittest.main()
