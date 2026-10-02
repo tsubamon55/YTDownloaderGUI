@@ -89,7 +89,6 @@ class Ui_MainWindow(QMainWindow):
     out_edit: QLineEdit
     browse_btn: QPushButton
     download_btn: QPushButton
-    open_folder_btn: QPushButton
     spinner: SpinnerWidget
     status_label: QLabel
     log_toggle_btn: QPushButton
@@ -340,10 +339,8 @@ class Ui_MainWindow(QMainWindow):
             """
         )
         self.download_btn.setEnabled(False)
+        # 保存したファイルは、画面右上の一覧の各表示にある「フォルダを開く」から開く
         btn_row.addWidget(self.download_btn, stretch=1)
-        self.open_folder_btn = QPushButton("フォルダを開く")
-        self.open_folder_btn.setEnabled(False)
-        btn_row.addWidget(self.open_folder_btn)
         layout.addLayout(btn_row)
 
         status_row = QHBoxLayout()

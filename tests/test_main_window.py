@@ -29,6 +29,7 @@ _app = QApplication.instance() or QApplication(sys.argv)
 # 保存先は絶対パスでなければ入力エラーになるため、実行中のOSで絶対パスになるものを使う
 OUT_DIR = os.path.abspath(os.path.join(os.sep, "out"))
 SHA256 = "0" * 64
+SAVED_PATH = os.path.join(OUT_DIR, "title.mp4")
 
 
 def make_video(format_id="137", ext="mp4", vcodec="avc1.640028", height=1080, width=None,
@@ -711,6 +712,25 @@ class ManualModeWidthTest(MainWindowTestCase):
         # 一覧の分だけ広い幅に戻る
         self.assertEqual(self.window.width(), width + panel_width_delta(self.window))
 
+    def test_starting_download_returns_to_auto_and_restores_width(self):
+        width = self.window.width()
+        self.window.manual_toggle_btn.setChecked(True)
+        self.window.resize(width + 230, self.window.height())  # 列幅に合わせて広がった状態
+        # URLの変更でフォーマットの選択は消えるため、URLを先に入れてから選ぶ
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText(OUT_DIR)
+        self.window._populate_format_combos([make_video(), make_audio()])
+        self.window.video_format_combo.setCurrentIndex(1)
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker"):
+            self.window.start_download()
+
+        self.assertFalse(self.window.manual_toggle_btn.isChecked())
+        self.assertFalse(self.window.manual_container.isVisibleTo(self.window))
+        # 一覧が出た分だけ広く、手動設定で広がった分は戻る
+        self.assertEqual(self.window.width(), width + panel_width_delta(self.window))
+
     def test_width_is_kept_when_manual_was_never_opened(self):
         self.window.resize(700, self.window.height())
         self.window.on_manual_toggled(False)
@@ -775,7 +795,6 @@ class StartDownloadValidationTest(MainWindowTestCase):
         # 続けて次の動画を入力できるよう、入力欄は空に戻る
         self.assertEqual(self.window.url_edit.text(), "")
         self.assertFalse(self.window.download_btn.isEnabled())
-        self.assertTrue(self.window.open_folder_btn.isEnabled())
 
     def test_downloads_run_in_parallel(self):
         workers = [MagicMock(), MagicMock()]
@@ -1057,26 +1076,61 @@ class ProgressAndFinishHandlersTest(MainWindowTestCase):
     def test_task_progress_updates_bar_and_status(self):
         task = DownloadTaskWidget("title")
         self.addCleanup(task.deleteLater)
-        task.set_progress(42.5, "42.5% 速度:1MiB/s 残り:01:00")
+        task.set_progress(42.5, "42% 1.00MiB/s 残り01:00")
         self.assertEqual(task.progress_bar.value(), 42)
-        self.assertEqual(task.status_label.text(), "42.5% 速度:1MiB/s 残り:01:00")
+        self.assertEqual(task.status_label.text(), "42% 1.00MiB/s 残り01:00")
 
-    def test_finished_ok_marks_task_done_and_opens_its_folder(self):
+    def test_finished_ok_marks_task_done_without_opening_folder(self):
+        """並列に何本も完了するとウィンドウが増え続けるため、フォルダは自動では開かない"""
         worker, task = self._start_task()
-        with patch.object(main_window_module.os.path, "isdir", return_value=True), \
-             patch.object(main_window_module, "open_folder") as open_folder_mock:
-            self.window.on_download_finished_ok(worker)
+        with patch.object(main_window_module, "open_folder") as open_folder_mock, \
+             patch.object(main_window_module, "reveal_file") as reveal_mock:
+            self.window.on_download_finished_ok(worker, SAVED_PATH)
         self.assertTrue(task.finished)
         self.assertEqual(task.status_label.text(), "完了")
         self.assertEqual(task.progress_bar.value(), 100)
+        self.assertTrue(task.reveal_btn.isVisibleTo(task))
+        open_folder_mock.assert_not_called()
+        reveal_mock.assert_not_called()
+
+    def test_reveal_button_selects_saved_file(self):
+        worker, task = self._start_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        with patch.object(main_window_module.os.path, "isfile", return_value=True), \
+             patch.object(main_window_module, "reveal_file") as reveal_mock:
+            task.reveal_btn.click()
+        reveal_mock.assert_called_once_with(SAVED_PATH)
+
+    def test_reveal_falls_back_to_folder_when_file_was_moved(self):
+        worker, task = self._start_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        with patch.object(main_window_module.os.path, "isfile", return_value=False), \
+             patch.object(main_window_module.os.path, "isdir", return_value=True), \
+             patch.object(main_window_module, "open_folder") as open_folder_mock:
+            task.reveal_btn.click()
         open_folder_mock.assert_called_once_with(OUT_DIR)
+
+    def test_reveal_reports_when_folder_is_gone(self):
+        worker, task = self._start_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        with patch.object(main_window_module.os.path, "isfile", return_value=False), \
+             patch.object(main_window_module.os.path, "isdir", return_value=False), \
+             patch.object(dialogs, "information") as information_mock:
+            task.reveal_btn.click()
+        information_mock.assert_called_once()
+
+    def test_failed_task_has_no_reveal_button(self):
+        """後処理だけの失敗も完全な失敗として扱い、保存したファイルは無いため開くボタンも出さない"""
+        worker, task = self._start_task()
+        with patch.object(dialogs, "critical"):
+            self.window.on_download_error(worker, "failed")
+        self.assertFalse(task.reveal_btn.isVisibleTo(task))
 
     def test_finished_ok_does_not_touch_current_input(self):
         """完了したのは前に入力した動画なので、入力中の次の動画は消さない"""
         worker, _ = self._start_task()
         self.window.url_edit.setText("https://example.com/watch?v=next")
-        with patch.object(main_window_module, "open_folder"):
-            self.window.on_download_finished_ok(worker)
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
         self.assertEqual(self.window.url_edit.text(), "https://example.com/watch?v=next")
 
     def test_error_shows_dialog_with_title(self):
@@ -1199,14 +1253,6 @@ class SignalWiringTest(MainWindowTestCase):
         with patch.object(dialogs, "warning") as warning_mock:
             self.window.download_btn.click()
         warning_mock.assert_called_once()
-
-    def test_open_folder_button_click_opens_last_output_dir(self):
-        self.window.last_output_dir = OUT_DIR
-        self.window.open_folder_btn.setEnabled(True)
-        with patch.object(main_window_module.os.path, "isdir", return_value=True), \
-             patch.object(main_window_module, "open_folder") as open_folder_mock:
-            self.window.open_folder_btn.click()
-        open_folder_mock.assert_called_once_with(OUT_DIR)
 
     def test_log_toggle_button_shows_log_view(self):
         self.window.log_toggle_btn.setChecked(True)

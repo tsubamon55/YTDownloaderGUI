@@ -451,16 +451,20 @@ class RangeSlider(QWidget):
 class DownloadTaskWidget(QFrame):
     """並列ダウンロードの1件分(サムネイル・タイトル・進捗バー・状態・キャンセル/閉じるボタン)を表示する。
 
-    走行中はボタンがキャンセル、終わった後は一覧から取り除く「閉じる」として働く"""
+    走行中はボタンがキャンセル、終わった後は一覧から取り除く「閉じる」として働く。
+    完了した場合は、保存したファイルを選択した状態でフォルダを開く「フォルダを開く」も出す"""
 
     THUMBNAIL_SIZE = QSize(64, 36)
 
     cancel_requested = pyqtSignal()
     dismiss_requested = pyqtSignal()
+    # 保存したファイルのパス
+    reveal_requested = pyqtSignal(str)
 
     def __init__(self, title: str, thumbnail: QPixmap | None = None, parent: QWidget | None = None):
         super().__init__(parent)
         self._finished = False
+        self._saved_path: str | None = None
         self.setObjectName("downloadTask")
         self.setStyleSheet(
             f"#downloadTask {{ border: 1px solid {TASK_BORDER_COLOR}; border-radius: 4px; }}"
@@ -504,12 +508,23 @@ class DownloadTaskWidget(QFrame):
         # 状態とボタンを同じ行に置き、狭い一覧でもタイトルの幅を削らないようにする
         footer = QHBoxLayout()
         footer.setSpacing(4)
+        # 速度や残り時間が変わらない間(情報取得・結合・切り抜き等)も止まっていないことが分かるよう、
+        # 終わるまで回し続ける
+        self.spinner = SpinnerWidget(diameter=14)
+        self.spinner.start()
+        footer.addWidget(self.spinner)
         # 進捗表示にはyt-dlpが返す速度等の文字列が入る
         self.status_label = QLabel("開始待ち...")
         self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         self.status_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
         self.status_label.setMinimumWidth(1)
         footer.addWidget(self.status_label, stretch=1)
+        self.reveal_btn = QPushButton("フォルダを開く")
+        self.reveal_btn.setFlat(True)
+        self.reveal_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        self.reveal_btn.setVisible(False)
+        self.reveal_btn.clicked.connect(self._on_reveal_clicked)
+        footer.addWidget(self.reveal_btn)
         self.action_btn = QPushButton("キャンセル")
         self.action_btn.setFlat(True)
         self.action_btn.setStyleSheet(LINK_BUTTON_STYLE)
@@ -542,14 +557,22 @@ class DownloadTaskWidget(QFrame):
         self.action_btn.setEnabled(False)
         self.status_label.setText("キャンセル中...")
 
-    def mark_finished(self, status: str, success: bool) -> None:
-        """終了状態の表示に切り替え、ボタンを一覧から取り除く「閉じる」に変える"""
+    def mark_finished(self, status: str, saved_path: str | None = None) -> None:
+        """終了状態の表示に切り替え、ボタンを一覧から取り除く「閉じる」に変える。
+        saved_path(完了して保存したファイル)がある場合は「フォルダを開く」も出す"""
         self._finished = True
-        if success:
+        self._saved_path = saved_path
+        self.spinner.stop()
+        if saved_path is not None:
             self.progress_bar.setValue(100)
+            self.reveal_btn.setVisible(True)
         self.status_label.setText(status)
         self.action_btn.setText("閉じる")
         self.action_btn.setEnabled(True)
+
+    def _on_reveal_clicked(self) -> None:
+        if self._saved_path is not None:
+            self.reveal_requested.emit(self._saved_path)
 
     def _on_action_clicked(self) -> None:
         if self._finished:

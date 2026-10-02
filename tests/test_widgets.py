@@ -311,5 +311,28 @@ class DrawColumnsTest(unittest.TestCase):
         self.assertEqual([call.args[2] for call in painter.drawText.call_args_list], ["a", "b"])
 
 
+class DownloadTaskSpinnerTest(unittest.TestCase):
+    def setUp(self):
+        self.task = widgets.DownloadTaskWidget("title")
+        self.addCleanup(self.task.deleteLater)
+
+    def test_spinner_runs_while_downloading(self):
+        self.assertTrue(self.task.spinner.isVisibleTo(self.task))
+        self.assertTrue(self.task.spinner._timer.isActive())
+
+    def test_spinner_keeps_running_while_cancelling(self):
+        """キャンセルは区切りが来るまで効かないため、止まるまでは回し続ける"""
+        self.task.set_cancelling()
+        self.assertTrue(self.task.spinner._timer.isActive())
+
+    def test_spinner_stops_when_finished(self):
+        for saved_path in ("C:/out/title.mp4", None):
+            task = widgets.DownloadTaskWidget("title")
+            self.addCleanup(task.deleteLater)
+            task.mark_finished("done", saved_path=saved_path)
+            self.assertFalse(task.spinner.isVisibleTo(task))
+            self.assertFalse(task.spinner._timer.isActive())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ from clip_range import (
     resolve_clip_range,
 )
 from config import CONFIG
-from folder_opener import open_folder
+from folder_opener import open_folder, reveal_file
 from format_engine import (
     FormatSelection,
     compute_auto_format_note,
@@ -93,7 +93,6 @@ class MainWindow(Ui_MainWindow):
         self._pending_update_sha256 = ""
         # 適用待ちの間に表示している「適用中」ダイアログ。終了が取り消された場合に閉じる
         self._update_progress_dialog: QProgressDialog | None = None
-        self.last_output_dir: str | None = None
         self.info_ready = False
         self.available_formats: list[Format] = []
         self.video_duration: float | None = None
@@ -164,7 +163,6 @@ class MainWindow(Ui_MainWindow):
         self.audio_format_combo.currentIndexChanged.connect(self.on_manual_selection_changed)
         self.browse_btn.clicked.connect(self.browse_folder)
         self.download_btn.clicked.connect(self.start_download)
-        self.open_folder_btn.clicked.connect(self.open_output_folder)
         self.log_toggle_btn.toggled.connect(self.on_log_toggle)
         self.detail_toggle_btn.toggled.connect(self.on_detail_toggled)
         self.clip_range_slider.rangeChanged.connect(self.on_clip_slider_changed)
@@ -610,14 +608,17 @@ class MainWindow(Ui_MainWindow):
             self.out_edit.setText(folder)
             self.settings.setValue("last_output_dir", folder)
 
-    def open_output_folder(self) -> None:
-        if self.last_output_dir:
-            self._open_folder_if_exists(self.last_output_dir)
-
-    @staticmethod
-    def _open_folder_if_exists(path: str) -> None:
-        if os.path.isdir(path):
-            open_folder(path)
+    def _reveal_saved_file(self, path: str) -> None:
+        """保存したファイルを選択した状態でフォルダを開く。完了後に移動・削除されていれば、
+        フォルダだけが残っていればそれを開き、それも無ければ知らせる"""
+        if os.path.isfile(path):
+            reveal_file(path)
+            return
+        folder = os.path.dirname(path)
+        if os.path.isdir(folder):
+            open_folder(folder)
+            return
+        dialogs.information(self, "フォルダを開く", f"保存したファイルが見つかりません:\n{path}")
 
     def _check_for_updates(self) -> None:
         worker = UpdateCheckWorker()
@@ -819,17 +820,20 @@ class MainWindow(Ui_MainWindow):
         worker.progress.connect(task.set_progress)
         # 複数のダウンロードのログが混ざるため、どの動画のものか分かるように添える
         worker.log.connect(lambda msg, t=title: self.append_log(f"[{t}] {msg}"))
-        worker.finished_ok.connect(lambda w=worker: self.on_download_finished_ok(w))
+        worker.finished_ok.connect(lambda saved_path, w=worker: self.on_download_finished_ok(w, saved_path))
         worker.finished_error.connect(lambda message, w=worker: self.on_download_error(w, message))
         worker.cancelled.connect(lambda w=worker: self.on_download_cancelled(w))
         task.cancel_requested.connect(lambda w=worker: self.cancel_download(w))
         task.dismiss_requested.connect(lambda t=task: self._remove_task_widget(t))
+        task.reveal_requested.connect(self._reveal_saved_file)
         worker.start()
 
-        self.open_folder_btn.setEnabled(True)
         # 続けて次の動画を入力できるよう入力欄を空にする(textChangedを通じて
         # フォーマット選択・クリップ範囲等もまとめて初期化される)
         self.url_edit.clear()
+        # 手動設定のフォーマットは動画ごとに選び直すものなので、既定の自動設定に戻す
+        # (手動設定の列幅に合わせて広がったウィンドウ幅も、on_manual_toggledで元に戻る)
+        self.manual_toggle_btn.setChecked(False)
         self.status_label.setText("ダウンロードを開始しました")
 
     def _is_downloading_url(self, url: str) -> bool:
@@ -983,7 +987,6 @@ class MainWindow(Ui_MainWindow):
                 self, "入力エラー", f"保存先フォルダを作成できませんでした:\n{out_dir}\n\n{e}"
             )
             return False
-        self.last_output_dir = out_dir
         self.settings.setValue("last_output_dir", out_dir)
         return True
 
@@ -1085,16 +1088,17 @@ class MainWindow(Ui_MainWindow):
         worker.wait()
         return self._download_tasks.pop(worker, None)
 
-    def on_download_finished_ok(self, worker: DownloadWorker) -> None:
+    def on_download_finished_ok(self, worker: DownloadWorker, saved_path: str) -> None:
+        """並列に何本も完了するとウィンドウが増え続けるため、フォルダは自動では開かず、
+        一覧の「フォルダを開く」から開いてもらう"""
         task = self._release_download_worker(worker)
         if task is not None:
-            task.mark_finished("完了", success=True)
-        self._open_folder_if_exists(worker.request.out_dir)
+            task.mark_finished("完了", saved_path=saved_path)
 
     def on_download_error(self, worker: DownloadWorker, message: str) -> None:
         task = self._release_download_worker(worker)
         if task is not None:
-            task.mark_finished("失敗しました", success=False)
+            task.mark_finished("失敗しました")
         # 並列に走っている中のどれが失敗したのか分かるよう、タイトルを添える
         title = task.title_label.text() if task is not None else worker.request.url
         dialogs.critical(self, "ダウンロード失敗", f"{title}\n\n{message}")

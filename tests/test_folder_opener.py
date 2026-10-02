@@ -36,5 +36,34 @@ class OpenFolderTest(unittest.TestCase):
         self.assertEqual(open_url_mock.call_args[0][0].toLocalFile(), "/tmp/out")
 
 
+class RevealFileTest(unittest.TestCase):
+    def test_windows_selects_file_in_explorer(self):
+        with patch.object(folder_opener.sys, "platform", "win32"), \
+             patch.object(folder_opener.subprocess, "Popen") as popen_mock:
+            folder_opener.reveal_file("C:/out/My Video.mp4")
+        command = popen_mock.call_args[0][0]
+        self.assertEqual(command, f'explorer /select,"{os.path.normpath("C:/out/My Video.mp4")}"')
+
+    def test_macos_reveals_in_finder(self):
+        with patch.object(folder_opener.sys, "platform", "darwin"), \
+             patch.object(folder_opener.subprocess, "Popen") as popen_mock:
+            folder_opener.reveal_file("/tmp/out/My Video.mp4")
+        popen_mock.assert_called_once_with(["open", "-R", "/tmp/out/My Video.mp4"])
+
+    def test_other_os_opens_containing_folder(self):
+        with patch.object(folder_opener.sys, "platform", "linux"), \
+             patch.object(folder_opener, "open_folder") as open_folder_mock:
+            folder_opener.reveal_file("/tmp/out/My Video.mp4")
+        open_folder_mock.assert_called_once_with("/tmp/out")
+
+    def test_falls_back_to_folder_when_launch_fails(self):
+        with patch.object(folder_opener.sys, "platform", "darwin"), \
+             patch.object(folder_opener.subprocess, "Popen", side_effect=OSError("not found")), \
+             patch.object(folder_opener, "open_folder") as open_folder_mock, \
+             patch.object(folder_opener, "log_debug"):
+            folder_opener.reveal_file("/tmp/out/My Video.mp4")
+        open_folder_mock.assert_called_once_with("/tmp/out")
+
+
 if __name__ == "__main__":
     unittest.main()

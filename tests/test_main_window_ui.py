@@ -62,9 +62,8 @@ class SetupUiTest(unittest.TestCase):
         self.assertFalse(self.window.video_format_combo.isEnabled())
         self.assertFalse(self.window.audio_format_combo.isEnabled())
 
-    def test_download_related_buttons_start_disabled(self):
+    def test_download_button_starts_disabled(self):
         self.assertFalse(self.window.download_btn.isEnabled())
-        self.assertFalse(self.window.open_folder_btn.isEnabled())
 
     def test_window_title_without_version_is_app_name(self):
         self.assertEqual(self.window.windowTitle(), APP_TITLE)

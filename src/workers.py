@@ -192,7 +192,8 @@ class StoryboardFragmentWorker(QThread):
 class DownloadWorker(QThread):
     progress = pyqtSignal(float, str)
     log = pyqtSignal(str)
-    finished_ok = pyqtSignal()
+    # 保存先へ移した完成品のパス(画面から、そのファイルを選択した状態でフォルダを開くため)
+    finished_ok = pyqtSignal(str)
     finished_error = pyqtSignal(str)
     # ユーザーによるキャンセルで止まった。失敗とは区別し、呼び出し側がエラー表示を出さずに済むようにする
     cancelled = pyqtSignal()
@@ -218,6 +219,10 @@ class DownloadWorker(QThread):
         self._current_component_index: int = 0
 
     # 作業フォルダ名の接頭辞。アプリが強制終了して残った場合でも、何のフォルダか見分けられるようにする
+    # TODO: アプリのクラッシュ・強制終了時は_discard_work_dirが走らず、作業フォルダが保存先に残る。
+    #   起動時等に古い作業フォルダを片付ける処理が必要。ただし同じ保存先を別のインスタンスが
+    #   使用中の可能性があるため、使用中かどうかを判別できる仕組み(ロックファイル等)と合わせて実装すること
+    #   (READMEの「既知の問題」にも記載)
     WORK_DIR_PREFIX = ".ytdl-working-"
 
     # yt-dlpが途中経過として作る未完成・中間ファイルの名前パターン。ダウンロード中の
@@ -312,8 +317,8 @@ class DownloadWorker(QThread):
         return delivered
 
     def _keep_completed_file(self) -> None:
-        """失敗・キャンセル時でも、本編が完成済みであれば(後処理だけの失敗・後処理中のキャンセル)
-        保存先へ移して残す。移せなくても失敗・キャンセルの通知は止めない"""
+        """キャンセル時でも、本編も後処理も完成済みであれば(後処理の終わり際のキャンセル)
+        保存先へ移して残す。移せなくてもキャンセルの通知は止めない"""
         try:
             delivered = self._deliver_completed_files(allow_guess=False)
         except OSError as e:
@@ -415,8 +420,18 @@ class DownloadWorker(QThread):
             self._download_started_at = now
         elapsed = now - self._download_started_at
         eta = self._format_eta(elapsed * (100 - percent) / percent) if percent > 0 else "--:--"
-        speed = hook_info.get("_speed_str", "").strip()
-        self.progress.emit(percent, f"{percent:.1f}% 速度:{speed} 残り:{eta}")
+        self.progress.emit(percent, self._format_progress_text(percent, hook_info.get("_speed_str", ""), eta))
+
+    @staticmethod
+    def _format_progress_text(percent: float, speed: str, eta: str) -> str:
+        """画面右上の狭い一覧に収まるよう短くした進捗表示(例: "42% 1.20MiB/s 残り01:00")。
+        割合は進捗バーでも分かるため整数にし、速度が分からない間("Unknown B/s")は省く"""
+        parts = [f"{percent:.0f}%"]
+        speed = speed.strip()
+        if speed and not speed.startswith("Unknown"):
+            parts.append(speed)
+        parts.append(f"残り{eta}")
+        return " ".join(parts)
 
     def _on_component_finished(self, hook_info: dict) -> None:
         filename = hook_info.get("filename")
@@ -554,13 +569,15 @@ class DownloadWorker(QThread):
             self._finish_with_cleanup(preserve_final=False)
         except Exception as e:
             if self._is_cancelled:
-                self._finish_with_cleanup(preserve_final=True)
+                # 後処理の途中で止まった場合も、要求どおりのファイルにはなっていないため残さない
+                self._finish_with_cleanup(preserve_final=False)
                 return
             _log_traceback(f"DownloadWorker: ダウンロードに失敗 ({self.request.url!r})")
-            # ネットワーク切断・その他の失敗いずれの場合も、中途半端な.part等のファイルは
-            # 作業フォルダごと削除する。ただし本編のダウンロード/マージ自体は完了しており、
-            # 後続の後処理だけが失敗したケースでは、完成済みファイルは保存先へ移して残す
-            self._finish_with_cleanup(preserve_final=True, error=describe_error(e, "ダウンロード"))
+            # ネットワーク切断・その他の失敗いずれの場合も、作業フォルダごと削除する。
+            # 本編のダウンロード/結合が済み、サムネイル埋め込み・切り抜き等の後処理だけが
+            # 失敗した場合も、要求どおりのファイルにはなっていないため完全な失敗とみなし、
+            # 中途半端な完成品は保存先へ移さない
+            self._finish_with_cleanup(preserve_final=False, error=describe_error(e, "ダウンロード"))
 
     def _finish_with_cleanup(self, preserve_final: bool, error: str | None = None) -> None:
         """後片付けをしてから、キャンセル(errorがNone)または失敗を通知する。
@@ -647,4 +664,4 @@ class DownloadWorker(QThread):
             self.log.emit(f"保存先: {path} ({format_size(os.path.getsize(path))})")
         self.log.emit(f"所要時間: {elapsed:.1f}秒")
         self.log.emit("完了しました")
-        self.finished_ok.emit()
+        self.finished_ok.emit(delivered[0])

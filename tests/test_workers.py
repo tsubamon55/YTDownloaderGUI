@@ -514,6 +514,17 @@ class WorkDirTest(unittest.TestCase):
             self.assertEqual(worker._completed_files(allow_guess=False), [])
 
 
+class ProgressTextTest(unittest.TestCase):
+    def test_short_text_for_download_list(self):
+        self.assertEqual(
+            DownloadWorker._format_progress_text(42.5, "  1.20MiB/s", "01:00"), "42% 1.20MiB/s 残り01:00"
+        )
+
+    def test_unknown_speed_is_omitted(self):
+        self.assertEqual(DownloadWorker._format_progress_text(0.0, " Unknown B/s", "--:--"), "0% 残り--:--")
+        self.assertEqual(DownloadWorker._format_progress_text(10.0, "", "02:00"), "10% 残り02:00")
+
+
 class ProgressHookTest(unittest.TestCase):
     def test_cancelled_raises_download_error(self):
         import yt_dlp
@@ -836,8 +847,9 @@ class RunErrorHandlingTest(unittest.TestCase):
             self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
             self.assertTrue(any("完成済みのファイルは残しました" in log for log in logs))
 
-    def test_postprocess_failure_keeps_final_file(self):
-        """本編は完成し、サムネイル埋め込み等の後処理だけが失敗した場合は完成品を残す"""
+    def test_postprocess_failure_is_a_complete_failure(self):
+        """本編は完成し、サムネイル埋め込み等の後処理だけが失敗した場合も、要求どおりの
+        ファイルにはなっていないため完全な失敗とみなし、保存先には何も残さない"""
         with tempfile.TemporaryDirectory() as tmp:
             worker = make_worker(out_dir=tmp)
 
@@ -848,7 +860,22 @@ class RunErrorHandlingTest(unittest.TestCase):
             errors, _ = self._run_with(tmp, complete_then_fail, worker=worker)
 
             self.assertEqual(errors, ["embed thumbnail failed"])
-            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_cancel_during_postprocess_discards_file(self):
+        """後処理の途中で止まった(例外で抜けた)場合も、要求どおりのファイルではないため残さない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+
+            def complete_then_cancel_midway(urls):
+                write_final(worker)
+                worker.cancel()
+                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+
+            errors, _ = self._run_with(tmp, complete_then_cancel_midway, worker=worker)
+
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
 
     def test_failure_never_touches_files_already_in_out_dir(self):
         """保存先にもともとある同名のファイルは、完成品も未完成ファイルも消さない
@@ -867,8 +894,9 @@ class RunErrorHandlingTest(unittest.TestCase):
 class RunSuccessTest(unittest.TestCase):
     def _run(self, worker, download_side_effect):
         finished = []
-        worker.finished_ok.connect(lambda: finished.append(True))
+        worker.finished_ok.connect(finished.append)
         errors, logs = run_worker(worker, download_side_effect)
+        self.saved_paths = finished
         return bool(finished), errors, logs
 
     def test_completed_file_is_moved_to_out_dir_and_work_dir_removed(self):
@@ -878,6 +906,8 @@ class RunSuccessTest(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(errors, [])
             self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+            # 画面から選択表示できるよう、保存先のパスを通知する
+            self.assertEqual(self.saved_paths, [os.path.join(tmp, "My Video.mp4")])
             self.assertTrue(any(log.startswith(f"保存先: {os.path.join(tmp, 'My Video.mp4')}") for log in logs))
 
     def test_existing_file_with_same_name_gets_counter(self):
