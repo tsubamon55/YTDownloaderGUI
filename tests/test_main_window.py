@@ -401,11 +401,23 @@ class OnFormatsErrorTest(MainWindowTestCase):
 
 
 class WindowHeightTest(MainWindowTestCase):
-    def test_minimum_size_is_not_zero(self):
-        """最小サイズが0だと、中身が潰れるまでウィンドウを縮められてしまう"""
+    def _assert_thumbnail_and_format_row_do_not_overlap(self):
+        thumbnail = self.window.thumbnail_label
+        combo = self.window.format_combo
+        thumbnail_bottom = thumbnail.mapTo(self.window, thumbnail.rect().bottomLeft()).y()
+        combo_top = combo.mapTo(self.window, combo.rect().topLeft()).y()
+        self.assertLess(thumbnail_bottom, combo_top)
+
+    def test_widgets_do_not_overlap_on_startup(self):
+        """起動直後にサムネイルと形式欄が重なって表示されていた"""
+        self._assert_thumbnail_and_format_row_do_not_overlap()
+
+    def test_window_cannot_be_shrunk_until_widgets_overlap(self):
+        """最小サイズはレイアウトからQtが決め、中身が重なるほどには縮められない"""
         self.window._sync_window_height()
-        self.assertGreater(self.window.minimumHeight(), 0)
-        self.assertGreater(self.window.minimumWidth(), 0)
+        self.window.resize(self.window.width(), 50)
+        QApplication.processEvents()
+        self._assert_thumbnail_and_format_row_do_not_overlap()
 
     def test_user_enlarged_height_is_kept_while_log_is_shown(self):
         self.window.log_toggle_btn.setChecked(True)

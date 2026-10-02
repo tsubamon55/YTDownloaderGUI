@@ -193,12 +193,11 @@ class MainWindow(Ui_MainWindow):
         if self.log_view.isVisible():
             target_height = max(target_height, self.height())
         # QMainWindowは一度大きくなった最小サイズを記憶したままになることがあるため、
-        # 縮める前にリセットしてから目的の高さへ合わせ、今の中身に応じた最小サイズを設定し直す
-        # (0のままだと、ユーザーが中身が潰れるまでウィンドウを縮められてしまう)
+        # 縮める前にリセットしてから目的の高さへ合わせる。0は「指定なし」の意味で、実際の
+        # 最小サイズはレイアウトの最小サイズからQtが決める(ここで計算した値を明示的に
+        # 設定すると、初回表示前はchrome_heightが実際と合わず、中身が重なるほど小さくなる)
         self.setMinimumSize(0, 0)
         self.resize(self.width(), target_height)
-        minimum = layout.minimumSize()
-        self.setMinimumSize(minimum.width(), minimum.height() + chrome_height)
 
     def on_log_toggle(self, checked: bool) -> None:
         self.log_view.setVisible(checked)
