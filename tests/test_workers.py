@@ -15,6 +15,7 @@ from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_trimmer import ClipCancelledError
 from formats import is_codec_container_mismatch
+from live import LiveInfo
 from workers import (
     DownloadRequest,
     DownloadWorker,
@@ -126,7 +127,7 @@ class FormatListWorkerRunTest(unittest.TestCase):
             worker.run()
 
         self.assertEqual(len(results), 1)
-        _, _, thumbnail_bytes, _ = results[0]
+        _, _, thumbnail_bytes, _, _ = results[0]
         self.assertEqual(thumbnail_bytes, b"fallback-bytes")
 
     def test_stops_at_first_successful_candidate(self):
@@ -208,7 +209,7 @@ class FormatListWorkerRunTest(unittest.TestCase):
             worker.run()
 
         self.assertEqual(len(results), 1)
-        _, _, thumbnail_bytes, _ = results[0]
+        _, _, thumbnail_bytes, _, _ = results[0]
         self.assertEqual(thumbnail_bytes, b"")
 
     def test_network_error_during_extract_info_yields_friendly_message(self):
@@ -1051,7 +1052,8 @@ class DownloadRequestTest(unittest.TestCase):
 class BaseYdlOptsTest(unittest.TestCase):
     def test_minimal(self):
         self.assertEqual(
-            _base_ydl_opts(), {"quiet": True, "no_warnings": True, "noplaylist": True, "color": "no_color"}
+            _base_ydl_opts(),
+            {"quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True, "color": "no_color"},
         )
 
     def test_optional_keys(self):
@@ -1062,3 +1064,81 @@ class BaseYdlOptsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _live_ydl_factory(normal_info, from_start_info=None, from_start_error=None):
+    """live_from_startの有無で結果を変えるYoutubeDLの代わり。生成時のoptsを記録する"""
+    created_opts = []
+
+    def factory(opts):
+        created_opts.append(opts)
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        if opts.get("live_from_start"):
+            if from_start_error is not None:
+                ydl.extract_info.side_effect = from_start_error
+            else:
+                ydl.extract_info.return_value = from_start_info
+        else:
+            ydl.extract_info.return_value = normal_info
+        return ydl
+
+    return factory, created_opts
+
+
+class FormatListWorkerLiveTest(unittest.TestCase):
+    URL = "https://www.youtube.com/live/abc"
+
+    def _run(self, factory):
+        results, errors = [], []
+        worker = FormatListWorker(self.URL)
+        worker.finished_ok.connect(lambda *args: results.append(args))
+        worker.finished_error.connect(errors.append)
+        with patch("workers.get_ffmpeg_location", return_value=None), \
+             patch("workers.yt_dlp.YoutubeDL", side_effect=factory):
+            worker.run()
+        return results, errors
+
+    def test_normal_video_has_no_live_info_and_is_extracted_once(self):
+        factory, created = _live_ydl_factory({"title": "Video", "duration": 60, "formats": []})
+        results, _ = self._run(factory)
+        self.assertIsNone(results[0][4])
+        self.assertEqual(len(created), 1)
+
+    def test_live_that_can_be_recorded_from_start(self):
+        normal = {"title": "Stream 2026-10-02 19:06", "live_status": "is_live",
+                  "release_timestamp": 1790928042, "formats": []}
+        factory, created = _live_ydl_factory(normal, from_start_info={"title": "Stream", "formats": []})
+        results, _ = self._run(factory)
+        _, title, _, duration, live_info = results[0]
+        self.assertEqual(live_info, LiveInfo(started_at=1790928042, can_record_from_start=True))
+        self.assertEqual(title, "Stream")
+        self.assertIsNone(duration)
+        self.assertTrue(created[1]["live_from_start"])
+
+    def test_live_without_from_start_formats(self):
+        normal = {"title": "Stream 2026-10-02 19:06", "live_status": "is_live",
+                  "release_timestamp": 1790928042, "formats": []}
+        error = yt_dlp.utils.ExtractorError("--live-from-start is passed, but there are no formats")
+        factory, _ = _live_ydl_factory(normal, from_start_error=error)
+        results, errors = self._run(factory)
+        self.assertEqual(errors, [])
+        _, title, _, _, live_info = results[0]
+        self.assertEqual(live_info, LiveInfo(started_at=1790928042, can_record_from_start=False))
+        self.assertEqual(title, "Stream")
+
+    def test_upcoming_live_reports_japanese_message(self):
+        factory, _ = _live_ydl_factory({"title": "Soon", "live_status": "is_upcoming", "formats": []})
+        results, errors = self._run(factory)
+        self.assertEqual(results, [])
+        self.assertEqual(errors, [FormatListWorker.UPCOMING_LIVE_ERROR])
+
+    def test_yt_dlp_upcoming_error_is_replaced_with_japanese_message(self):
+        """配信開始前のライブでは、yt-dlpはinfoを返さずに英語のエラーを送出することが多い"""
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        ydl.extract_info.side_effect = yt_dlp.utils.ExtractorError("This live event will begin in 3 hours.")
+        results, errors = self._run(lambda opts: ydl)
+        self.assertEqual(errors, [FormatListWorker.UPCOMING_LIVE_ERROR])

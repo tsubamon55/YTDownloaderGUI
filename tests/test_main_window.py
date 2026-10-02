@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox
 
 import dialogs
 import main_window as main_window_module
+from live import LiveInfo
 from main_window import IDLE_STATUS_TEXT, MainWindow
 from widgets import DownloadTaskWidget
 
@@ -338,6 +339,17 @@ class OnFormatsFetchedTest(MainWindowTestCase):
         self.assertTrue(self.window.download_btn.isEnabled())
         self.assertTrue(self.window.clip_range_slider.isEnabled())
         self.assertEqual(self.window.clip_range_slider.values(), (0, 125))
+
+    def test_live_info_is_kept_until_url_changes(self):
+        worker = MagicMock()
+        self.window.format_worker = worker
+        live_info = LiveInfo(started_at=1790928042, can_record_from_start=True)
+
+        self.window.on_formats_fetched([], "Stream", b"", None, worker, live_info=live_info)
+        self.assertEqual(self.window.live_info, live_info)
+
+        self.window.url_edit.setText("https://example.com/watch?v=other")
+        self.assertIsNone(self.window.live_info)
 
     def test_stale_worker_result_is_ignored(self):
         stale_worker = MagicMock()

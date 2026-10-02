@@ -41,6 +41,7 @@ from formats import (
     has_video,
     is_codec_container_mismatch,
 )
+from live import LiveInfo
 from main_window_ui import DOWNLOAD_PANEL_WIDTH, IDLE_STATUS_TEXT, Ui_MainWindow, toggle_button_text
 from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_location, log_debug
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
@@ -96,6 +97,8 @@ class MainWindow(Ui_MainWindow):
         self.info_ready = False
         self.available_formats: list[Format] = []
         self.video_duration: float | None = None
+        # 表示中の動画が配信中のライブなら、その情報(さかのぼれるか等)。通常の動画ではNone
+        self.live_info: LiveInfo | None = None
         self.storyboard_format: Format | None = None
         self._storyboard_cache: dict[str, QPixmap] = {}
         self._storyboard_workers: set[StoryboardFragmentWorker] = set()
@@ -228,6 +231,7 @@ class MainWindow(Ui_MainWindow):
         """表示中の動画の情報(タイトル・サムネイル・フォーマット・クリップ範囲)を破棄し、
         ダウンロードできない状態に戻す"""
         self.info_ready = False
+        self.live_info = None
         self.download_btn.setEnabled(False)
         self.title_label.setText("")
         self.thumbnail_label.clear()
@@ -317,8 +321,8 @@ class MainWindow(Ui_MainWindow):
         self.format_worker = worker
         self._format_workers.add(worker)
         worker.finished_ok.connect(
-            lambda formats, title, thumb, duration, w=worker: self.on_formats_fetched(
-                formats, title, thumb, duration, w, auto
+            lambda formats, title, thumb, duration, live_info, w=worker: self.on_formats_fetched(
+                formats, title, thumb, duration, w, auto, live_info
             )
         )
         worker.finished_error.connect(
@@ -334,6 +338,7 @@ class MainWindow(Ui_MainWindow):
         duration: float | None,
         worker: FormatListWorker,
         auto: bool = False,
+        live_info: LiveInfo | None = None,
     ) -> None:
         self._release_format_worker(worker)
         if worker is not self.format_worker:
@@ -341,6 +346,7 @@ class MainWindow(Ui_MainWindow):
 
         self.available_formats = formats
         self.video_duration = duration
+        self.live_info = live_info
         self.storyboard_format = select_storyboard_format(
             formats, ScrubPreviewPopup.PREVIEW_SIZE.width(), ScrubPreviewPopup.PREVIEW_SIZE.height()
         )

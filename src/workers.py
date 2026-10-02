@@ -28,6 +28,7 @@ from formats import (
     is_codec_container_mismatch,
     protocol_rank,
 )
+from live import LiveInfo, LiveMode, strip_live_title_suffix
 from paths import get_ffmpeg_location, hide_path_quietly, log_debug, remove_file_quietly
 from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY, add_format_exclusion
 
@@ -35,8 +36,11 @@ from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY, add_format_exclusion
 def _base_ydl_opts(format_sort: list[str] | None = None, ffmpeg_location: str | None = None) -> dict[str, Any]:
     """このアプリの全てのYoutubeDL呼び出しに共通するオプション(出力の抑止・プレイリスト展開の無効化)。
     端末から起動した場合にyt-dlpがエラー文へANSIの色コードを埋め込み、それがそのまま
-    ダイアログに表示されてしまうため、色付けも無効にする"""
-    opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "noplaylist": True, "color": "no_color"}
+    ダイアログに表示されてしまうため、色付けも無効にする。
+    quietだけではライブの録画中の進捗表示が標準出力に出続けるため、noprogressも付ける"""
+    opts: dict[str, Any] = {
+        "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True, "color": "no_color",
+    }
     if format_sort:
         opts["format_sort"] = format_sort
     if ffmpeg_location:
@@ -83,6 +87,8 @@ class DownloadRequest:
     # 切り抜き範囲(秒)。Noneは「先頭から」「末尾まで」
     clip_start: float | None = None
     clip_end: float | None = None
+    # ライブの録画の開始位置。Noneは通常の動画
+    live_mode: LiveMode | None = None
 
     @property
     def has_clip(self) -> bool:
@@ -90,9 +96,13 @@ class DownloadRequest:
 
 
 class FormatListWorker(QThread):
-    # 4番目の要素(動画の長さ・秒)はNoneを取り得るためobject型で宣言する
-    finished_ok = pyqtSignal(list, str, bytes, object)
+    # 4番目の要素(動画の長さ・秒)と5番目の要素(ライブの情報 LiveInfo)はNoneを取り得るためobject型で宣言する
+    finished_ok = pyqtSignal(list, str, bytes, object, object)
     finished_error = pyqtSignal(str)
+
+    UPCOMING_LIVE_ERROR = "配信開始前です。配信が始まってから再度お試しください"
+    # 配信開始前のライブに対して、yt-dlpはinfoを返さずにこの文言(英語)を含むエラーを送出することが多い
+    _UPCOMING_LIVE_ERROR_MARKER = "live event will begin"
 
     # 存在しない解像度への推測URL(yt-dlpが実在確認せずに組み立てたもの)に
     # 当たった場合に備え、上位候補を複数試す。多すぎるとタイムアウトが
@@ -136,13 +146,40 @@ class FormatListWorker(QThread):
 
         return candidates
 
+    def _extract(self, ffmpeg_location: str | None, live_from_start: bool = False) -> Format:
+        ydl_opts = _base_ydl_opts(ffmpeg_location=ffmpeg_location)
+        ydl_opts["skip_download"] = True
+        if live_from_start:
+            ydl_opts["live_from_start"] = True
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(self.url, download=False)
+
+    def _check_live(self, info: Format, ffmpeg_location: str | None) -> tuple[LiveInfo, str]:
+        """配信中のライブについて、配信の最初からさかのぼって録画できるかを確かめ、(LiveInfo, タイトル)を返す。
+
+        さかのぼれない配信ではyt-dlpがExtractorErrorを送出する。通信エラー等で確かめられなかった
+        場合も、録画自体はできるよう、さかのぼれないものとして扱う。タイトルは、今から録画するための
+        抽出でyt-dlpが末尾に付けた日時を除いたものにする"""
+        started_at = info.get("release_timestamp")
+        fallback_title = strip_live_title_suffix(info.get("title") or "")
+        try:
+            from_start_info = self._extract(ffmpeg_location, live_from_start=True)
+        except Exception as e:
+            log_debug(f"FormatListWorker: 配信の最初からは録画できません ({e!r})")
+            return LiveInfo(started_at, can_record_from_start=False), fallback_title
+        return LiveInfo(started_at, can_record_from_start=True), from_start_info.get("title") or fallback_title
+
     def run(self) -> None:
         try:
-            ydl_opts = _base_ydl_opts(ffmpeg_location=get_ffmpeg_location())
-            ydl_opts["skip_download"] = True
+            ffmpeg_location = get_ffmpeg_location()
+            info = self._extract(ffmpeg_location)
+            if info.get("live_status") == "is_upcoming":
+                raise ValueError(self.UPCOMING_LIVE_ERROR)
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.url, download=False)
+            title = info.get("title") or ""
+            live_info: LiveInfo | None = None
+            if info.get("live_status") == "is_live":
+                live_info, title = self._check_live(info, ffmpeg_location)
 
             formats = info.get("formats") or []
             formats = [f for f in formats if f.get("format_id")]
@@ -151,7 +188,6 @@ class FormatListWorker(QThread):
                 reverse=True,
             )
 
-            title = info.get("title") or ""
             thumbnail_bytes = b""
             candidates = self._thumbnail_url_candidates(info)[: self.MAX_THUMBNAIL_CANDIDATES]
             for candidate_url in candidates:
@@ -164,10 +200,13 @@ class FormatListWorker(QThread):
                     log_debug(f"FormatListWorker: サムネイル取得に失敗 ({candidate_url!r}: {e!r})")
                     continue
 
-            self.finished_ok.emit(formats, title, thumbnail_bytes, info.get("duration"))
+            self.finished_ok.emit(formats, title, thumbnail_bytes, info.get("duration"), live_info)
         except Exception as e:
             _log_traceback(f"FormatListWorker: 動画情報の取得に失敗 ({self.url!r})")
-            self.finished_error.emit(describe_error(e, "動画情報の取得"))
+            if self._UPCOMING_LIVE_ERROR_MARKER in str(e) or str(e) == self.UPCOMING_LIVE_ERROR:
+                self.finished_error.emit(self.UPCOMING_LIVE_ERROR)
+            else:
+                self.finished_error.emit(describe_error(e, "動画情報の取得"))
 
 
 class StoryboardFragmentWorker(QThread):
