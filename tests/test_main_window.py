@@ -1796,6 +1796,22 @@ class LiveFormTest(MainWindowTestCase):
         live_info = LiveInfo(started_at=time.time() - started_ago, can_record_from_start=can_record_from_start)
         self.window.on_formats_fetched([make_video(), make_audio()], "Stream", b"", None, worker, live_info=live_info)
 
+    def test_starting_recording_widens_window_by_panel_width_only(self):
+        """「配信の最初から（H:MM:SS さかのぼる）」で左側の最小幅が広がっていても、ダウンロード一覧を
+        出した分だけ広げる。一覧を出した瞬間にQtが最小幅まで広げた分を、二重に足さない"""
+        self.window.show()
+        self._fetch_live(started_ago=3 * 3600)
+        self.window.out_edit.setText(OUT_DIR)
+        QApplication.processEvents()
+        width = self.window.width()
+        worker = MagicMock()
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", return_value=worker):
+            self.window.start_download()
+        QApplication.processEvents()
+        self.assertEqual(self.window.width(), width + panel_width_delta(self.window))
+
     def test_live_shows_badge_elapsed_time_and_record_button(self):
         self._fetch_live()
         self.assertTrue(self.window.live_header.isVisible())

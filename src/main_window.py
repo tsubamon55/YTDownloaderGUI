@@ -964,6 +964,10 @@ class MainWindow(Ui_MainWindow):
         """一覧の表示/非表示に合わせて、左側の入力欄の幅が変わらないようウィンドウ幅を増減する"""
         if self.download_panel.isHidden() != visible:
             return
+        # 表示した瞬間に、Qtが「左側の最小幅+一覧」までウィンドウを自動で広げることがある
+        # (ライブの「配信の最初から（H:MM:SS さかのぼる）」等で左側の最小幅が広い場合)。
+        # その分を二重に足さないよう、表示前の幅を基準にする
+        width_before = self.width()
         self.download_panel.setVisible(visible)
         central = self.centralWidget()
         assert central is not None
@@ -972,7 +976,7 @@ class MainWindow(Ui_MainWindow):
         delta = DOWNLOAD_PANEL_WIDTH + layout.spacing()
         if not visible:
             delta = -delta
-        self.resize(self.width() + delta, self.height())
+        self.resize(width_before + delta, self.height())
         # 手動設定を開いている間に一覧が出入りした場合も、自動設定に戻したときの幅を一覧の分だけ合わせる
         if self._width_before_manual is not None:
             self._width_before_manual += delta
