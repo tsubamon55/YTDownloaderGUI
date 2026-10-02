@@ -117,3 +117,31 @@ class StoryboardTileForTimeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InvalidStoryboardInputTest(unittest.TestCase):
+    @staticmethod
+    def _storyboard(**overrides):
+        storyboard = {
+            "format_note": "storyboard", "width": 48, "height": 27, "rows": 10, "columns": 10, "fps": 0.5,
+            "fragments": [{"url": "https://example.com/sb0.jpg", "duration": 200.0}],
+        }
+        storyboard.update(overrides)
+        return storyboard
+
+    def test_fragment_without_url_is_not_used(self):
+        """urlの無いフラグメントで切り出し位置を求めるとKeyErrorになる"""
+        broken = self._storyboard(fragments=[{"duration": 200.0}])
+        self.assertIsNone(select_storyboard_format([broken]))
+        self.assertIsNone(storyboard_tile_for_time(broken, 100.0, 10.0))
+
+    def test_candidates_missing_tile_size_are_skipped(self):
+        good = self._storyboard()
+        for key in ("width", "height", "rows", "columns", "fps"):
+            with self.subTest(key=key):
+                self.assertIs(select_storyboard_format([self._storyboard(**{key: None}), good]), good)
+
+    def test_non_positive_duration_returns_none(self):
+        for duration in (0, -10.0):
+            with self.subTest(duration=duration):
+                self.assertIsNone(storyboard_tile_for_time(self._storyboard(), duration, 5.0))

@@ -5,11 +5,8 @@
     "info_fetch_debounce_ms": 700,
     "mp3_quality": "192",
     "clip_video_encoder_by_codec_prefix": {
-        "avc1": ["libx264", "18"],
         "h264": ["libx264", "18"],
         "vp9": ["libvpx-vp9", "31"],
-        "vp09": ["libvpx-vp9", "31"],
-        "vp8": ["libvpx", "10"],
-        "vp08": ["libvpx", "10"]
+        "vp8": ["libvpx", "10"]
     }
 }

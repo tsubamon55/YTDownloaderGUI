@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -235,7 +236,7 @@ class TempFileNameCollisionTest(unittest.TestCase):
             open(video, "w").close()
             existing = self._user_file(tmp, "My Video.clip.mp4")
 
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=TrimClipTest._make_fake_ffpp()):
+            with patch("clip_trimmer.FFmpegRunner", return_value=TrimClipTest._make_fake_ffpp()):
                 trim_clip(video, None, 20.0, lambda _: None)
 
             self._assert_untouched(existing)
@@ -248,7 +249,7 @@ class TempFileNameCollisionTest(unittest.TestCase):
             open(video, "w").close()
             existing = self._user_file(tmp, "My Video.clip.mp4")
 
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(video, None, 20.0, lambda _: None)
 
             self._assert_untouched(existing)
@@ -326,7 +327,32 @@ class NearestKeyframeAtOrBeforeTest(unittest.TestCase):
         ffpp = self._fake_ffpp([0.0])
         clip_trimmer.nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 3, 12.0)
         _, kwargs = ffpp.get_metadata_object.call_args
-        self.assertEqual(kwargs["opts"], ["-select_streams", "3", "-skip_frame", "nokey", "-show_frames"])
+        self.assertEqual(
+            kwargs["opts"],
+            ["-select_streams", "3", "-read_intervals", "0.0%13.0", "-skip_frame", "nokey", "-show_frames"],
+        )
+
+    def test_reads_only_the_window_before_target(self):
+        """ファイル全体のキーフレームを走査しないよう、目標時刻の手前だけを読む"""
+        ffpp = self._fake_ffpp([0.0])
+        clip_trimmer.nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 3600.0)
+        _, kwargs = ffpp.get_metadata_object.call_args
+        self.assertIn("3540.0%3601.0", kwargs["opts"])
+
+    def test_converts_between_relative_target_and_absolute_pts(self):
+        """ffprobeのpts_timeは開始時刻を含む絶対時刻、-ssは開始時刻からの相対時刻。
+        開始時刻1.5秒のファイルで目標10秒なら、絶対11.5秒以前のキーフレーム(11.0)を探し、
+        相対時刻(9.5)で返す"""
+        ffpp = self._fake_ffpp([1.5, 6.5, 11.0, 11.6])
+        result = clip_trimmer.nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 10.0, start_time=1.5)
+        self.assertAlmostEqual(result, 9.5)
+
+    def test_frames_with_broken_pts_time_are_skipped(self):
+        ffpp = MagicMock()
+        ffpp.get_metadata_object.return_value = {
+            "frames": [{"key_frame": 1, "pts_time": "N/A"}, {"key_frame": 1}, {"key_frame": 1, "pts_time": "4.0"}]
+        }
+        self.assertEqual(clip_trimmer.nearest_keyframe_at_or_before(ffpp, "C:/out/video.mp4", 0, 5.0), 4.0)
 
 
 class TrimClipTest(unittest.TestCase):
@@ -381,7 +407,7 @@ class TrimClipTest(unittest.TestCase):
             open(final_path, "w").close()
 
             ffpp = self._make_fake_ffpp_with_keyframes("h264", [0.0, 5.0, 10.0, 15.0, 20.0])
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 12.0, 22.0, lambda msg: None)
 
             (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -402,7 +428,7 @@ class TrimClipTest(unittest.TestCase):
 
             keyframe_times = [float(t) for t in range(0, 283, 5)]  # 0,5,10,...,280 (GOP=5s)
             ffpp = self._make_fake_ffpp_with_keyframes("h264", keyframe_times)
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 177.0, 187.0, lambda msg: None)
 
             (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -411,12 +437,12 @@ class TrimClipTest(unittest.TestCase):
             self.assertEqual(output_opts[:2], ["-ss", "2.0"])
 
     def test_noop_when_final_filepath_missing(self):
-        with patch("clip_trimmer.FFmpegPostProcessor") as ffpp_cls:
+        with patch("clip_trimmer.FFmpegRunner") as ffpp_cls:
             trim_clip(None, None, 20.0, lambda msg: None)
         ffpp_cls.assert_not_called()
 
     def test_noop_when_final_file_does_not_exist(self):
-        with patch("clip_trimmer.FFmpegPostProcessor") as ffpp_cls:
+        with patch("clip_trimmer.FFmpegRunner") as ffpp_cls:
             trim_clip("C:/out/does_not_exist.mp4", None, 20.0, lambda msg: None)
         ffpp_cls.assert_not_called()
 
@@ -426,7 +452,7 @@ class TrimClipTest(unittest.TestCase):
             open(final_path, "w").close()
 
             ffpp = self._make_fake_ffpp("h264")
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp), \
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp), \
                  patch("clip_trimmer.nearest_keyframe_at_or_before", return_value=10.0):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
@@ -447,7 +473,7 @@ class TrimClipTest(unittest.TestCase):
             open(final_path, "w").close()
 
             ffpp = self._make_fake_ffpp("h264")
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, None, 30.0, lambda msg: None)
 
             (input_specs, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -471,7 +497,7 @@ class TrimClipTest(unittest.TestCase):
             open(final_path, "w").close()
 
             ffpp = self._make_fake_ffpp("h264")
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp), \
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp), \
                  patch("clip_trimmer.nearest_keyframe_at_or_before", return_value=10.0):
                 trim_clip(final_path, 10.0, None, lambda msg: None)
 
@@ -496,7 +522,7 @@ class TrimClipTest(unittest.TestCase):
             open(final_path, "w").close()
 
             ffpp = self._make_fake_ffpp(None)  # 音声のみダウンロード等、映像ストリームなし
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -510,7 +536,7 @@ class TrimClipTest(unittest.TestCase):
             open(final_path, "w").close()
 
             ffpp = self._make_fake_ffpp("vp9")
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -539,7 +565,7 @@ class TrimClipTest(unittest.TestCase):
                 open(output_specs[0][0], "w").close()
 
             ffpp.real_run_ffmpeg.side_effect = fake_run
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp), \
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp), \
                  patch("clip_trimmer.nearest_keyframe_at_or_before", return_value=10.0):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
@@ -577,28 +603,44 @@ class TrimClipTest(unittest.TestCase):
                 reattach_opts, ["-map", "0", "-map", "1", "-c", "copy", "-disposition:2", "attached_pic"]
             )
 
-    def test_unrecognized_codec_omits_explicit_video_encoder(self):
-        """未対応コーデック(例: HEVC/AV1)は"-c:v:0"を一切指定せずffmpegの既定エンコーダに
-        フォールバックする(音声は引き続きコピーされる)。ここで本編映像まで"-c copy"に
-        してしまうと、キーフレーム単位でしか正確な時刻に合わせられず音声とズレるため、
-        "-c:v"/"-c"自体を一切出さないことを確認する"""
+    def _trim_output_opts(self, vcodec, filename="My Video.mp4"):
         with tempfile.TemporaryDirectory() as tmp:
-            final_path = os.path.join(tmp, "My Video.mp4")
+            final_path = os.path.join(tmp, filename)
             open(final_path, "w").close()
 
-            ffpp = self._make_fake_ffpp("hevc")
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp), \
+            ffpp = self._make_fake_ffpp(vcodec)
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp), \
                  patch("clip_trimmer.nearest_keyframe_at_or_before", return_value=10.0):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
-            output_opts = output_specs[0][1]
-            self.assertNotIn("-c:v:0", output_opts)
-            self.assertNotIn("-c", output_opts)
-            self.assertEqual(
-                output_opts,
-                ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-t", "20.0"],
-            )
+            return output_specs[0][1]
+
+    def test_unrecognized_codec_is_reencoded_with_explicit_quality(self):
+        """未対応コーデック(例: HEVC/AV1)をffmpeg任せにすると、webmではlibvpx-vp9が画質指定なしの
+        既定ビットレートで使われ大きく劣化する。出力コンテナに合うエンコーダへ画質付きで寄せる
+        (本編映像を"-c copy"にするとキーフレーム単位でしか合わせられず音声とズレるため、コピーにはしない)"""
+        self.assertEqual(
+            self._trim_output_opts("hevc"),
+            ["-map", "0", "-c:a", "copy", "-c:t", "copy", "-c:v:0", "libx264", "-crf", "18", "-t", "20.0"],
+        )
+        self.assertEqual(
+            self._trim_output_opts("av1", "My Video.webm"),
+            [
+                "-map", "0", "-c:a", "copy", "-c:t", "copy",
+                "-c:v:0", "libvpx-vp9", "-crf", "31", "-b:v", "0", "-t", "20.0",
+            ],
+        )
+
+    def test_vp9_uses_constant_quality_mode(self):
+        """libvpx-vp9は-b:v 0を付けないと-crfが固定画質として効かない"""
+        opts = self._trim_output_opts("vp9", "My Video.webm")
+        self.assertEqual(opts[opts.index("-c:v:0"):opts.index("-t")], ["-c:v:0", "libvpx-vp9", "-crf", "31", "-b:v", "0"])
+
+    def test_invalid_encoder_setting_in_config_is_ignored(self):
+        with patch.dict(clip_trimmer.CLIP_VIDEO_ENCODER_BY_CODEC_PREFIX, {"hevc": "libx265"}):
+            opts = self._trim_output_opts("hevc")
+        self.assertIn("libx264", opts)
 
     def test_detection_failure_omits_explicit_video_encoder(self):
         """ffprobeでのコーデック検出自体に失敗した場合も、既定エンコーダへ
@@ -610,7 +652,7 @@ class TrimClipTest(unittest.TestCase):
 
             ffpp = self._make_fake_ffpp("h264")
             ffpp.get_metadata_object.side_effect = RuntimeError("ffprobe not found")
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
             (_, output_specs), _ = ffpp.real_run_ffmpeg.call_args
@@ -634,7 +676,7 @@ class TrimClipTest(unittest.TestCase):
 
             ffpp = self._make_fake_ffpp("h264")
             ffpp.real_run_ffmpeg.side_effect = RuntimeError("ffmpeg crashed")
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 10.0, 30.0, logs.append)  # 例外を送出しないことを確認
 
             self.assertTrue(os.path.isfile(final_path))
@@ -655,7 +697,7 @@ class TrimClipTest(unittest.TestCase):
 
             ffpp = self._make_fake_ffpp("h264")
             ffpp.real_run_ffmpeg.side_effect = fake_run_then_fail
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
             self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
@@ -671,7 +713,7 @@ class TrimClipTest(unittest.TestCase):
 
             ffpp = MagicMock()
             ffpp.real_run_ffmpeg.side_effect = fake_run
-            with patch("clip_trimmer.FFmpegPostProcessor", return_value=ffpp):
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp):
                 trim_clip(final_path, 10.0, 30.0, lambda msg: None)
 
             self.assertTrue(os.path.isfile(final_path))
@@ -733,3 +775,75 @@ class FfmpegTimeFormatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FFmpegRunnerTest(unittest.TestCase):
+    """切り抜き中もキャンセル・アプリ終了ができるよう、ffmpeg/ffprobeを止められる形で実行する"""
+
+    def test_cancel_stops_running_process(self):
+        runner = clip_trimmer.FFmpegRunner(None, is_cancelled=lambda: time.monotonic() - started > 0.3)
+        started = time.monotonic()
+        with self.assertRaises(clip_trimmer.ClipCancelledError):
+            runner._run([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_does_not_start_when_already_cancelled(self):
+        runner = clip_trimmer.FFmpegRunner(None, is_cancelled=lambda: True)
+        with patch("clip_trimmer.Popen") as popen_cls, self.assertRaises(clip_trimmer.ClipCancelledError):
+            runner._run(["ffmpeg"])
+        popen_cls.assert_not_called()
+
+    def test_ffmpeg_command_prefixes_paths_and_reports_last_error_line(self):
+        runner = clip_trimmer.FFmpegRunner(None)
+        runner.executable = "ffmpeg"
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "a:b.mp4")
+            open(src, "w").close()
+            with patch.object(runner, "_run", return_value=("", "line1\nInvalid argument\n", 1)) as run:
+                with self.assertRaisesRegex(RuntimeError, "Invalid argument"):
+                    runner.real_run_ffmpeg([(src, ["-ss", "1"])], [(os.path.join(tmp, "out.mp4"), ["-c", "copy"])])
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[:4], ["ffmpeg", "-y", "-loglevel", "repeat+info"])
+        self.assertIn(f"file:{src}", cmd)
+        self.assertEqual(cmd[cmd.index("-i") - 2:cmd.index("-i")], ["-ss", "1"])
+
+    def test_missing_executables_raise(self):
+        with patch("clip_trimmer.shutil.which", return_value=None):
+            runner = clip_trimmer.FFmpegRunner(None)
+        with self.assertRaises(FileNotFoundError):
+            runner.real_run_ffmpeg([("in.mp4", [])], [("out.mp4", [])])
+        with self.assertRaises(FileNotFoundError):
+            runner.get_metadata_object("in.mp4")
+
+    def test_prefers_executables_in_given_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            suffix = ".exe" if sys.platform == "win32" else ""
+            for name in ("ffmpeg", "ffprobe"):
+                open(os.path.join(tmp, name + suffix), "w").close()
+            runner = clip_trimmer.FFmpegRunner(tmp)
+            self.assertEqual(runner.executable, os.path.join(tmp, "ffmpeg" + suffix))
+            self.assertEqual(runner.probe_executable, os.path.join(tmp, "ffprobe" + suffix))
+
+
+class TrimClipCancelTest(unittest.TestCase):
+    def test_cancel_removes_intermediate_files_and_keeps_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final_path = os.path.join(tmp, "My Video.mp4")
+            with open(final_path, "w") as f:
+                f.write("original")
+            ffpp = MagicMock()
+            ffpp.get_metadata_object.return_value = {"streams": [{"codec_type": "video", "codec_name": "h264"}]}
+
+            def cancel_midway(input_specs, output_specs):
+                open(output_specs[0][0], "w").close()
+                raise clip_trimmer.ClipCancelledError()
+
+            ffpp.real_run_ffmpeg.side_effect = cancel_midway
+            with patch("clip_trimmer.FFmpegRunner", return_value=ffpp), \
+                 patch("clip_trimmer.nearest_keyframe_at_or_before", return_value=0.0), \
+                 self.assertRaises(clip_trimmer.ClipCancelledError):
+                trim_clip(final_path, 10.0, 30.0, lambda msg: None)
+
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+            with open(final_path) as f:
+                self.assertEqual(f.read(), "original")

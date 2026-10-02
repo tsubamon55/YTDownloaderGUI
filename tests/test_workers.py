@@ -13,9 +13,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import yt_dlp
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
+from clip_trimmer import ClipCancelledError
 from formats import is_codec_container_mismatch
-from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker, _base_ydl_opts
+from workers import (
+    DownloadRequest,
+    DownloadWorker,
+    FormatListWorker,
+    StoryboardFragmentWorker,
+    _base_ydl_opts,
+    fetch_image_bytes,
+)
 from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY
+
+# テストでキャンセル通知(cancelledシグナル)を受け取ったことを、失敗メッセージと同じリストで表す印
+CANCELLED = "<cancelled>"
 
 
 def make_worker(**kwargs):
@@ -615,10 +626,16 @@ class TrimClipLocallyDelegatesTest(unittest.TestCase):
         worker = make_worker(clip_start=10.0, clip_end=30.0)
         worker._final_filepath = "C:/out/My Video.mp4"
         with patch("workers.trim_clip") as trim_mock:
-            worker._trim_clip_locally()
+            worker._trim_clip_locally("C:/ffmpeg")
         trim_mock.assert_called_once()
         filepath, clip_start, clip_end, log = trim_mock.call_args.args
         self.assertEqual((filepath, clip_start, clip_end), ("C:/out/My Video.mp4", 10.0, 30.0))
+        # ffmpegの場所を明示的に渡し、キャンセルを切り抜き中のffmpegまで伝える
+        kwargs = trim_mock.call_args.kwargs
+        self.assertEqual(kwargs["ffmpeg_location"], "C:/ffmpeg")
+        self.assertFalse(kwargs["is_cancelled"]())
+        worker.cancel()
+        self.assertTrue(kwargs["is_cancelled"]())
         # 切り抜き中の進捗はワーカーのlogシグナルへ流れる
         logs = []
         worker.log.connect(logs.append)
@@ -674,6 +691,8 @@ class RunErrorHandlingTest(unittest.TestCase):
         errors = []
         logs = []
         worker.finished_error.connect(lambda msg: errors.append(msg))
+        # キャンセルは失敗(finished_error)とは別のシグナルで通知される
+        worker.cancelled.connect(lambda: errors.append(CANCELLED))
         worker.log.connect(lambda msg: logs.append(msg))
 
         with patch("workers.get_ffmpeg_location", return_value=None), \
@@ -735,16 +754,51 @@ class RunErrorHandlingTest(unittest.TestCase):
                 tmp, yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました"), worker=worker,
             )
             self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
-            self.assertEqual(errors, ["ユーザーによりキャンセルされました"])
+            self.assertEqual(errors, [CANCELLED])
 
     def test_cancellation_takes_priority_over_network_wording(self):
         """キャンセル中に(たまたま)ネットワーク系の例外が飛んできても、
-        メッセージをネットワーク切断用の文言で上書きしない"""
+        ネットワーク切断の失敗としてではなくキャンセルとして通知する"""
         with tempfile.TemporaryDirectory() as tmp:
             worker = make_worker(out_dir=tmp)
-            worker._is_cancelled = True
-            errors, _ = self._run_with(tmp, TimeoutError("timed out"), worker=worker)
-            self.assertEqual(errors, ["timed out"])
+
+            def cancel_then_time_out(urls):
+                worker.cancel()
+                raise TimeoutError("timed out")
+
+            errors, _ = self._run_with(tmp, cancel_then_time_out, worker=worker)
+            self.assertEqual(errors, [CANCELLED])
+
+    def test_cancel_during_probe_stops_before_download(self):
+        """情報取得の通信中は止められないが、終わった時点でダウンロードを始めずに止める"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            worker.cancel()
+            download = MagicMock()
+            errors, _ = self._run_with(tmp, download, worker=worker)
+            self.assertEqual(errors, [CANCELLED])
+            download.assert_not_called()
+
+    def test_cancel_during_clip_trim_removes_untrimmed_file(self):
+        """切り抜き中のキャンセルでは、要求範囲になっていない動画全体を完成品として残さない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, clip_start=10.0, clip_end=20.0)
+
+            def complete(urls):
+                final_path = os.path.join(tmp, f"{worker._unique_title}.mp4")
+                open(final_path, "w").close()
+                worker._final_filepath = final_path
+
+            with patch("workers.trim_clip", side_effect=ClipCancelledError()):
+                errors, _ = self._run_with(tmp, complete, worker=worker)
+            self.assertEqual(errors, [CANCELLED])
+            # (_run_withが置く"My Video.mp4.part"は別タイトルの残骸なので対象外)
+            self.assertFalse(os.path.exists(worker._final_filepath))
+
+    def test_failure_records_traceback_in_log(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("workers.log_debug") as log_mock:
+            self._run_with(tmp, RuntimeError("unsupported format"))
+        self.assertTrue(any("Traceback" in call.args[0] for call in log_mock.call_args_list))
 
     def test_cancel_after_download_completes_keeps_final_file(self):
         """後処理中にキャンセルするとdownload()は例外を投げずに正常終了し、
@@ -761,7 +815,7 @@ class RunErrorHandlingTest(unittest.TestCase):
 
             errors, logs = self._run_with(tmp, complete_then_cancel, worker=worker)
 
-            self.assertEqual(errors, ["キャンセルされました"])
+            self.assertEqual(errors, [CANCELLED])
             self.assertIn("My Video.mp4", os.listdir(tmp))
             self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
             self.assertTrue(any("完成済みのファイルは残しました" in log for log in logs))
@@ -792,6 +846,46 @@ class RunErrorHandlingTest(unittest.TestCase):
             self.assertEqual(os.listdir(tmp), [])
 
 
+class FetchImageBytesTest(unittest.TestCase):
+    """サムネイル等のURLは動画サイトの応答に由来するため、ローカル資源の読み出しや
+    巨大な応答の読み込みを防ぐ"""
+
+    def test_rejects_non_http_schemes(self):
+        for url in ("file:///etc/passwd", "ftp://example.com/a.jpg", "data:image/png;base64,AA=="):
+            with self.subTest(url=url), patch("workers.urllib.request.urlopen") as urlopen, \
+                    self.assertRaises(ValueError):
+                fetch_image_bytes(url, 5)
+            urlopen.assert_not_called()
+
+    def test_rejects_responses_over_limit(self):
+        resp = MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.side_effect = lambda n: b"x" * n
+        with patch("workers.urllib.request.urlopen", return_value=resp), self.assertRaises(ValueError):
+            fetch_image_bytes("https://example.com/a.jpg", 5, max_bytes=10)
+
+    def test_returns_data_within_limit(self):
+        resp = MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.return_value = b"image"
+        with patch("workers.urllib.request.urlopen", return_value=resp):
+            self.assertEqual(fetch_image_bytes("HTTPS://example.com/a.jpg", 5, max_bytes=10), b"image")
+
+
+class ProgressEstimateTest(unittest.TestCase):
+    def test_component_progress_is_capped_when_estimate_is_exceeded(self):
+        """推定サイズを実際の受信量が上回っても、次のコンポーネントの分まで進んだ表示にしない"""
+        worker = make_worker()
+        worker._component_ids = ["137", "140"]
+        worker._component_weights = [0.5, 0.5]
+        progress = []
+        worker.progress.connect(lambda percent, _text: progress.append(percent))
+        worker._on_component_downloading({
+            "info_dict": {"format_id": "137"}, "downloaded_bytes": 300, "total_bytes_estimate": 100,
+        })
+        self.assertEqual(progress, [50.0])
+
+
 class DownloadRequestTest(unittest.TestCase):
     def test_has_clip(self):
         base = dict(url="u", out_dir="o", format_spec="b")
@@ -802,7 +896,9 @@ class DownloadRequestTest(unittest.TestCase):
 
 class BaseYdlOptsTest(unittest.TestCase):
     def test_minimal(self):
-        self.assertEqual(_base_ydl_opts(), {"quiet": True, "no_warnings": True, "noplaylist": True})
+        self.assertEqual(
+            _base_ydl_opts(), {"quiet": True, "no_warnings": True, "noplaylist": True, "color": "no_color"}
+        )
 
     def test_optional_keys(self):
         opts = _base_ydl_opts(["res"], "C:/ffmpeg")
@@ -835,11 +931,12 @@ class CancelDuringPostprocessKeepsFinalFileTest(unittest.TestCase):
 
             errors = []
             worker.finished_error.connect(errors.append)
+            worker.cancelled.connect(lambda: errors.append(CANCELLED))
             with patch("workers.get_ffmpeg_location", return_value=None), \
                  patch("workers.yt_dlp.YoutubeDL", side_effect=factory):
                 worker.run()
 
-            self.assertEqual(errors, ["キャンセルされました"])
+            self.assertEqual(errors, [CANCELLED])
             self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
 
 

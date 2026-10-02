@@ -101,3 +101,27 @@ class IsNetworkErrorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DescribeErrorEdgeCasesTest(unittest.TestCase):
+    def test_empty_message_falls_back_to_exception_type(self):
+        self.assertEqual(describe_error(RuntimeError(), "ダウンロード"), "RuntimeError")
+
+    def test_certificate_error_is_not_reported_as_disconnection(self):
+        cert_error = ssl.SSLCertVerificationError(1, "certificate verify failed: certificate has expired")
+        for exc in (cert_error, urllib.error.URLError(cert_error)):
+            with self.subTest(exc=exc):
+                message = describe_error(exc, "動画情報の取得")
+                self.assertIn("証明書", message)
+                self.assertNotIn("切断", message)
+
+    def test_yt_dlp_certificate_error_in_cause_chain(self):
+        from yt_dlp.networking.exceptions import CertificateVerifyError
+
+        try:
+            try:
+                raise CertificateVerifyError("cert")
+            except CertificateVerifyError as inner:
+                raise RuntimeError("wrapped") from inner
+        except RuntimeError as outer:
+            self.assertIn("証明書", describe_error(outer, "ダウンロード"))

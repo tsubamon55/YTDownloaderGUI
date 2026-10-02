@@ -100,6 +100,23 @@ class ResolveClipRangeNonFiniteTest(unittest.TestCase):
             resolve_clip_range("", "inf")
 
 
+    def test_rejects_inputs_that_float_would_accept(self):
+        """float()任せだと"1_0"(=10)・全角数字・指数表記まで別の時刻として通ってしまう"""
+        for text in ("1_0", "１:３０", "1e3", "1:3e1", "1.5:00", "0x10", "+5", "1::2"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_clip_time(text)
+
+    def test_rejects_minutes_or_seconds_of_60_or_more_after_the_first_field(self):
+        for text in ("1:75", "1:60:00", "0:00:60"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_clip_time(text)
+
+    def test_first_field_may_exceed_60(self):
+        self.assertEqual(parse_clip_time("90"), 90.0)
+        self.assertEqual(parse_clip_time("90:00"), 5400.0)
+        self.assertEqual(parse_clip_time("1:59.75"), 119.75)
+        self.assertEqual(parse_clip_time(".5"), 0.5)
+
     def test_overflow_from_combining_finite_parts_raises(self):
         """各要素は有限でも、時・分の繰り上げで合計が無限大に溢れることがある"""
         with self.assertRaises(ValueError):
@@ -118,6 +135,11 @@ class ClipRangeLabelTest(unittest.TestCase):
 
     def test_missing_end_leaves_end_side_empty(self):
         self.assertEqual(clip_range_label(60.0, None), "1:00-")
+
+    def test_label_keeps_fractional_seconds(self):
+        """秒単位に丸めると、実際と異なる範囲("1:01-")をファイル名が名乗ってしまう"""
+        self.assertEqual(clip_range_label(60.6, 120.25), "1:00.6-2:00.25")
+        self.assertEqual(clip_range_label(59.9996, None), "1:00-")
 
 
 class FormatClipDigitsTest(unittest.TestCase):

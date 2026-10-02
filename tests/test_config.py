@@ -68,7 +68,7 @@ class LoadConfigTest(unittest.TestCase):
         loaded, _ = self._load({"clip_video_encoder_by_codec_prefix": {"av01": ["libaom-av1", "30"]}})
         self.assertEqual(loaded.clip_video_encoder_by_codec_prefix["av01"], ["libaom-av1", "30"])
         # 指定しなかったコーデックの既定値は残る
-        self.assertEqual(loaded.clip_video_encoder_by_codec_prefix["avc1"], ["libx264", "18"])
+        self.assertEqual(loaded.clip_video_encoder_by_codec_prefix["h264"], ["libx264", "18"])
 
     def test_unknown_key_is_ignored_and_logged(self):
         loaded, logged = self._load({"no_such_key": 1, "mp3_quality": "320"})
@@ -134,11 +134,43 @@ class LoadConfigTest(unittest.TestCase):
         辞書の部分上書きが効くこと"""
         cfg, _ = self._load({"clip_video_encoder_by_codec_prefix": {"hevc": ["libx265", "22"]}})
         self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["hevc"], ["libx265", "22"])
-        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["avc1"], ["libx264", "18"])
+        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["h264"], ["libx264", "18"])
+
+    def test_dict_entries_of_wrong_shape_are_dropped(self):
+        """[エンコーダ名, CRF値]の形でない項目はclip_trimmerで使えないため取り込まない"""
+        cfg, _ = self._load({"clip_video_encoder_by_codec_prefix": {
+            "hevc": "libx265", "av1": ["libsvtav1", 30], "mpeg4": ["mpeg4", "5"],
+        }})
+        self.assertNotIn("hevc", cfg.clip_video_encoder_by_codec_prefix)
+        self.assertNotIn("av1", cfg.clip_video_encoder_by_codec_prefix)
+        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["mpeg4"], ["mpeg4", "5"])
+
+    def test_out_of_range_numbers_fall_back_to_default(self):
+        """タイムアウト0秒・負の件数・NaN/Infinity(json.loadは受理する)は既定値のままにする"""
+        defaults = config.AppConfig()
+        for key, value in (
+            ("thumbnail_fetch_timeout_seconds", 0),
+            ("update_check_timeout_seconds", -1),
+            ("storyboard_fetch_timeout_seconds", float("nan")),
+            ("storyboard_fetch_timeout_seconds", float("inf")),
+            ("thumbnail_max_candidates", 0),
+            ("info_fetch_debounce_ms", -5),
+        ):
+            with self.subTest(key=key, value=value):
+                cfg, logged = self._load({key: value})
+                self.assertEqual(getattr(cfg, key), getattr(defaults, key))
+                self.assertTrue(any("範囲外" in m for m in logged))
+
+    def test_boundary_values_are_accepted(self):
+        cfg, _ = self._load({"info_fetch_debounce_ms": 0, "thumbnail_max_candidates": 1,
+                             "thumbnail_fetch_timeout_seconds": 0.5})
+        self.assertEqual(cfg.info_fetch_debounce_ms, 0)
+        self.assertEqual(cfg.thumbnail_max_candidates, 1)
+        self.assertEqual(cfg.thumbnail_fetch_timeout_seconds, 0.5)
 
     def test_non_dict_for_dict_setting_is_rejected(self):
         cfg, _ = self._load({"clip_video_encoder_by_codec_prefix": ["libx264"]})
-        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["avc1"], ["libx264", "18"])
+        self.assertEqual(cfg.clip_video_encoder_by_codec_prefix["h264"], ["libx264", "18"])
 
 
 if __name__ == "__main__":

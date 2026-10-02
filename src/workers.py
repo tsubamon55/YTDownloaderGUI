@@ -3,6 +3,8 @@
 import os
 import re
 import time
+import traceback
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,7 +14,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_range import clip_range_label, format_clip_time
-from clip_trimmer import trim_clip
+from clip_trimmer import ClipCancelledError, trim_clip
 from config import CONFIG
 from errors import describe_error
 from formats import (
@@ -29,13 +31,39 @@ from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY, add_format_exclusion
 
 
 def _base_ydl_opts(format_sort: list[str] | None = None, ffmpeg_location: str | None = None) -> dict[str, Any]:
-    """このアプリの全てのYoutubeDL呼び出しに共通するオプション(出力の抑止・プレイリスト展開の無効化)"""
-    opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    """このアプリの全てのYoutubeDL呼び出しに共通するオプション(出力の抑止・プレイリスト展開の無効化)。
+    端末から起動した場合にyt-dlpがエラー文へANSIの色コードを埋め込み、それがそのまま
+    ダイアログに表示されてしまうため、色付けも無効にする"""
+    opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "noplaylist": True, "color": "no_color"}
     if format_sort:
         opts["format_sort"] = format_sort
     if ffmpeg_location:
         opts["ffmpeg_location"] = ffmpeg_location
     return opts
+
+
+# サムネイル・ストーリーボードの1枚あたりの上限。通常は数十〜数百KBのため十分な余裕がある。
+# 応答が異常に大きい場合に、メモリを使い切るまで読み続けないようにする
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def fetch_image_bytes(url: str, timeout: float, max_bytes: int = MAX_IMAGE_BYTES) -> bytes:
+    """http(s)のURLから画像を取得する。抽出結果のURLは動画サイト側の応答に由来するため、
+    file:等のローカル資源を読むスキームは受け付けず、max_bytesを超える応答はエラーにする"""
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"対応していないURLです: {url[:100]}")
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        data = resp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"画像が大きすぎます(上限{max_bytes}バイト)")
+    return data
+
+
+def _log_traceback(context: str) -> None:
+    """ユーザーには要約したメッセージだけを見せる例外について、原因を追えるよう
+    トレースバックをcrash.logに残す(except節の中から呼ぶこと)"""
+    log_debug(f"{context}\n{traceback.format_exc()}")
 
 
 @dataclass(frozen=True)
@@ -126,10 +154,7 @@ class FormatListWorker(QThread):
             candidates = self._thumbnail_url_candidates(info)[: self.MAX_THUMBNAIL_CANDIDATES]
             for candidate_url in candidates:
                 try:
-                    with urllib.request.urlopen(
-                        candidate_url, timeout=self.THUMBNAIL_FETCH_TIMEOUT_SECONDS
-                    ) as resp:
-                        data = resp.read()
+                    data = fetch_image_bytes(candidate_url, self.THUMBNAIL_FETCH_TIMEOUT_SECONDS)
                     if data:
                         thumbnail_bytes = data
                         break
@@ -139,6 +164,7 @@ class FormatListWorker(QThread):
 
             self.finished_ok.emit(formats, title, thumbnail_bytes, info.get("duration"))
         except Exception as e:
+            _log_traceback(f"FormatListWorker: 動画情報の取得に失敗 ({self.url!r})")
             self.finished_error.emit(describe_error(e, "動画情報の取得"))
 
 
@@ -155,8 +181,7 @@ class StoryboardFragmentWorker(QThread):
 
     def run(self) -> None:
         try:
-            with urllib.request.urlopen(self.url, timeout=CONFIG.storyboard_fetch_timeout_seconds) as resp:
-                data = resp.read()
+            data = fetch_image_bytes(self.url, CONFIG.storyboard_fetch_timeout_seconds)
             self.finished_ok.emit(data)
         except Exception as e:
             self.finished_error.emit(describe_error(e, "ストーリーボードの取得"))
@@ -167,6 +192,8 @@ class DownloadWorker(QThread):
     log = pyqtSignal(str)
     finished_ok = pyqtSignal()
     finished_error = pyqtSignal(str)
+    # ユーザーによるキャンセルで止まった。失敗とは区別し、呼び出し側がエラー表示を出さずに済むようにする
+    cancelled = pyqtSignal()
 
     def __init__(self, request: DownloadRequest):
         super().__init__()
@@ -175,6 +202,8 @@ class DownloadWorker(QThread):
         self._logged_format_ids: set[str] = set()
         self._final_filepath: str | None = None
         self._started_at: float | None = None
+        # 残り時間の推定に使う、実際のダウンロード(情報取得の後)が始まった時刻
+        self._download_started_at: float | None = None
         self._active_postprocessors: dict[str, int] = {}
         self._unique_title: str | None = None
         self._preexisting_names: set[str] = set()
@@ -332,13 +361,19 @@ class DownloadWorker(QThread):
         )
 
         total = hook_info.get("total_bytes") or hook_info.get("total_bytes_estimate")
-        downloaded = hook_info.get("downloaded_bytes", 0)
-        component_percent = downloaded / total if total else 0.0
+        downloaded = hook_info.get("downloaded_bytes") or 0
+        # total_bytes_estimateは推定値のため、実際の受信量がそれを上回ることがある。
+        # 1を超えると、このコンポーネントの重みを超えて次の分まで進んだ表示になってしまう
+        component_percent = min(downloaded / total, 1.0) if total else 0.0
         percent = min((self._completed_weight + component_weight * component_percent) * 100, 100.0)
 
         # コンポーネント切り替え時に残り時間表示が乱高下しないよう、
-        # 全体の経過時間と進捗率から残り時間を推定する
-        elapsed = time.monotonic() - self._started_at if self._started_at else 0.0
+        # ダウンロード開始からの経過時間と進捗率から残り時間を推定する。
+        # 開始前の情報取得(_probe)の時間を含めると、その分だけ残り時間が長く見積もられる
+        now = time.monotonic()
+        if self._download_started_at is None:
+            self._download_started_at = now
+        elapsed = now - self._download_started_at
         eta = self._format_eta(elapsed * (100 - percent) / percent) if percent > 0 else "--:--"
         speed = hook_info.get("_speed_str", "").strip()
         self.progress.emit(percent, f"{percent:.1f}% 速度:{speed} 残り:{eta}")
@@ -445,23 +480,47 @@ class DownloadWorker(QThread):
         if self.request.exclude_mismatched:
             add_format_exclusion(ydl, is_codec_container_mismatch)
 
-    def _trim_clip_locally(self) -> None:
+    def _trim_clip_locally(self, ffmpeg_location: str | None) -> None:
         """ダウンロード済みの最終ファイルを切り抜き範囲で切り出す(詳細はclip_trimmer参照)"""
-        trim_clip(self._final_filepath, self.request.clip_start, self.request.clip_end, self.log.emit)
+        trim_clip(
+            self._final_filepath,
+            self.request.clip_start,
+            self.request.clip_end,
+            self.log.emit,
+            ffmpeg_location=ffmpeg_location,
+            is_cancelled=lambda: self._is_cancelled,
+        )
+
+    @staticmethod
+    def _set_default_ffmpeg_location(ffmpeg_location: str) -> None:
+        """yt-dlpは一部の内部処理(外部ダウンローダFFmpegFDの利用可否判定)でydl_optsの
+        ffmpeg_locationを見ずにFFmpegPostProcessor()を無引数で生成するため、そちらが参照する
+        既定値(yt-dlp自身のCLIも--ffmpeg-locationで設定しているcontextvar)にも設定しておく。
+        非公開の属性のため、無くなっていても処理は止めずに記録だけ残す"""
+        location_var = getattr(FFmpegPostProcessor, "_ffmpeg_location", None)
+        if location_var is None or not hasattr(location_var, "set"):
+            log_debug("DownloadWorker: FFmpegPostProcessor._ffmpeg_locationが無いため既定のffmpegの場所を設定できません")
+            return
+        location_var.set(ffmpeg_location)
+
+    def _raise_if_cancelled(self) -> None:
+        if self._is_cancelled:
+            raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
 
     def run(self) -> None:
         self._started_at = time.monotonic()
+        ffmpeg_location: str | None = None
         try:
             ffmpeg_location = get_ffmpeg_location()
             if ffmpeg_location:
-                # yt-dlpは一部の内部チェック(例: クリップ区間指定時のffmpeg利用可否判定)で
-                # ydl_optsのffmpeg_locationを見ずFFmpegPostProcessor()を無引数生成するため、
-                # そちらが参照するcontextvarにも明示的に設定しておく
-                FFmpegPostProcessor._ffmpeg_location.set(ffmpeg_location)
+                self._set_default_ffmpeg_location(ffmpeg_location)
 
             self._log_request()
-            probe_info = self._probe()
+            probe_info = self._probe(ffmpeg_location)
             expected_ext = self._prepare_output_name(probe_info)
+            # 情報取得(通信)の最中は止められないため、終わった時点でキャンセルを確かめる
+            # (保存ファイル名が決まった後に確かめ、前回の未完成ファイルの後片付けも効かせる)
+            self._raise_if_cancelled()
 
             download_opts = self._build_download_opts(expected_ext, ffmpeg_location)
             with yt_dlp.YoutubeDL(download_opts) as ydl:
@@ -471,19 +530,33 @@ class DownloadWorker(QThread):
             if self._is_cancelled:
                 self._finish_cancelled_after_download()
             else:
-                self._finish_success()
+                self._finish_success(ffmpeg_location)
+        except ClipCancelledError:
+            # 切り抜きの途中で止めた場合、残っているのは切り抜く前の動画全体で、
+            # 要求された範囲のファイルではないため、完成品として残さず片付ける
+            self._finish_with_cleanup(preserve_final=False)
         except Exception as e:
-            # キャンセル・ネットワーク切断・その他の失敗いずれの場合も、保存先に
-            # 中途半端な.part等のファイルが残らないよう必ず削除する。ただし本編の
-            # ダウンロード/マージ自体は完了しており、後続の後処理だけが失敗した
-            # ケースでは、完成済みファイルは残す
-            try:
-                self._cleanup_leftover_files(preserve_final=True)
-            finally:
-                # 後片付けが想定外に失敗しても、UIがダウンロード中のまま固まらないよう必ず通知する
-                message = str(e) if self._is_cancelled else describe_error(e, "ダウンロード")
-                self.log.emit(f"エラー: {message}")
-                self.finished_error.emit(message)
+            if self._is_cancelled:
+                self._finish_with_cleanup(preserve_final=True)
+                return
+            _log_traceback(f"DownloadWorker: ダウンロードに失敗 ({self.request.url!r})")
+            # ネットワーク切断・その他の失敗いずれの場合も、保存先に中途半端な.part等の
+            # ファイルが残らないよう必ず削除する。ただし本編のダウンロード/マージ自体は
+            # 完了しており、後続の後処理だけが失敗したケースでは、完成済みファイルは残す
+            self._finish_with_cleanup(preserve_final=True, error=describe_error(e, "ダウンロード"))
+
+    def _finish_with_cleanup(self, preserve_final: bool, error: str | None = None) -> None:
+        """後片付けをしてから、キャンセル(errorがNone)または失敗を通知する"""
+        try:
+            self._cleanup_leftover_files(preserve_final=preserve_final)
+        finally:
+            # 後片付けが想定外に失敗しても、UIがダウンロード中のまま固まらないよう必ず通知する
+            if error is None:
+                self.log.emit("キャンセルしました")
+                self.cancelled.emit()
+            else:
+                self.log.emit(f"エラー: {error}")
+                self.finished_error.emit(error)
 
     def _log_request(self) -> None:
         self.log.emit(f"開始: {self.request.url}")
@@ -494,9 +567,11 @@ class DownloadWorker(QThread):
             end_text = format_clip_time(end) if end is not None else "末尾"
             self.log.emit(f"切り抜き範囲: {start_text} 〜 {end_text}")
 
-    def _probe(self) -> Format:
-        """実ダウンロードの前に情報だけを取得し、保存ファイル名・拡張子・進捗の重み付けに使う"""
-        probe_opts = _base_ydl_opts(self.request.format_sort)
+    def _probe(self, ffmpeg_location: str | None = None) -> Format:
+        """実ダウンロードの前に情報だけを取得し、保存ファイル名・拡張子・進捗の重み付けに使う。
+        映像と音声の結合(bv*+ba)を選べるかはffmpegの有無で変わるため、実ダウンロードと
+        同じffmpeg_locationを渡して選択結果を揃える"""
+        probe_opts = _base_ydl_opts(self.request.format_sort, ffmpeg_location)
         probe_opts["format"] = self.request.format_spec
         with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
             self._register_format_exclusion(probe_ydl)
@@ -537,14 +612,13 @@ class DownloadWorker(QThread):
         # download()が例外を投げずに戻ってきた=本編のダウンロードも後処理も
         # 完了している。後処理中にキャンセルを押した場合がこれにあたるため、
         # 完成済みの最終ファイルは削除せずに残す(未完成の中間ファイルのみ削除)
-        self._cleanup_leftover_files(preserve_final=True)
         if self._final_filepath and os.path.isfile(self._final_filepath):
             self.log.emit(f"完成済みのファイルは残しました: {self._final_filepath}")
-        self.finished_error.emit("キャンセルされました")
+        self._finish_with_cleanup(preserve_final=True)
 
-    def _finish_success(self) -> None:
+    def _finish_success(self, ffmpeg_location: str | None = None) -> None:
         if self.request.has_clip:
-            self._trim_clip_locally()
+            self._trim_clip_locally(ffmpeg_location)
         assert self._started_at is not None  # run()の冒頭で設定済み
         elapsed = time.monotonic() - self._started_at
         if self._final_filepath and os.path.isfile(self._final_filepath):

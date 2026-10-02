@@ -4,6 +4,13 @@ QtやUIに依存しないため、単体テストがそのまま実行できる�
 """
 
 import math
+import re
+
+# 時・分の欄は整数のみ、最後(秒)の欄だけ小数を許す。float()に任せると"1_0"(=10)・
+# 全角数字・"1e3"なども受理してしまい、入力ミスがそのまま別の時刻として通ってしまうため、
+# ASCIIの数字と小数点だけを明示的に受け付ける
+_INTEGER_PART = re.compile(r"[0-9]+")
+_SECONDS_PART = re.compile(r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+")
 
 
 def parse_clip_time(text: str) -> float | None:
@@ -16,20 +23,22 @@ def parse_clip_time(text: str) -> float | None:
     if not stripped:
         return None
 
-    parts = stripped.split(":")
+    parts = [part.strip() for part in stripped.split(":")]
     if len(parts) > 3:
         raise ValueError(f"時刻の形式が正しくありません: {text}")
+    *upper_parts, seconds_part = parts
+    if not all(_INTEGER_PART.fullmatch(part) for part in upper_parts) or not _SECONDS_PART.fullmatch(seconds_part):
+        raise ValueError(f"時刻の形式が正しくありません: {text}")
+    numbers = [float(part) for part in parts]
 
-    try:
-        numbers = [float(part) for part in parts]
-    except ValueError:
-        raise ValueError(f"時刻の形式が正しくありません: {text}") from None
+    # 先頭の欄は繰り上げずに書けるよう上限を設けない("90:00"は90分、"90"は90秒)が、
+    # 2番目以降の分・秒の欄が60以上なのは書き間違いとみなす("1:75"等)
+    if any(n >= 60 for n in numbers[1:]):
+        raise ValueError(f"時刻の形式が正しくありません: {text}")
 
-    # float()は"nan"/"inf"/"infinity"も受理してしまう。非負チェック(n < 0)はNaNにも
-    # 正の無限大にも効かないため、ここで明示的に有限値であることを確かめる。
-    # 素通りさせるとformat_clip_timeのround()がValueError/OverflowErrorで落ち、
-    # 動画長との比較(NaNとの比較は常にFalse)も素通りしてしまう
-    if any(not math.isfinite(n) or n < 0 for n in numbers):
+    # 桁数の多すぎる数字はfloat()で無限大になる。素通りさせるとformat_clip_timeのround()が
+    # OverflowErrorで落ち、動画長との比較も意味をなさないため、有限値であることを確かめる
+    if any(not math.isfinite(n) for n in numbers):
         raise ValueError(f"時刻の形式が正しくありません: {text}")
 
     seconds = 0.0
@@ -63,9 +72,20 @@ def clip_range_label(start: float | None, end: float | None) -> str | None:
     """
     if start is None and end is None:
         return None
-    start_label = format_clip_time(start) if start is not None else ""
-    end_label = format_clip_time(end) if end is not None else ""
+    start_label = _format_label_time(start) if start is not None else ""
+    end_label = _format_label_time(end) if end is not None else ""
     return f"{start_label}-{end_label}"
+
+
+def _format_label_time(seconds: float) -> str:
+    """ファイル名用の時刻表記。format_clip_timeは秒単位に丸めるため、"1:00.6"から
+    切り抜いたファイルが"1:01"と実際と異なる範囲を名乗らないよう、端数はミリ秒まで残す"""
+    millis = round(seconds * 1000)
+    whole, fraction = divmod(millis, 1000)
+    label = format_clip_time(whole)
+    if fraction:
+        label += f".{fraction:03d}".rstrip("0")
+    return label
 
 
 def format_clip_digits(digits: str) -> str:

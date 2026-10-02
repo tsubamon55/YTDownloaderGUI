@@ -31,10 +31,7 @@ def select_storyboard_format(
     ドラッグ中に何度も取得し直さずに済むようデータ量が最小のものを選ぶ。
     どれも指定サイズに届かない場合(短い動画等)は、拡大表示になっても
     最も画質の良い(1マスが最大の)ものを選ぶ"""
-    storyboards = [
-        f for f in formats
-        if f.get("format_note") == "storyboard" and f.get("fragments")
-    ]
+    storyboards = [f for f in formats if f.get("format_note") == "storyboard" and _is_usable_storyboard(f)]
     if not storyboards:
         return None
 
@@ -50,17 +47,34 @@ def select_storyboard_format(
     return max(storyboards, key=tile_area)
 
 
+def _positive_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _is_usable_storyboard(storyboard: dict[str, Any]) -> bool:
+    """切り出し位置を計算するのに必要な情報(1マスの大きさ・格子の行列数・枚数の密度と、
+    URLを持つフラグメント)が揃っているか。欠けたものを選ぶと、より良い候補があっても
+    プレビューが出なくなる"""
+    fragments = storyboard.get("fragments")
+    return (
+        all(_positive_number(storyboard.get(key)) for key in ("width", "height", "rows", "columns", "fps"))
+        and isinstance(fragments, list)
+        and bool(fragments)
+        and all(isinstance(fragment, dict) and fragment.get("url") for fragment in fragments)
+    )
+
+
 def storyboard_tile_for_time(storyboard: dict[str, Any], duration: float, seconds: float) -> StoryboardTile | None:
     """再生時刻(秒)に対応するサムネイルマスの位置を返す。必要な情報が
     欠けている場合はNoneを返す"""
-    fps = storyboard.get("fps")
-    rows = storyboard.get("rows")
-    columns = storyboard.get("columns")
-    width = storyboard.get("width")
-    height = storyboard.get("height")
-    fragments = storyboard.get("fragments") or []
-    if not (fps and rows and columns and width and height and fragments and duration):
+    if not (_is_usable_storyboard(storyboard) and _positive_number(duration)):
         return None
+    fps = storyboard["fps"]
+    rows = storyboard["rows"]
+    columns = storyboard["columns"]
+    width = storyboard["width"]
+    height = storyboard["height"]
+    fragments = storyboard["fragments"]
 
     # フォーマット自体には全体の枚数(frame_count)が直接入っていないため、
     # fps(枚数/動画長)と実際の動画長から逆算する
