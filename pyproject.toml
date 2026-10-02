@@ -16,8 +16,8 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = [
     "clip_range", "clip_trimmer", "config", "dialogs", "errors", "folder_opener", "format_engine", "formats",
-    "main_window", "main_window_ui", "paths", "storyboard", "theme", "updater", "widgets", "workers",
-    "yt_dlp_selection",
+    "live", "live_recorder", "main_window", "main_window_ui", "paths", "storyboard", "theme", "updater", "widgets",
+    "workers", "yt_dlp_selection",
 ]
 
 [tool.mypy]
