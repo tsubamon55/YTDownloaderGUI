@@ -1,5 +1,6 @@
 """バックグラウンド処理(フォーマット一覧取得・ダウンロード)を行うQThread群"""
 
+import gc
 import os
 import re
 import shutil
@@ -279,6 +280,8 @@ class DownloadWorker(QThread):
         # このダウンロード専用の作業フォルダ(保存先の中に作る)。完成品だけを保存先へ移し、
         # 残りはフォルダごと消すことで、並列に走る他のダウンロードや既存のファイルに触れない
         self._work_dir: str | None = None
+        # 中断したyt-dlpが開いたままのファイルがあり、その場では削除できなかった作業フォルダ
+        self._undeleted_work_dir: str | None = None
         self._component_ids: list[str | None] = []
         self._component_weights: list[float] = [1.0]
         self._completed_weight: float = 0.0
@@ -327,6 +330,20 @@ class DownloadWorker(QThread):
         work_dir, self._work_dir = self._work_dir, None
         if work_dir is None:
             return
+        shutil.rmtree(work_dir, ignore_errors=True)
+        if os.path.exists(work_dir):
+            # run()の最後(例外の処理を抜けた後)にもう一度消す
+            self._undeleted_work_dir = work_dir
+
+    def _retry_undeleted_work_dir(self) -> None:
+        """キャンセル・失敗で中断したyt-dlpは、書き込み中のファイル(結合前の.part等)を閉じずに、
+        内部の状態と進捗フックとの循環参照に残す。Windowsでは開いたままのファイルを削除できず、
+        例外の処理中はそれがまだ参照されていて解放もできない。_run()を抜けた後に循環参照を回収して
+        ファイルを閉じさせ、消し直す"""
+        work_dir, self._undeleted_work_dir = self._undeleted_work_dir, None
+        if work_dir is None:
+            return
+        gc.collect()
         shutil.rmtree(work_dir, ignore_errors=True)
         if os.path.exists(work_dir):
             log_debug(f"_discard_work_dir: 作業フォルダを削除できませんでした ({work_dir})")
@@ -672,6 +689,7 @@ class DownloadWorker(QThread):
         finally:
             # 通知の前に片付け済みだが、想定外の経路で抜けた場合も作業フォルダを残さない
             self._discard_work_dir()
+            self._retry_undeleted_work_dir()
 
     def _run(self) -> None:
         self._started_at = time.monotonic()

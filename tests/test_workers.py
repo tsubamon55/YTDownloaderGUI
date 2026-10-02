@@ -3,10 +3,12 @@
 
 import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 import urllib.error
+import weakref
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -1593,6 +1595,52 @@ class FragmentedDownloadCancelTest(unittest.TestCase):
         calls, raised = self._run_fragments(worker, worker.discard)
         self.assertEqual(len(calls), 2)
         self.assertIsInstance(raised, DownloadCancelledByUser)
+
+
+
+class CancelReleasesOpenFilesTest(unittest.TestCase):
+    """キャンセルで中断したyt-dlpは、書き込み中のファイル(結合前の.part)を閉じずに、
+    例外のトレースバックとの循環参照に残す。Windowsでは開いたままのファイルを削除できず、
+    作業フォルダが保存先に残っていた"""
+
+    def _run_cancel_holding_file(self, tmp, make_error):
+        """make_errorは送出する例外を作る関数。yt-dlpと同じく例外は送出のたびに作り、
+        テストが例外(とそのトレースバック)を掴み続けないようにする"""
+        worker = make_worker(out_dir=tmp)
+        handles = []
+
+        def download(urls):
+            stream = open(os.path.join(worker._work_dir, "My Video.f299.mp4.part"), "wb")  # noqa: SIM115
+            ctx = {"dest_stream": stream}
+            ctx["self"] = ctx  # yt-dlpの内部と同じく、循環参照でのみ生き残るようにする
+            handles.append(weakref.ref(stream))
+            del stream
+            worker.cancel()
+            raise make_error()
+
+        real_rmtree = shutil.rmtree
+
+        def windows_like_rmtree(path, ignore_errors=False):
+            # Windowsと同じく、開いたままのファイルがあれば削除できない
+            if any(ref() is not None and not ref().closed for ref in handles):
+                return
+            real_rmtree(path, ignore_errors=ignore_errors)
+
+        with patch("workers.shutil.rmtree", side_effect=windows_like_rmtree):
+            errors, _ = run_worker(worker, download, write_part=False)
+        return errors
+
+    def test_cancel_removes_work_dir_even_if_yt_dlp_left_file_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors = self._run_cancel_holding_file(tmp, lambda: DownloadCancelledByUser("ユーザーによりキャンセルされました"))
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_failure_removes_work_dir_even_if_yt_dlp_left_file_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors = self._run_cancel_holding_file(tmp, lambda: yt_dlp.utils.DownloadError("ERROR: network"))
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(os.listdir(tmp), [])
 
 
 if __name__ == "__main__":
