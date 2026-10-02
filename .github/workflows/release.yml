@@ -10,9 +10,16 @@ on:
 permissions:
   contents: read
 
+# 同じタグのリリースを二重に作らないよう、同時に1つだけ走らせる(途中で止めると下書きが中途半端に
+# なるため、後から来た方は待たせる)。ci.ymlは呼び出し元の名前でグループを作るため、名前を変えて分ける
+concurrency:
+  group: publish-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   check-version:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -35,6 +42,7 @@ jobs:
   build-windows:
     needs: [check-version, ci]
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       VERSION: ${{ needs.check-version.outputs.version }}
     steps:
@@ -70,12 +78,34 @@ jobs:
 
       - run: pyinstaller YTDownloaderGUI.spec --noconfirm
 
+      # ランナーに入っているInno Setupを使う(無ければchocolateyで入れる)。installer.issは6系の
+      # 書式のため、メジャーバージョンが違えば失敗させ、使った版はログに残す
       - name: Build installer
         shell: pwsh
+        env:
+          INNO_SETUP_MAJOR: "6"
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
+          function Find-Iscc {
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { return $cmd.Source }
+            foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, "$env:LOCALAPPDATA\Programs")) {
+              if (-not $base) { continue }
+              $candidate = Join-Path $base "Inno Setup $env:INNO_SETUP_MAJOR\ISCC.exe"
+              if (Test-Path $candidate) { return $candidate }
+            }
+            return $null
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
             choco install innosetup -y --no-progress
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { Write-Error "ISCC.exeが見つかりません"; exit 1 }
+          $version = (Get-Item $iscc).VersionInfo.ProductVersion
+          Write-Host "Inno Setup: $iscc ($version)"
+          if (-not $version -or -not $version.StartsWith("$env:INNO_SETUP_MAJOR.")) {
+            Write-Error "Inno Setup $env:INNO_SETUP_MAJOR 系が必要です(実際: $version)"
+            exit 1
           }
           & $iscc installer.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -89,8 +119,12 @@ jobs:
   build-macos:
     needs: [check-version, ci]
     runs-on: macos-latest
+    timeout-minutes: 45
     env:
       VERSION: ${{ needs.check-version.outputs.version }}
+      # 同梱するffmpegとビルドに使うランナーがApple Silicon用のため、dmgもApple Silicon専用になる。
+      # updater.pyは名前のアーキテクチャ表記で実行中のMacに合うdmgを選ぶ(Intel Macへ配らない)
+      MACOS_ARCH: arm64
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -121,6 +155,9 @@ jobs:
           done
           chmod +x ffmpeg/ffmpeg ffmpeg/ffprobe
           ffmpeg/ffmpeg -version | head -n 1
+          # ランナーやビルドの取り違えで、名前と中身のアーキテクチャが食い違わないようにする
+          test "$(uname -m)" = "${MACOS_ARCH}"
+          file ffmpeg/ffmpeg ffmpeg/ffprobe | tee /dev/stderr | grep -q "${MACOS_ARCH}"
 
       # READMEの「アプリアイコン」と同じ手順で.icnsを生成する
       - name: Generate icns
@@ -136,22 +173,27 @@ jobs:
 
       - run: pyinstaller YTDownloaderGUI.spec --noconfirm
 
+      # 同梱ffmpegのライセンス(GPLv3)と入手先は、Windowsのインストーラーと同様に配布物へ含める。
+      # .app内(YTDownloaderGUI.specで同梱)に加え、dmgを開いた時にも見えるよう直下にも置く
       - name: Build dmg
         run: |
           mkdir -p dist/dmg_staging
           ln -s /Applications dist/dmg_staging/Applications
           cp -R dist/YTDownloaderGUI.app dist/dmg_staging/
-          hdiutil create -volname "YTDownloaderGUI" -srcfolder dist/dmg_staging -ov -format UDZO "dist/YTDownloaderGUI-${VERSION}.dmg"
+          cp -R licenses dist/dmg_staging/licenses
+          hdiutil create -volname "YTDownloaderGUI" -srcfolder dist/dmg_staging -ov -format UDZO \
+            "dist/YTDownloaderGUI-${VERSION}-${MACOS_ARCH}.dmg"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-dmg
-          path: dist/YTDownloaderGUI-${{ env.VERSION }}.dmg
+          path: dist/YTDownloaderGUI-${{ env.VERSION }}-${{ env.MACOS_ARCH }}.dmg
           if-no-files-found: error
 
   release:
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:

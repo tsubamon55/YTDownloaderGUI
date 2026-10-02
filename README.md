@@ -128,9 +128,9 @@ yt-dlpは `requirements.in` で下限だけを指定しているため、`--upgr
 
 ## CI/CD (GitHub Actions)
 
-- **CI** (`.github/workflows/ci.yml`): `master` へのpushとPull Requestで、ruffをUbuntu上で、mypyとunittestをWindows/macOS上で実行します。
+- **CI** (`.github/workflows/ci.yml`): `master` へのpushとPull Requestで、ruffと `.in`・ロックファイルの整合確認をUbuntu上で、mypyとunittestをWindows/macOS上で実行します。
 - **リリース** (`.github/workflows/release.yml`): `VERSION` と同じ番号の `v<バージョン>` タグをpushすると、CIを通したうえで
-  `YTDownloaderGUI-Setup-<バージョン>.exe`(Windows)と `YTDownloaderGUI-<バージョン>.dmg`(macOS, Apple Silicon)をビルドし、
+  `YTDownloaderGUI-Setup-<バージョン>.exe`(Windows)と `YTDownloaderGUI-<バージョン>-arm64.dmg`(macOS, Apple Silicon)をビルドし、
   GitHub Releasesに**下書き**として添付します。公開した時点で既存ユーザーの自動アップデートが始まるため、
   アセットを確認してから手動で公開してください。各アセットのSHA256を記した `SHA256SUMS` も添付されます。
   同梱するffmpegは版とSHA256を `release.yml` に固定しており、更新する場合はURLとハッシュを一緒に書き換えます。
@@ -146,6 +146,7 @@ git push origin v$(cat VERSION)
 実行ファイルと同じフォルダ(開発時はプロジェクト直下)の `config.json` にまとめてあります。
 ファイルが無い/一部のキーが欠けている場合はコード内蔵の既定値が使われるため、
 変更したい項目だけを残して他を削除しても構いません。
+型が違う値や、範囲外の値(0秒以下のタイムアウト・負の件数など)は無視して既定値を使います。
 
 | キー | 既定値 | 内容 |
 | --- | --- | --- |
@@ -154,7 +155,7 @@ git push origin v$(cat VERSION)
 | `storyboard_fetch_timeout_seconds` | `10` | クリップ範囲スライダーのプレビュー画像取得タイムアウト(秒) |
 | `info_fetch_debounce_ms` | `700` | URL入力後、自動でフォーマット取得を始めるまでの待ち時間(ミリ秒) |
 | `mp3_quality` | `"192"` | 「音声のみ (mp3)」選択時の変換ビットレート(kbps) |
-| `clip_video_encoder_by_codec_prefix` | (コード参照) | クリップ切り出し時の再エンコード設定(映像コーデック毎の `[エンコーダ, CRF値]`)。表に無いコーデックはffmpegの既定設定にフォールバックします |
+| `clip_video_encoder_by_codec_prefix` | (コード参照) | クリップ切り出し時の再エンコード設定。キーはffprobeが返す映像コーデック名(`h264`・`vp9`等)、値は `[エンコーダ, CRF値]`。表に無いコーデック(HEVC・AV1等)は、出力がwebmなら `vp9`、それ以外は `h264` の設定で再エンコードします |
 | `auto_update_enabled` | `true` | 起動時にGitHub Releasesへ新バージョンの有無を問い合わせるかどうか |
 | `update_check_timeout_seconds` | `5` | アップデート確認(GitHub API)・ダウンロードそれぞれ1回あたりのタイムアウト(秒) |
 
@@ -169,19 +170,25 @@ git push origin v$(cat VERSION)
 いずれのOSでも、更新の適用はアプリの終了が確定してから始まります(動画のダウンロード中は
 更新を提案せず、終了確認で「いいえ」を選んだ場合は更新も中止します)。
 
-- **Windows**: ファイル名が `.exe` で終わり、可能なら `Setup` を含むアセットを選び、アプリ終了時に
+- **Windows**: ファイル名が `.exe` で終わり `Setup` を含むアセットを選び、アプリ終了時に
   `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` でサイレントインストールし、インストーラーの
   `[Run]` セクションでアプリを再起動します(`installer.iss` 参照)。
-- **macOS**: ファイル名が `.dmg` で終わるアセットをダウンロードし、アプリ終了後にヘルパースクリプトが
+- **macOS**: ファイル名が `.dmg` で終わり、実行中のMacのCPUに合う(名前に `arm64`/`x86_64`/`universal` を含む)
+  アセットをダウンロードし、アプリ終了後にヘルパースクリプトが
   dmgをマウントして、実行中だった `.app` と同じ場所へ `ditto` でコピー・入れ替えてから再起動します。
   入れ替えに失敗した場合は元の `.app` が残ります。ダウンロードしたdmg由来の `com.apple.quarantine`
   属性を外すため、Gatekeeperの警告なしで再起動できます(このアプリ自体はアドホック署名のみで
   公証していないため、手動でdmgを開いた場合は引き続き初回起動時に警告が出ます)。
   ヘルパーの実行結果は `crash.log` に記録されます。
+  (アーキテクチャ表記の無い `.dmg` は、表記を付ける前のApple Silicon専用ビルドとみなします)
+
+ダウンロードしたファイルは、同じリリースに添付された `SHA256SUMS` の値と照合し、一致した場合だけ
+適用します(適用の直前にも再度照合します)。`SHA256SUMS` が無い、または該当ファイルの記載が無い
+リリースは更新として扱いません。前回までにダウンロードしたファイルは、次の確認時に削除されます。
 
 そのため、GitHub Releasesで新バージョンを公開する際は、`YTDownloaderGUI-Setup-<バージョン>.exe`
-(Windows)・`YTDownloaderGUI-<バージョン>.dmg`(macOS)をビルドしてアセットとして添付し、
-タグ名(`tag_name`)にはVERSIONファイルと同じバージョン番号を使ってください。
+(Windows)・`YTDownloaderGUI-<バージョン>-arm64.dmg`(macOS)と `SHA256SUMS` をアセットとして添付し
+(`release.yml` が自動で行います)、タグ名(`tag_name`)にはVERSIONファイルと同じバージョン番号を使ってください。
 ソースから直接実行している間や `auto_update_enabled` を `false` にした場合は確認自体を行いません。
 
 ## アプリアイコン
@@ -247,11 +254,13 @@ Python未インストールの環境でも動く実行ファイルを作成で�
 mkdir -p dist/dmg_staging
 ln -s /Applications dist/dmg_staging/Applications
 cp -R dist/YTDownloaderGUI.app dist/dmg_staging/
-hdiutil create -volname "YTDownloaderGUI" -srcfolder dist/dmg_staging -ov -format UDZO dist/YTDownloaderGUI-<バージョン>.dmg
+cp -R licenses dist/dmg_staging/licenses
+hdiutil create -volname "YTDownloaderGUI" -srcfolder dist/dmg_staging -ov -format UDZO dist/YTDownloaderGUI-<バージョン>-arm64.dmg
 rm -rf dist/dmg_staging
 ```
 
-`dist/YTDownloaderGUI-<バージョン>.dmg` が生成されます。マウントすると `.app` と `Applications` フォルダへのショートカットが表示され、ドラッグでインストールできます。
+`dist/YTDownloaderGUI-<バージョン>-arm64.dmg` が生成されます(Intel Macでビルドした場合は `arm64` を `x86_64` にしてください。
+自動アップデートはこの表記で実行中のMacに合うdmgを選びます)。マウントすると `.app` と `Applications` フォルダへのショートカットが表示され、ドラッグでインストールできます。
 
 ## インストーラーのビルド(Windowsのみ)
 
@@ -268,10 +277,10 @@ rm -rf dist/dmg_staging
 
 ## ライセンスに関する注意
 
-同梱・利用する ffmpeg essentials build は **GPL** ライセンスの構成でビルドされています。
+同梱・利用する ffmpeg(Windows: Gyan.Dev essentials build、macOS: Martin Riedl氏のビルド)は **GPL** ライセンスの構成でビルドされています。
 第三者に配布する場合は、ffmpegのライセンス表記(COPYING.GPLv3など)を同梱し、ソースの入手先を明記する必要があります。
 
-`licenses/` フォルダに以下を用意しています(インストーラーにも `licenses/` として同梱されます):
+`licenses/` フォルダに以下を用意しています(Windowsのインストーラーには `licenses/` として、macOSでは `.app` の中とdmgの直下に同梱されます):
 
 - `COPYING.GPLv3.txt` — GNU General Public License v3 の正式テキスト
 - `FFMPEG_NOTICE.md` — 同梱ffmpegのビルド元・ソース入手先の明記

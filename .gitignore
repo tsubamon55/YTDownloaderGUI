@@ -18,5 +18,10 @@ __pycache__/
 # IDE
 .idea/
 
-# Debug log written by the app and tests (paths.log_debug)
+# アプリのデバッグログ(paths.log_debug)はOSごとのアプリデータフォルダのcrash.logへ書かれる。
+# 調査のためにプロジェクト直下へコピーしたものを誤ってコミットしないよう除外する
 crash.log
+
+# macOSビルド時に生成するアイコン(README「アプリアイコン」/ release.yml参照)
+downloader-icon/*.icns
+downloader-icon/*.iconset/

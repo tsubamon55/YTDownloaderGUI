@@ -5,3 +5,5 @@
 ruff
 mypy
 pyinstaller
+# ロックファイルの生成(README「依存関係の更新」)と、CIでの.inとロックファイルの整合確認に使う
+uv
