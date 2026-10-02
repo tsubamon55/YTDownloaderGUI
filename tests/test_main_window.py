@@ -8,6 +8,7 @@
 
 import os
 import sys
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,7 @@ import dialogs
 import main_window as main_window_module
 from live import LiveInfo
 from main_window import IDLE_STATUS_TEXT, MainWindow
+from main_window_ui import DOWNLOAD_BUTTON_TEXT, RECORD_BUTTON_TEXT
 from widgets import DownloadTaskWidget
 
 _app = QApplication.instance() or QApplication(sys.argv)
@@ -1663,6 +1665,91 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         self.assertIsNone(self.window._pending_update_path)
         event.ignore.assert_called_once()
         event.accept.assert_not_called()
+
+
+class LiveFormTest(MainWindowTestCase):
+    def _fetch_live(self, can_record_from_start=True, started_ago=7170):
+        self.window.url_edit.setText("https://www.youtube.com/live/abc")
+        worker = MagicMock()
+        self.window.format_worker = worker
+        live_info = LiveInfo(started_at=time.time() - started_ago, can_record_from_start=can_record_from_start)
+        self.window.on_formats_fetched([make_video(), make_audio()], "Stream", b"", None, worker, live_info=live_info)
+
+    def test_live_shows_badge_elapsed_time_and_record_button(self):
+        self._fetch_live()
+        self.assertTrue(self.window.live_header.isVisible())
+        self.assertEqual(self.window.live_badge_label.text(), "● LIVE")
+        self.assertEqual(self.window.live_elapsed_label.text(), "配信開始から 1:59:30")
+        self.assertEqual(self.window.download_btn.text(), RECORD_BUTTON_TEXT)
+        self.assertEqual(self.window.status_label.text(), "配信中のライブを検出しました")
+
+    def test_live_that_can_go_back_offers_both_positions_defaulting_to_start(self):
+        self._fetch_live()
+        self.assertTrue(self.window.live_start_container.isVisible())
+        self.assertTrue(self.window.live_from_start_radio.isChecked())
+        self.assertEqual(self.window.live_from_start_radio.text(), "配信の最初から（1:59:30 さかのぼる）")
+        self.assertTrue(self.window.live_from_now_radio.isVisible())
+        self.assertFalse(self.window.live_unavailable_label.isVisible())
+        self.assertEqual(self.window._selected_live_mode(), "from_start")
+
+    def test_choosing_now(self):
+        self._fetch_live()
+        self.window.live_from_now_radio.setChecked(True)
+        self.assertEqual(self.window._selected_live_mode(), "from_now")
+
+    def test_live_that_cannot_go_back_shows_note_instead_of_choices(self):
+        self._fetch_live(can_record_from_start=False)
+        self.assertFalse(self.window.live_from_start_radio.isVisible())
+        self.assertFalse(self.window.live_from_now_radio.isVisible())
+        self.assertTrue(self.window.live_unavailable_label.isVisible())
+        self.assertEqual(self.window._selected_live_mode(), "from_now")
+
+    def test_options_not_usable_for_live_are_hidden_and_closed(self):
+        self.window.detail_toggle_btn.setChecked(True)
+        self._fetch_live()
+        self.assertFalse(self.window.manual_toggle_btn.isVisible())
+        self.assertFalse(self.window.detail_toggle_btn.isVisible())
+        self.assertFalse(self.window.detail_container.isVisible())
+
+    def test_elapsed_time_keeps_updating(self):
+        self._fetch_live(started_ago=59)
+        self.assertTrue(self.window._live_elapsed_timer.isActive())
+        with patch.object(main_window_module.time, "time", return_value=self.window.live_info.started_at + 61):
+            self.window._live_elapsed_timer.timeout.emit()
+        self.assertEqual(self.window.live_elapsed_label.text(), "配信開始から 1:01")
+
+    def test_unknown_start_time_shows_badge_only(self):
+        self.window.url_edit.setText("https://www.youtube.com/live/abc")
+        worker = MagicMock()
+        self.window.format_worker = worker
+        self.window.on_formats_fetched([], "Stream", b"", None, worker,
+                                       live_info=LiveInfo(started_at=None, can_record_from_start=True))
+        self.assertEqual(self.window.live_elapsed_label.text(), "")
+        self.assertEqual(self.window.live_from_start_radio.text(), "配信の最初から")
+
+    def test_changing_to_normal_video_restores_form(self):
+        self._fetch_live()
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.assertFalse(self.window.live_header.isVisible())
+        self.assertFalse(self.window.live_start_container.isVisible())
+        self.assertTrue(self.window.manual_toggle_btn.isVisible())
+        self.assertTrue(self.window.detail_toggle_btn.isVisible())
+        self.assertEqual(self.window.download_btn.text(), DOWNLOAD_BUTTON_TEXT)
+        self.assertFalse(self.window._live_elapsed_timer.isActive())
+
+    def test_live_title_and_badge_fit_in_preview(self):
+        """LIVE見出しの分だけタイトルの高さを詰め、サムネイルの高さからはみ出さない"""
+        self._fetch_live()
+        header = self.window.live_header.maximumHeight()
+        self.assertLessEqual(header + self.window.title_label.maximumHeight(), self.window.thumbnail_label.height())
+
+    def test_download_request_carries_live_mode(self):
+        self._fetch_live()
+        self.window.out_edit.setText(OUT_DIR)
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"):
+            request = self.window._build_download_request()
+        self.assertEqual(request.live_mode, "from_start")
+        self.assertIsNone(request.clip_start)
 
 
 if __name__ == "__main__":

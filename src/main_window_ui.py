@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -29,6 +30,7 @@ from theme import (
     ACCENT_HOVER_COLOR,
     ACCENT_PRESSED_COLOR,
     LINK_BUTTON_STYLE,
+    LIVE_COLOR,
     MUTED_TEXT_COLOR,
     ON_ACCENT_DISABLED_TEXT_COLOR,
     ON_ACCENT_TEXT_COLOR,
@@ -40,6 +42,10 @@ from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, Rang
 IDLE_STATUS_TEXT = "待機中"
 
 APP_TITLE = "YouTube 動画ダウンローダー"
+
+DOWNLOAD_BUTTON_TEXT = "ダウンロード開始"
+# 配信中のライブを表示している間のダウンロードボタンの文言
+RECORD_BUTTON_TEXT = "録画開始"
 
 THUMBNAIL_SIZE = QSize(120, 68)
 
@@ -93,6 +99,13 @@ class Ui_MainWindow(QMainWindow):
     status_label: QLabel
     log_toggle_btn: QPushButton
     log_view: QPlainTextEdit
+    live_header: QWidget
+    live_badge_label: QLabel
+    live_elapsed_label: QLabel
+    live_start_container: QWidget
+    live_from_start_radio: QRadioButton
+    live_from_now_radio: QRadioButton
+    live_unavailable_label: QLabel
     download_panel: QWidget
     download_list_layout: QVBoxLayout
 
@@ -154,14 +167,38 @@ class Ui_MainWindow(QMainWindow):
         # さらに引き伸ばさない(二重に拡縮すると、高DPI画面でぼやける)
         self.thumbnail_label.setStyleSheet(f"background-color: {PLACEHOLDER_BACKGROUND}; border-radius: 3px;")
         preview_row.addWidget(self.thumbnail_label)
+        # タイトルの上に、配信中のライブのときだけLIVE見出し(バッジ・配信開始からの経過時間)を出す。
+        # 上下の伸縮で、見出しの有無にかかわらずタイトルを縦方向の中央に置く
+        text_column = QWidget(preview_container)
+        text_layout = QVBoxLayout(text_column)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+        text_layout.addStretch(1)
+        self.live_header = QWidget()
+        live_header_layout = QHBoxLayout(self.live_header)
+        live_header_layout.setContentsMargins(0, 0, 0, 0)
+        live_header_layout.setSpacing(8)
+        self.live_badge_label = QLabel("● LIVE")
+        self.live_badge_label.setStyleSheet(f"color: {LIVE_COLOR}; font-weight: bold;")
+        live_header_layout.addWidget(self.live_badge_label)
+        self.live_elapsed_label = QLabel("")
+        self.live_elapsed_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.live_elapsed_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        live_header_layout.addWidget(self.live_elapsed_label)
+        live_header_layout.addStretch(1)
+        self.live_header.setFixedHeight(self.live_badge_label.sizeHint().height())
+        self.live_header.setVisible(False)
+        text_layout.addWidget(self.live_header)
         # 動画タイトルは外部由来の文字列のため、"<b>"等がHTMLとして描画されないようにする
         # (他の内容が変わるラベルも同様。dialogs参照)
-        self.title_label = QLabel("", preview_container)
+        self.title_label = QLabel("")
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setWordWrap(True)
         self.title_label.setMaximumHeight(THUMBNAIL_SIZE.height())
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        preview_row.addWidget(self.title_label, stretch=1)
+        text_layout.addWidget(self.title_label)
+        text_layout.addStretch(1)
+        preview_row.addWidget(text_column, stretch=1)
         layout.addWidget(preview_container)
 
         # --- フォーマット選択 ---
@@ -191,6 +228,25 @@ class Ui_MainWindow(QMainWindow):
         self.auto_format_note_label.setStyleSheet(f"color: {WARNING_TEXT_COLOR};")
         self.auto_format_note_label.setVisible(False)
         layout.addWidget(self.auto_format_note_label)
+
+        # --- 録画開始位置(配信中のライブのときだけ) ---
+        # 選択肢が2つだけのため、コンボではなく両方が常に見えるラジオボタンにする
+        self.live_start_container = QWidget()
+        live_start_layout = QHBoxLayout(self.live_start_container)
+        live_start_layout.setContentsMargins(0, 0, 0, 0)
+        live_start_layout.addWidget(QLabel("録画開始位置:"))
+        self.live_from_start_radio = QRadioButton("配信の最初から")
+        self.live_from_start_radio.setChecked(True)
+        live_start_layout.addWidget(self.live_from_start_radio)
+        self.live_from_now_radio = QRadioButton("今から")
+        live_start_layout.addWidget(self.live_from_now_radio)
+        # さかのぼれない配信では、選べない選択肢を並べる代わりにこの一文だけを出す
+        self.live_unavailable_label = QLabel("今から録画します（この配信はさかのぼって保存できません）")
+        self.live_unavailable_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        live_start_layout.addWidget(self.live_unavailable_label)
+        live_start_layout.addStretch(1)
+        self.live_start_container.setVisible(False)
+        layout.addWidget(self.live_start_container)
 
         self.manual_container = QWidget()
         manual_layout = QVBoxLayout(self.manual_container)
@@ -316,7 +372,7 @@ class Ui_MainWindow(QMainWindow):
 
         # --- ダウンロード ---
         btn_row = QHBoxLayout()
-        self.download_btn = QPushButton("ダウンロード開始")
+        self.download_btn = QPushButton(DOWNLOAD_BUTTON_TEXT)
         self.download_btn.setMinimumHeight(40)
         download_font = self.download_btn.font()
         download_font.setBold(True)

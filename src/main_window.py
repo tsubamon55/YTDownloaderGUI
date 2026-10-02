@@ -41,8 +41,16 @@ from formats import (
     has_video,
     is_codec_container_mismatch,
 )
-from live import LiveInfo
-from main_window_ui import DOWNLOAD_PANEL_WIDTH, IDLE_STATUS_TEXT, Ui_MainWindow, toggle_button_text
+from live import LiveInfo, LiveMode
+from main_window_ui import (
+    DOWNLOAD_BUTTON_TEXT,
+    DOWNLOAD_PANEL_WIDTH,
+    IDLE_STATUS_TEXT,
+    RECORD_BUTTON_TEXT,
+    THUMBNAIL_SIZE,
+    Ui_MainWindow,
+    toggle_button_text,
+)
 from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_location, log_debug
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
 from updater import (
@@ -114,6 +122,11 @@ class MainWindow(Ui_MainWindow):
         self._info_fetch_timer.setSingleShot(True)
         self._info_fetch_timer.setInterval(CONFIG.info_fetch_debounce_ms)
         self._info_fetch_timer.timeout.connect(lambda: self.fetch_formats(auto=True))
+
+        # ライブの「配信開始から」の経過時間を1秒ごとに更新する(ライブを表示している間だけ動かす)
+        self._live_elapsed_timer = QTimer(self)
+        self._live_elapsed_timer.setInterval(1000)
+        self._live_elapsed_timer.timeout.connect(self._update_live_elapsed)
 
         # 他のダイアログの表示中に届いたアップデートの提案(version, download_url, asset_name, sha256)と、
         # それを閉じられた後に改めて出すためのタイマー
@@ -231,7 +244,7 @@ class MainWindow(Ui_MainWindow):
         """表示中の動画の情報(タイトル・サムネイル・フォーマット・クリップ範囲)を破棄し、
         ダウンロードできない状態に戻す"""
         self.info_ready = False
-        self.live_info = None
+        self._show_live_info(None)
         self.download_btn.setEnabled(False)
         self.title_label.setText("")
         self.thumbnail_label.clear()
@@ -346,7 +359,6 @@ class MainWindow(Ui_MainWindow):
 
         self.available_formats = formats
         self.video_duration = duration
-        self.live_info = live_info
         self.storyboard_format = select_storyboard_format(
             formats, ScrubPreviewPopup.PREVIEW_SIZE.width(), ScrubPreviewPopup.PREVIEW_SIZE.height()
         )
@@ -364,7 +376,11 @@ class MainWindow(Ui_MainWindow):
             if pixmap.loadFromData(thumbnail_bytes):
                 self.thumbnail_label.setPixmap(self._fit_thumbnail_pixmap(pixmap))
 
-        self.status_label.setText(f"動画{video_count}件・音声{audio_count}件を検出しました")
+        self._show_live_info(live_info)
+        if live_info is not None:
+            self.status_label.setText("配信中のライブを検出しました")
+        else:
+            self.status_label.setText(f"動画{video_count}件・音声{audio_count}件を検出しました")
         self.spinner.stop()
         self.info_ready = True
         self.download_btn.setEnabled(True)
@@ -436,6 +452,58 @@ class MainWindow(Ui_MainWindow):
         else:
             self.status_label.setText("フォーマット取得に失敗しました")
             dialogs.critical(self, "フォーマット取得エラー", message)
+
+    def _show_live_info(self, live_info: LiveInfo | None) -> None:
+        """配信中のライブかどうかに合わせて、LIVE見出し・録画開始位置の行・ボタンの文言を切り替える。
+
+        手動設定(フォーマットIDがさかのぼり用と今から用で異なる)と切り抜き範囲(長さが決まらない)は
+        ライブでは使えないため、無効表示ではなく隠す。通常の動画に戻ったら元に戻す"""
+        was_live = self.live_info is not None
+        self.live_info = live_info
+        is_live = live_info is not None
+        if is_live:
+            self.manual_toggle_btn.setChecked(False)
+            self.detail_toggle_btn.setChecked(False)
+        self.manual_toggle_btn.setVisible(not is_live)
+        self.detail_toggle_btn.setVisible(not is_live)
+        self.live_header.setVisible(is_live)
+        self.live_start_container.setVisible(is_live)
+        can_go_back = live_info is not None and live_info.can_record_from_start
+        self.live_from_start_radio.setVisible(can_go_back)
+        self.live_from_now_radio.setVisible(can_go_back)
+        self.live_unavailable_label.setVisible(is_live and not can_go_back)
+        self.live_from_start_radio.setChecked(True)
+        self.download_btn.setText(RECORD_BUTTON_TEXT if is_live else DOWNLOAD_BUTTON_TEXT)
+        # LIVE見出しの分だけタイトルを詰め、サムネイルの高さに収める
+        title_height = THUMBNAIL_SIZE.height()
+        if is_live:
+            title_height -= self.live_header.maximumHeight() + 2
+        self.title_label.setMaximumHeight(title_height)
+        if is_live:
+            self._update_live_elapsed()
+            self._live_elapsed_timer.start()
+        else:
+            self._live_elapsed_timer.stop()
+        if is_live != was_live:
+            # URLを打ち替えるたびにウィンドウの高さを合わせ直さないよう、ライブと通常の動画が切り替わる時だけにする
+            self._sync_window_height()
+
+    def _update_live_elapsed(self) -> None:
+        started_at = self.live_info.started_at if self.live_info is not None else None
+        if started_at is None:
+            self.live_elapsed_label.setText("")
+            self.live_from_start_radio.setText("配信の最初から")
+            return
+        elapsed = format_clip_time(max(0.0, time.time() - started_at))
+        self.live_elapsed_label.setText(f"配信開始から {elapsed}")
+        self.live_from_start_radio.setText(f"配信の最初から（{elapsed} さかのぼる）")
+
+    def _selected_live_mode(self) -> LiveMode | None:
+        if self.live_info is None:
+            return None
+        if self.live_info.can_record_from_start and self.live_from_start_radio.isChecked():
+            return "from_start"
+        return "from_now"
 
     def _update_clip_slider_range(self) -> None:
         """動画の長さが判明した時点で、スライダーの範囲を0〜動画の長さに合わせる。
@@ -909,6 +977,7 @@ class MainWindow(Ui_MainWindow):
             exclude_mismatched=not self.manual_toggle_btn.isChecked(),
             clip_start=clip_start,
             clip_end=clip_end,
+            live_mode=self._selected_live_mode(),
         )
 
     def _check_required_inputs(self, url: str, out_dir: str) -> bool:
