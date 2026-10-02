@@ -28,7 +28,17 @@ from formats import (
     is_codec_container_mismatch,
     protocol_rank,
 )
-from live import LiveInfo, LiveMode, strip_live_title_suffix
+from live import (
+    LIVE_ENDED_TEXT,
+    LIVE_RECORDING_PERCENT,
+    LIVE_SAVING_TEXT,
+    CatchUpTracker,
+    LiveInfo,
+    LiveMode,
+    catch_up_text,
+    recording_text,
+    strip_live_title_suffix,
+)
 from paths import get_ffmpeg_location, hide_path_quietly, log_debug, remove_file_quietly
 from yt_dlp_selection import EXCLUDE_FORMATS_PP_KEY, add_format_exclusion
 
@@ -236,6 +246,11 @@ class DownloadWorker(QThread):
     finished_error = pyqtSignal(str)
     # ユーザーによるキャンセルで止まった。失敗とは区別し、呼び出し側がエラー表示を出さずに済むようにする
     cancelled = pyqtSignal()
+    # ライブの録画中ならTrue。停止を受け付けた時・配信が終わった時にFalseを1回だけ送り、
+    # 画面はダウンロード一覧の上部への固定を外す
+    live_state_changed = pyqtSignal(bool)
+
+    LIVE_NO_DATA_ERROR = "録画できたデータがありません"
 
     def __init__(self, request: DownloadRequest):
         super().__init__()
@@ -256,6 +271,11 @@ class DownloadWorker(QThread):
         self._component_weights: list[float] = [1.0]
         self._completed_weight: float = 0.0
         self._current_component_index: int = 0
+        # ライブの録画の状態(_start_live_stateで設定する)
+        self._catch_up: CatchUpTracker | None = None
+        self._live_started_at: float | None = None
+        self._live_bytes: dict[str, int] = {}
+        self._live_ended = False
 
     # 作業フォルダ名の接頭辞。アプリが強制終了して残った場合でも、何のフォルダか見分けられるようにする
     # TODO: アプリのクラッシュ・強制終了時は_discard_work_dirが走らず、作業フォルダが保存先に残る。
@@ -273,6 +293,7 @@ class DownloadWorker(QThread):
     )
 
     def cancel(self) -> None:
+        """通常の動画では中止、ライブでは録画の停止(それまでの分を保存する)"""
         self._is_cancelled = True
 
     def _create_work_dir(self) -> None:
@@ -421,10 +442,16 @@ class DownloadWorker(QThread):
         return self._current_component_index
 
     def _progress_hook(self, hook_info: dict) -> None:
-        if self._is_cancelled:
-            raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
-
         status = hook_info.get("status")
+        if self._is_cancelled:
+            if self.request.live_mode is None:
+                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+            if status == "downloading":
+                # ライブの停止は失敗ではない。yt-dlpはKeyboardInterruptをライブの正常な終わりとして扱い、
+                # それまでの分の結合等の後処理まで行う。映像・音声の両スレッドをそれぞれ止めるため、
+                # 1回きりではなく呼ばれるたびに送出する
+                raise KeyboardInterrupt
+
         if status == "downloading":
             self._on_component_downloading(hook_info)
         elif status == "finished":
@@ -436,6 +463,10 @@ class DownloadWorker(QThread):
         if fmt_id and fmt_id not in self._logged_format_ids:
             self._logged_format_ids.add(fmt_id)
             self.log.emit(self._describe_selected_format(info))
+
+        if self.request.live_mode is not None:
+            self._on_live_downloading(fmt_id or "", hook_info)
+            return
 
         component_index = self._component_index(fmt_id)
         component_weight = (
@@ -461,6 +492,42 @@ class DownloadWorker(QThread):
         eta = self._format_eta(elapsed * (100 - percent) / percent) if percent > 0 else "--:--"
         self.progress.emit(percent, self._format_progress_text(percent, hook_info.get("_speed_str", ""), eta))
 
+    def _start_live_state(self, probe_info: Format) -> None:
+        """ライブの録画を始める前に、さかのぼりの進み具合の計算を用意し、画面へ録画中であることを知らせる"""
+        components = probe_info.get("requested_formats") or [probe_info]
+        self._catch_up = CatchUpTracker(len(components))
+        self._live_started_at = probe_info.get("release_timestamp")
+        self.live_state_changed.emit(True)
+
+    def _end_live_state(self) -> None:
+        """録画が終わった(停止・配信終了)ことを1回だけ知らせ、保存中の表示に切り替える"""
+        if self._live_ended:
+            return
+        self._live_ended = True
+        self.progress.emit(LIVE_RECORDING_PERCENT, LIVE_SAVING_TEXT if self._is_cancelled else LIVE_ENDED_TEXT)
+        self.live_state_changed.emit(False)
+
+    def _on_live_downloading(self, fmt_id: str, hook_info: dict) -> None:
+        """配信の最初からの録画の進捗。追いつくまではさかのぼりの割合、追いついた後は録画時間とサイズを出す"""
+        self._live_bytes[fmt_id] = hook_info.get("downloaded_bytes") or 0
+        if self._download_started_at is None:
+            self._download_started_at = time.monotonic()
+        assert self._catch_up is not None  # _start_live_stateで用意済み
+        percent = self._catch_up.update(fmt_id, hook_info.get("fragment_index"), hook_info.get("fragment_count"))
+        if percent is not None:
+            self.progress.emit(percent, catch_up_text(percent))
+            return
+        self.progress.emit(
+            LIVE_RECORDING_PERCENT, recording_text(self._live_recorded_seconds(), sum(self._live_bytes.values()))
+        )
+
+    def _live_recorded_seconds(self) -> float:
+        """録画できている長さ。配信の最初から録画しているため、配信開始からの経過時間と同じになる"""
+        if self._live_started_at is not None:
+            return time.time() - self._live_started_at
+        assert self._download_started_at is not None
+        return time.monotonic() - self._download_started_at
+
     @staticmethod
     def _format_progress_text(percent: float, speed: str, eta: str) -> str:
         """画面右上の狭い一覧に収まるよう短くした進捗表示(例: "42% 1.20MiB/s 残り01:00")。
@@ -473,6 +540,10 @@ class DownloadWorker(QThread):
         return " ".join(parts)
 
     def _on_component_finished(self, hook_info: dict) -> None:
+        if self.request.live_mode is not None:
+            # ライブでは停止・配信終了のどちらでも、各コンポーネントがここを通ってから結合される
+            self._end_live_state()
+            return
         filename = hook_info.get("filename")
         if filename:
             self.log.emit(f"コンポーネントのダウンロード完了: {os.path.basename(filename)}")
@@ -594,11 +665,17 @@ class DownloadWorker(QThread):
             self._create_work_dir()
 
             download_opts = self._build_download_opts(expected_ext, ffmpeg_location)
+            if self.request.live_mode is not None:
+                self._start_live_state(probe_info)
             with yt_dlp.YoutubeDL(download_opts) as ydl:
                 self._register_format_exclusion(ydl)
                 ydl.download([self.request.url])
 
-            if self._is_cancelled:
+            if self.request.live_mode is not None:
+                # 停止・配信終了のどちらでも、録画できた分を保存する(完了の経路で終わる)
+                self._end_live_state()
+                self._finish_success(ffmpeg_location)
+            elif self._is_cancelled:
                 self._finish_cancelled_after_download()
             else:
                 self._finish_success(ffmpeg_location)
@@ -606,8 +683,14 @@ class DownloadWorker(QThread):
             # 切り抜きの途中で止めた場合、残っているのは切り抜く前の動画全体で、
             # 要求された範囲のファイルではないため、完成品として保存先へ移さずに片付ける
             self._finish_with_cleanup(preserve_final=False)
+        except KeyboardInterrupt:
+            # yt-dlpがライブの停止をライブの正常な終わりとして扱わずにそのまま送出した場合。
+            # BaseExceptionのため下のexcept Exceptionでは捕まらず、放っておくとスレッドが例外で落ちて
+            # 画面に結果が届かない。結合前の断片しか残っていないため、失敗として知らせる
+            self._end_live_state()
+            self._finish_with_cleanup(preserve_final=False, error=self.LIVE_NO_DATA_ERROR)
         except Exception as e:
-            if self._is_cancelled:
+            if self._is_cancelled and self.request.live_mode is None:
                 # 後処理の途中で止まった場合も、要求どおりのファイルにはなっていないため残さない
                 self._finish_with_cleanup(preserve_final=False)
                 return
@@ -649,6 +732,9 @@ class DownloadWorker(QThread):
         同じffmpeg_locationを渡して選択結果を揃える"""
         probe_opts = _base_ydl_opts(self.request.format_sort, ffmpeg_location)
         probe_opts["format"] = self.request.format_spec
+        if self.request.live_mode == "from_start":
+            # 実ダウンロードと同じく、さかのぼり用のフォーマット(DASH)から選ぶ
+            probe_opts["live_from_start"] = True
         with yt_dlp.YoutubeDL(probe_opts) as probe_ydl:
             self._register_format_exclusion(probe_ydl)
             return probe_ydl.extract_info(self.request.url, download=False)
@@ -678,6 +764,10 @@ class DownloadWorker(QThread):
             "writethumbnail": True,
             "postprocessors": list(self.request.postprocessors),
         })
+        if self.request.live_mode == "from_start":
+            # 区切りの並列取得(concurrent_fragment_downloads)は指定しない。並列にすると
+            # 進捗フックからのKeyboardInterruptで止まらなくなり、取得も速くならなかった
+            opts["live_from_start"] = True
         if expected_ext in self.THUMBNAIL_EMBEDDABLE_EXTS:
             opts["postprocessors"].append({"key": "EmbedThumbnail"})
         else:
@@ -695,6 +785,8 @@ class DownloadWorker(QThread):
             self._trim_clip_locally(ffmpeg_location)
         delivered = self._deliver_completed_files(allow_guess=True)
         if not delivered:
+            if self.request.live_mode is not None:
+                raise RuntimeError(self.LIVE_NO_DATA_ERROR)
             raise RuntimeError("ダウンロードしたファイルが見つかりませんでした")
         self._discard_work_dir()
         assert self._started_at is not None  # run()の冒頭で設定済み

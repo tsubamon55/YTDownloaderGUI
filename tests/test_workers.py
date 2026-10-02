@@ -1142,3 +1142,130 @@ class FormatListWorkerLiveTest(unittest.TestCase):
         ydl.extract_info.side_effect = yt_dlp.utils.ExtractorError("This live event will begin in 3 hours.")
         results, errors = self._run(lambda opts: ydl)
         self.assertEqual(errors, [FormatListWorker.UPCOMING_LIVE_ERROR])
+
+
+class LiveFromStartProgressHookTest(unittest.TestCase):
+    def _worker(self, component_count=2, started_at=None):
+        worker = make_worker(live_mode="from_start")
+        worker._start_live_state({
+            "requested_formats": [{"format_id": "298"}, {"format_id": "140"}][:component_count],
+            "release_timestamp": started_at,
+        })
+        return worker
+
+    @staticmethod
+    def _hook_info(fmt_id, index, count, downloaded=1000):
+        return {
+            "status": "downloading",
+            "info_dict": {"format_id": fmt_id, "ext": "mp4", "vcodec": "avc1", "acodec": "none"},
+            "fragment_index": index,
+            "fragment_count": count,
+            "downloaded_bytes": downloaded,
+        }
+
+    def test_stop_raises_keyboard_interrupt_on_every_downloading_call(self):
+        """yt-dlpはKeyboardInterruptをライブの正常な終わりとして扱い、結合まで行う。
+        映像・音声の両スレッドを止めるため、1回きりではなく毎回送出する"""
+        worker = self._worker()
+        worker.cancel()
+        for fmt_id in ("298", "140", "298"):
+            with self.assertRaises(KeyboardInterrupt):
+                worker._progress_hook(self._hook_info(fmt_id, 10, 4000))
+
+    def test_stop_does_not_interrupt_finished_status(self):
+        """結合前の後始末(finished)の報告までは止めない"""
+        worker = self._worker()
+        worker.cancel()
+        worker._progress_hook({"status": "finished", "info_dict": {"format_id": "298"}, "filename": "x.mp4"})
+
+    def test_normal_download_cancel_still_raises_download_error(self):
+        worker = make_worker()
+        worker.cancel()
+        with self.assertRaises(yt_dlp.utils.DownloadError):
+            worker._progress_hook({"status": "downloading"})
+
+    def test_catch_up_progress_follows_slowest_component(self):
+        worker = self._worker()
+        events = []
+        worker.progress.connect(lambda pct, text: events.append((pct, text)))
+        worker._progress_hook(self._hook_info("140", 3000, 4000))
+        worker._progress_hook(self._hook_info("298", 1000, 4000))
+        self.assertEqual(events[-1], (25.0, "さかのぼり取得中 25%"))
+
+    def test_after_catching_up_shows_recording_time_and_total_size(self):
+        worker = self._worker(component_count=1, started_at=1000.0)
+        events = []
+        worker.progress.connect(lambda pct, text: events.append((pct, text)))
+        with patch("workers.time.time", return_value=1000.0 + 754):
+            worker._progress_hook(self._hook_info("298", 4000, 4000, downloaded=345 * 1024 * 1024))
+        self.assertEqual(events[-1], (-1.0, "録画中 12:34 · 345.0MB"))
+
+    def test_finished_component_ends_live_state_once_with_saving_text(self):
+        worker = self._worker()
+        states, events = [], []
+        worker.live_state_changed.connect(states.append)
+        worker.progress.connect(lambda pct, text: events.append(text))
+        worker.cancel()
+        for fmt_id in ("298", "140"):
+            worker._progress_hook({"status": "finished", "info_dict": {"format_id": fmt_id}, "filename": "x"})
+        self.assertEqual(states, [False])
+        self.assertEqual(events, ["保存しています..."])
+
+    def test_stream_end_shows_ended_text(self):
+        worker = self._worker()
+        events = []
+        worker.progress.connect(lambda pct, text: events.append(text))
+        worker._progress_hook({"status": "finished", "info_dict": {"format_id": "298"}, "filename": "x"})
+        self.assertEqual(events, ["配信終了・保存しています..."])
+
+
+class LiveFromStartRunTest(unittest.TestCase):
+    def test_download_opts_request_live_from_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            worker._file_stem = "Stream"
+            worker._create_work_dir()
+            self.addCleanup(worker._discard_work_dir)
+            opts = worker._build_download_opts("mp4", None)
+        self.assertTrue(opts["live_from_start"])
+        self.assertNotIn("concurrent_fragment_downloads", opts)
+
+    def test_stopped_recording_is_saved_as_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            oks, states = [], []
+            worker.finished_ok.connect(oks.append)
+            worker.live_state_changed.connect(states.append)
+
+            def download(urls):
+                write_final(worker)
+                worker.cancel()  # 録画中に停止ボタンが押された
+                return 0
+
+            errors, _ = run_worker(worker, download)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            self.assertEqual(states, [True, False])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+
+    def test_stop_before_any_data_is_reported_as_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.cancel()  # .partしか無いうちに停止
+                return 0
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, ["録画できたデータがありません"])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_keyboard_interrupt_escaping_yt_dlp_is_reported_as_error(self):
+        """yt-dlpがKeyboardInterruptをライブの終わりとして扱わずにそのまま送出した場合も、
+        スレッドが例外で落ちず、失敗として知らせる"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            errors, _ = run_worker(worker, KeyboardInterrupt())
+            self.assertEqual(errors, ["録画できたデータがありません"])
+            self.assertEqual(os.listdir(tmp), [])
