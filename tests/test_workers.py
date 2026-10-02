@@ -1,6 +1,7 @@
 """workers.py の DownloadWorker のうち、実ダウンロードやQtイベントループに
 依存しないロジック(進捗計算・ファイル名解決・後処理判定等)の単体テスト"""
 
+import io
 import os
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from clip_trimmer import ClipCancelledError
 from formats import is_codec_container_mismatch
 from live import LiveInfo
 from workers import (
+    DownloadCancelledByUser,
     DownloadRequest,
     DownloadWorker,
     FormatListWorker,
@@ -527,11 +529,10 @@ class ProgressTextTest(unittest.TestCase):
 
 
 class ProgressHookTest(unittest.TestCase):
-    def test_cancelled_raises_download_error(self):
-        import yt_dlp
+    def test_cancelled_raises_cancel_exception(self):
         worker = make_worker()
         worker._is_cancelled = True
-        with self.assertRaises(yt_dlp.utils.DownloadError):
+        with self.assertRaises(DownloadCancelledByUser):
             worker._progress_hook({"status": "downloading"})
 
     def test_downloading_emits_progress_and_logs_format_once(self):
@@ -1174,10 +1175,10 @@ class LiveFromStartProgressHookTest(unittest.TestCase):
         worker.cancel()
         worker._progress_hook({"status": "finished", "info_dict": {"format_id": "298"}, "filename": "x.mp4"})
 
-    def test_normal_download_cancel_still_raises_download_error(self):
+    def test_normal_download_cancel_raises_cancel_exception(self):
         worker = make_worker()
         worker.cancel()
-        with self.assertRaises(yt_dlp.utils.DownloadError):
+        with self.assertRaises(DownloadCancelledByUser):
             worker._progress_hook({"status": "downloading"})
 
     def test_catch_up_progress_follows_slowest_component(self):
@@ -1442,12 +1443,12 @@ class LiveDiscardTest(unittest.TestCase):
         FakeLiveRecorder.returncode = 0
         FakeLiveRecorder.created = []
 
-    def test_discard_raises_download_error_instead_of_keyboard_interrupt(self):
+    def test_discard_raises_cancel_exception_instead_of_keyboard_interrupt(self):
         """KeyboardInterruptだとyt-dlpは結合まで行うため、中止として止める"""
         worker = LiveFromStartProgressHookTest._worker(self)
         worker.discard()
         for fmt_id in ("298", "140"):
-            with self.assertRaises(yt_dlp.utils.DownloadError):
+            with self.assertRaises(DownloadCancelledByUser):
                 worker._progress_hook(LiveFromStartProgressHookTest._hook_info(fmt_id, 10, 4000))
 
     def test_discard_shows_discarding_text(self):
@@ -1543,6 +1544,55 @@ class LiveDiscardTest(unittest.TestCase):
             worker.discard()
             errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False)
             self.assertEqual(errors, [CANCELLED])
+
+
+
+class FragmentedDownloadCancelTest(unittest.TestCase):
+    """断片(DASHのセグメント等)に分かれた形式では、yt-dlpは2番目以降の断片のDownloadErrorを
+    「その断片だけ取れなかった」として握りつぶし、次の断片へ進む。キャンセルが残り全ての断片に
+    接続し終えるまで効かなかったため、本物の断片ダウンロード処理を通して止まることを確かめる"""
+
+    def _run_fragments(self, worker, stop, stop_at=2, fragment_count=10):
+        from yt_dlp.downloader.dash import DashSegmentsFD
+
+        ydl = yt_dlp.YoutubeDL({"quiet": True, "noprogress": True})
+        self.addCleanup(ydl.close)
+        fd = DashSegmentsFD(ydl, ydl.params)
+        # YoutubeDL.dl()と同じく、ダウンロード処理へ進捗フックを登録する
+        fd.add_progress_hook(worker._progress_hook)
+        calls = []
+
+        def download_fragment(ctx, frag_url, info_dict, headers=None, request_data=None):
+            calls.append(frag_url)
+            if len(calls) == stop_at:
+                stop()
+            fd._hook_progress({"status": "downloading", "downloaded_bytes": 1, "filename": "x"}, info_dict)
+            return True
+
+        fd._download_fragment = download_fragment
+        fd._read_fragment = lambda ctx: b"data"
+        fd._append_fragment = lambda ctx, content: None
+        fragments = [{"url": f"frag{i}", "frag_index": i + 1, "index": i} for i in range(fragment_count)]
+        ctx = {"dest_stream": io.BytesIO(), "tmpfilename": "x", "fragment_index": 0}
+        raised = None
+        try:
+            fd.download_and_append_fragments(ctx, fragments, {"http_headers": {}}, is_fatal=lambda idx: idx == 0)
+        except BaseException as e:  # noqa: BLE001 - 何が送出されたかを確かめる
+            raised = e
+        return calls, raised
+
+    def test_cancel_stops_at_the_current_fragment(self):
+        worker = make_worker()
+        calls, raised = self._run_fragments(worker, worker.cancel)
+        self.assertEqual(len(calls), 2)
+        self.assertIsInstance(raised, DownloadCancelledByUser)
+
+    def test_live_discard_stops_at_the_current_fragment(self):
+        worker = make_worker(live_mode="from_start")
+        worker._start_live_state({"requested_formats": [{"format_id": "298"}]})
+        calls, raised = self._run_fragments(worker, worker.discard)
+        self.assertEqual(len(calls), 2)
+        self.assertIsInstance(raised, DownloadCancelledByUser)
 
 
 if __name__ == "__main__":

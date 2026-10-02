@@ -84,6 +84,14 @@ def _log_traceback(context: str) -> None:
     log_debug(f"{context}\n{traceback.format_exc()}")
 
 
+class DownloadCancelledByUser(Exception):
+    """キャンセル(ライブでは破棄)のために進捗フックから送出し、yt-dlpのダウンロードを打ち切る。
+
+    yt-dlpのDownloadErrorは使わない。断片(DASHのセグメント等)に分かれた形式では、yt-dlpは
+    2番目以降の断片のDownloadErrorを「その断片だけ取れなかった」として握りつぶして次の断片へ進むため、
+    残り全ての断片に接続し終えるまでキャンセルが効かない。yt-dlpが捕まえない独自の例外にする"""
+
+
 @dataclass(frozen=True)
 class DownloadRequest:
     """DownloadWorkerに渡す、ダウンロード1件分の指定"""
@@ -454,10 +462,10 @@ class DownloadWorker(QThread):
         status = hook_info.get("status")
         if self._is_cancelled:
             if self.request.live_mode is None:
-                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+                raise DownloadCancelledByUser("ユーザーによりキャンセルされました")
             if status == "downloading" and self._is_discarded:
-                # 破棄では結合まで進ませないよう、KeyboardInterruptではなく中止として止める
-                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+                # 破棄では結合まで進ませないよう、KeyboardInterruptではなくキャンセルと同じ例外で止める
+                raise DownloadCancelledByUser("ユーザーによりキャンセルされました")
             if status == "downloading":
                 # ライブの停止は失敗ではない。yt-dlpはKeyboardInterruptをライブの正常な終わりとして扱い、
                 # それまでの分の結合等の後処理まで行う。映像・音声の両スレッドをそれぞれ止めるため、
@@ -656,7 +664,7 @@ class DownloadWorker(QThread):
 
     def _raise_if_cancelled(self) -> None:
         if self._is_cancelled:
-            raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+            raise DownloadCancelledByUser("ユーザーによりキャンセルされました")
 
     def run(self) -> None:
         try:
