@@ -1433,5 +1433,117 @@ class LiveReviewFixesTest(unittest.TestCase):
             self.assertEqual(errors, ["録画できたデータがありません"])
 
 
+
+class LiveDiscardTest(unittest.TestCase):
+    """停止時に「破棄」を選んだ場合は、録画した分を結合・変換せずに消し、キャンセルとして知らせる"""
+
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def test_discard_raises_download_error_instead_of_keyboard_interrupt(self):
+        """KeyboardInterruptだとyt-dlpは結合まで行うため、中止として止める"""
+        worker = LiveFromStartProgressHookTest._worker(self)
+        worker.discard()
+        for fmt_id in ("298", "140"):
+            with self.assertRaises(yt_dlp.utils.DownloadError):
+                worker._progress_hook(LiveFromStartProgressHookTest._hook_info(fmt_id, 10, 4000))
+
+    def test_discard_shows_discarding_text(self):
+        worker = LiveFromStartProgressHookTest._worker(self)
+        events = []
+        worker.progress.connect(lambda pct, text: events.append(text))
+        worker.discard()
+        worker._progress_hook({"status": "finished", "info_dict": {"format_id": "298"}, "filename": "x"})
+        self.assertEqual(events, ["破棄しています..."])
+
+    def test_from_start_discard_during_download_is_cancelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.discard()
+                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_start_discard_after_merge_does_not_keep_file(self):
+        """結合が済んだ後に破棄を選んだ場合も、保存先には残さない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            oks = []
+            worker.finished_ok.connect(oks.append)
+
+            def download(urls):
+                write_final(worker)
+                worker.discard()
+                return 0
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(oks, [])
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_start_discard_with_escaping_keyboard_interrupt_is_cancelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.discard()
+                raise KeyboardInterrupt
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_now_discard_skips_remux_and_removes_recording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            oks = []
+            worker.finished_ok.connect(oks.append)
+
+            class DiscardingRecorder(FakeLiveRecorder):
+                def record(self):
+                    returncode = super().record()
+                    worker.discard()
+                    return returncode
+
+            with patch("workers.LiveRecorder", DiscardingRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=fake_remux) as remux_mock:
+                errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(oks, [])
+            self.assertEqual(errors, [CANCELLED])
+            remux_mock.assert_not_called()
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_now_discard_stops_the_recorder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            captured = {}
+
+            class CapturingRecorder(FakeLiveRecorder):
+                def __init__(self, ffmpeg_location, inputs, output_path, on_progress, should_stop):
+                    super().__init__(ffmpeg_location, inputs, output_path, on_progress, should_stop)
+                    captured["should_stop"] = should_stop
+
+            with patch("workers.LiveRecorder", CapturingRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=fake_remux):
+                run_worker(worker, RuntimeError("unused"), write_part=False)
+            worker.discard()
+            self.assertTrue(captured["should_stop"]())
+
+    def test_discard_during_probe_is_cancelled_not_no_data_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            worker.discard()
+            errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(errors, [CANCELLED])
+
+
 if __name__ == "__main__":
     unittest.main()

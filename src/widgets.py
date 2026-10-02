@@ -29,7 +29,7 @@ from formats import (
     FORMAT_MISMATCH_ROLE,
     FORMAT_ROW_HEIGHT,
 )
-from live import LIVE_SAVING_TEXT
+from live import LIVE_DISCARDING_TEXT, LIVE_SAVING_TEXT
 from theme import (
     ACCENT_COLOR,
     DISABLED_CONTROL_RGB,
@@ -582,9 +582,14 @@ class DownloadTaskWidget(QFrame):
             self.progress_bar.setValue(int(percent))
         self.status_label.setText(text)
 
-    def set_cancelling(self) -> None:
+    def set_cancelling(self, discarding: bool = False) -> None:
+        """止まるまでの表示。discarding=Trueはライブの録画を保存せずに消す場合"""
         self.action_btn.setEnabled(False)
-        self.status_label.setText(LIVE_SAVING_TEXT if self._live else "キャンセル中...")
+        if discarding:
+            text = LIVE_DISCARDING_TEXT
+        else:
+            text = LIVE_SAVING_TEXT if self._live else "キャンセル中..."
+        self.status_label.setText(text)
 
     def mark_finished(self, status: str, saved_path: str | None = None) -> None:
         """終了状態の表示に切り替え、ボタンを一覧から取り除く「閉じる」に変える。

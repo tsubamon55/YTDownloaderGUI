@@ -1938,17 +1938,64 @@ class LiveTaskPinningTest(MainWindowTestCase):
         self.window._remove_task_widget(task)
         self.assertFalse(self.window.download_panel.isVisible())
 
-    def test_stop_asks_before_stopping(self):
+    def test_stop_choice_continue_keeps_recording(self):
         worker, task = self._start_live_task()
-        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No) as question_mock:
+        with patch.object(self.window, "_ask_recording_stop_action", return_value=None):
             task.stop_requested.emit()
-        self.assertIn("録画を停止して保存しますか?", question_mock.call_args.args[2])
         worker.cancel.assert_not_called()
+        worker.discard.assert_not_called()
+        self.assertTrue(task.action_btn.isEnabled())
 
-        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+    def test_stop_choice_save_stops_and_saves(self):
+        worker, task = self._start_live_task()
+        with patch.object(self.window, "_ask_recording_stop_action", return_value="save"):
             task.stop_requested.emit()
         worker.cancel.assert_called_once()
+        worker.discard.assert_not_called()
         self.assertEqual(task.status_label.text(), "保存しています...")
+
+    def test_stop_choice_discard_discards(self):
+        worker, task = self._start_live_task()
+        with patch.object(self.window, "_ask_recording_stop_action", return_value="discard"):
+            task.stop_requested.emit()
+        worker.discard.assert_called_once()
+        worker.cancel.assert_not_called()
+        self.assertEqual(task.status_label.text(), "破棄しています...")
+
+    def _ask_with_clicked_button(self, label):
+        """録画の停止ダイアログで、指定の文字のボタン(Noneなら×やEsc)が押されたことにする"""
+        captured = {}
+        original_add_button = main_window_module.QMessageBox.addButton
+
+        def capturing_add_button(box_self, *args, **kwargs):
+            btn = original_add_button(box_self, *args, **kwargs)
+            captured.setdefault("buttons", {})[btn.text()] = btn
+            captured["box"] = box_self
+            return btn
+
+        def clicked(box_self):
+            if label is None:
+                return box_self.escapeButton()
+            return captured["buttons"][label]
+
+        with patch.object(main_window_module.QMessageBox, "addButton", capturing_add_button), \
+             patch.object(main_window_module.QMessageBox, "exec", return_value=0), \
+             patch.object(main_window_module.QMessageBox, "clickedButton", clicked):
+            result = self.window._ask_recording_stop_action()
+        return result, captured
+
+    def test_stop_dialog_offers_save_discard_cancel(self):
+        _, captured = self._ask_with_clicked_button("キャンセル")
+        self.assertEqual(list(captured["buttons"]), ["保存", "破棄", "キャンセル"])
+        box = captured["box"]
+        self.assertEqual(box.text(), "録画を停止します。録画した分を保存しますか?")
+        self.assertIs(box.defaultButton(), captured["buttons"]["キャンセル"])
+
+    def test_stop_dialog_maps_buttons_to_actions(self):
+        self.assertEqual(self._ask_with_clicked_button("保存")[0], "save")
+        self.assertEqual(self._ask_with_clicked_button("破棄")[0], "discard")
+        self.assertIsNone(self._ask_with_clicked_button("キャンセル")[0])
+        self.assertIsNone(self._ask_with_clicked_button(None)[0])
 
     def test_request_carries_selected_live_mode(self):
         worker, _ = self._start_live_task(live_mode_now=True)

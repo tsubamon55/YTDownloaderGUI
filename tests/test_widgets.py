@@ -373,6 +373,12 @@ class DownloadTaskLiveTest(unittest.TestCase):
         self.assertEqual(self.task.status_label.text(), "保存しています...")
         self.assertFalse(self.task.action_btn.isEnabled())
 
+    def test_discarding_live_shows_discarding(self):
+        self.task.set_live(True)
+        self.task.set_cancelling(discarding=True)
+        self.assertEqual(self.task.status_label.text(), "破棄しています...")
+        self.assertFalse(self.task.action_btn.isEnabled())
+
     def test_finished_after_indeterminate_shows_full_bar(self):
         self.task.set_live(True)
         self.task.set_progress(-1.0, "保存しています...")

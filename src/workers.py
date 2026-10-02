@@ -29,6 +29,7 @@ from formats import (
     protocol_rank,
 )
 from live import (
+    LIVE_DISCARDING_TEXT,
     LIVE_ENDED_TEXT,
     LIVE_RECORDING_PERCENT,
     LIVE_SAVING_TEXT,
@@ -257,6 +258,8 @@ class DownloadWorker(QThread):
         super().__init__()
         self.request = request
         self._is_cancelled = False
+        # ライブの停止で、録画した分を保存せずに消す(discard)ことが選ばれた
+        self._is_discarded = False
         self._logged_format_ids: set[str] = set()
         self._final_filepath: str | None = None
         self._started_at: float | None = None
@@ -295,6 +298,11 @@ class DownloadWorker(QThread):
 
     def cancel(self) -> None:
         """通常の動画では中止、ライブでは録画の停止(それまでの分を保存する)"""
+        self._is_cancelled = True
+
+    def discard(self) -> None:
+        """ライブの録画を停止し、録画した分を結合・変換せずに消す(キャンセルとして知らせる)"""
+        self._is_discarded = True
         self._is_cancelled = True
 
     def _create_work_dir(self) -> None:
@@ -447,6 +455,9 @@ class DownloadWorker(QThread):
         if self._is_cancelled:
             if self.request.live_mode is None:
                 raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+            if status == "downloading" and self._is_discarded:
+                # 破棄では結合まで進ませないよう、KeyboardInterruptではなく中止として止める
+                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
             if status == "downloading":
                 # ライブの停止は失敗ではない。yt-dlpはKeyboardInterruptをライブの正常な終わりとして扱い、
                 # それまでの分の結合等の後処理まで行う。映像・音声の両スレッドをそれぞれ止めるため、
@@ -505,7 +516,11 @@ class DownloadWorker(QThread):
         if self._live_ended:
             return
         self._live_ended = True
-        self.progress.emit(LIVE_RECORDING_PERCENT, LIVE_SAVING_TEXT if self._is_cancelled else LIVE_ENDED_TEXT)
+        if self._is_discarded:
+            text = LIVE_DISCARDING_TEXT
+        else:
+            text = LIVE_SAVING_TEXT if self._is_cancelled else LIVE_ENDED_TEXT
+        self.progress.emit(LIVE_RECORDING_PERCENT, text)
         self.live_state_changed.emit(False)
 
     def _on_live_downloading(self, fmt_id: str, hook_info: dict) -> None:
@@ -675,7 +690,11 @@ class DownloadWorker(QThread):
                     self._register_format_exclusion(ydl)
                     ydl.download([self.request.url])
 
-            if self.request.live_mode is not None:
+            if self._is_discarded:
+                # 結合・変換まで済んだ後に破棄が選ばれた場合も、保存先には移さずに消す
+                self._end_live_state()
+                self._finish_with_cleanup(preserve_final=False)
+            elif self.request.live_mode is not None:
                 # 停止・配信終了のどちらでも、録画できた分を保存する(完了の経路で終わる)
                 self._end_live_state()
                 self._finish_success(ffmpeg_location)
@@ -692,8 +711,13 @@ class DownloadWorker(QThread):
             # BaseExceptionのため下のexcept Exceptionでは捕まらず、放っておくとスレッドが例外で落ちて
             # 画面に結果が届かない。結合前の断片しか残っていないため、失敗として知らせる
             self._end_live_state()
-            self._finish_with_cleanup(preserve_final=False, error=self.LIVE_NO_DATA_ERROR)
+            self._finish_with_cleanup(preserve_final=False, error=None if self._is_discarded else self.LIVE_NO_DATA_ERROR)
         except Exception as e:
+            if self._is_discarded:
+                # 破棄を選んだ録画は、止まった時点にかかわらずキャンセルとして片付ける
+                self._end_live_state()
+                self._finish_with_cleanup(preserve_final=False)
+                return
             if self._is_cancelled and self.request.live_mode is None:
                 # 後処理の途中で止まった場合も、要求どおりのファイルにはなっていないため残さない
                 self._finish_with_cleanup(preserve_final=False)
@@ -808,6 +832,9 @@ class DownloadWorker(QThread):
         self._start_live_state(probe_info)
         returncode = recorder.record()
         self._end_live_state()
+        if self._is_discarded:
+            # 変換せずに戻り、_runで作業フォルダごと消す
+            return
 
         if not os.path.isfile(ts_path) or os.path.getsize(ts_path) == 0:
             raise RuntimeError(self.LIVE_NO_DATA_ERROR)

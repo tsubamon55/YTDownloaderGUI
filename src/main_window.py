@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer
 from PyQt6.QtGui import QCloseEvent, QMouseEvent, QPixmap
@@ -1101,16 +1101,39 @@ class MainWindow(Ui_MainWindow):
             task.set_cancelling()
 
     def request_stop_recording(self, worker: DownloadWorker) -> None:
-        """今からの録画は止めると取り直せないため、押し間違いでないか確認してから止める"""
-        reply = dialogs.question(
-            self,
-            "録画の停止",
-            "録画を停止して保存しますか?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
+        """今からの録画は止めると取り直せないため、押し間違いでないか確かめ、録画した分を
+        保存するか破棄するかを選んでもらってから止める"""
+        action = self._ask_recording_stop_action()
+        if action == "save":
             self.cancel_download(worker)
+        elif action == "discard":
+            worker.discard()
+            task = self._download_tasks.get(worker)
+            if task is not None:
+                task.set_cancelling(discarding=True)
+
+    def _ask_recording_stop_action(self) -> Literal["save", "discard"] | None:
+        """録画の停止で、保存・破棄・キャンセル(録画を続ける)のどれかを選んでもらう。
+        押し間違いで録画が止まらないよう、Enter・Esc・×はいずれもキャンセルになる"""
+        box = QMessageBox(self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("録画の停止")
+        box.setText("録画を停止します。録画した分を保存しますか?")
+        save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton("破棄", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        box.deleteLater()
+        if clicked is save_btn:
+            return "save"
+        if clicked is discard_btn:
+            return "discard"
+        return None
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
         """終了時に、走っているワーカースレッドを止めて終了を待つ。

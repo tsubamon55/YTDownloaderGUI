@@ -34,6 +34,7 @@ def strip_live_title_suffix(title: str) -> str:
 LIVE_RECORDING_PERCENT = -1.0
 LIVE_SAVING_TEXT = "保存しています..."
 LIVE_ENDED_TEXT = "配信終了・保存しています..."
+LIVE_DISCARDING_TEXT = "破棄しています..."
 
 
 def catch_up_text(percent: float) -> str:
