@@ -23,7 +23,17 @@ from PyQt6.QtWidgets import (
 )
 
 from formats import FORMAT_COLUMN_WIDTHS, FORMAT_OPTIONS
-from theme import ACCENT_COLOR
+from theme import (
+    ACCENT_COLOR,
+    ACCENT_DISABLED_COLOR,
+    ACCENT_HOVER_COLOR,
+    ACCENT_PRESSED_COLOR,
+    MUTED_TEXT_COLOR,
+    ON_ACCENT_DISABLED_TEXT_COLOR,
+    ON_ACCENT_TEXT_COLOR,
+    PLACEHOLDER_BACKGROUND,
+    WARNING_TEXT_COLOR,
+)
 from widgets import FormatComboBox, FormatHeaderWidget, FormatItemDelegate, RangeSlider, SpinnerWidget
 
 IDLE_STATUS_TEXT = "待機中"
@@ -142,10 +152,14 @@ class Ui_MainWindow(QMainWindow):
         preview_row.setSpacing(10)
         self.thumbnail_label = QLabel(preview_container)
         self.thumbnail_label.setFixedSize(THUMBNAIL_SIZE)
-        self.thumbnail_label.setScaledContents(True)
-        self.thumbnail_label.setStyleSheet("background-color: rgba(128, 128, 128, 35); border-radius: 3px;")
+        # 表示枠ぴったりの画像をMainWindow._fit_thumbnail_pixmapが作るため、setScaledContentsで
+        # さらに引き伸ばさない(二重に拡縮すると、高DPI画面でぼやける)
+        self.thumbnail_label.setStyleSheet(f"background-color: {PLACEHOLDER_BACKGROUND}; border-radius: 3px;")
         preview_row.addWidget(self.thumbnail_label)
+        # 動画タイトルは外部由来の文字列のため、"<b>"等がHTMLとして描画されないようにする
+        # (他の内容が変わるラベルも同様。dialogs参照)
         self.title_label = QLabel("", preview_container)
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setWordWrap(True)
         self.title_label.setMaximumHeight(THUMBNAIL_SIZE.height())
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -175,7 +189,8 @@ class Ui_MainWindow(QMainWindow):
         layout.addLayout(format_row)
 
         self.auto_format_note_label = QLabel("")
-        self.auto_format_note_label.setStyleSheet("color: #b06000;")
+        self.auto_format_note_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.auto_format_note_label.setStyleSheet(f"color: {WARNING_TEXT_COLOR};")
         self.auto_format_note_label.setVisible(False)
         layout.addWidget(self.auto_format_note_label)
 
@@ -213,6 +228,7 @@ class Ui_MainWindow(QMainWindow):
         manual_layout.addLayout(audio_row)
 
         self.merge_note_label = QLabel("")
+        self.merge_note_label.setTextFormat(Qt.TextFormat.PlainText)
         manual_layout.addWidget(self.merge_note_label)
 
         mp3_checkbox_row = QHBoxLayout()
@@ -263,7 +279,8 @@ class Ui_MainWindow(QMainWindow):
         clip_heading_row.addWidget(QLabel("切り抜き範囲:"))
         clip_heading_row.addStretch(1)
         self.clip_duration_label = QLabel("")
-        self.clip_duration_label.setStyleSheet("color: #808080;")
+        self.clip_duration_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.clip_duration_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
         clip_heading_row.addWidget(self.clip_duration_label)
         detail_layout.addLayout(clip_heading_row)
 
@@ -310,15 +327,17 @@ class Ui_MainWindow(QMainWindow):
             f"""
             QPushButton {{
                 background-color: {ACCENT_COLOR};
-                color: white;
+                color: {ON_ACCENT_TEXT_COLOR};
                 font-weight: bold;
                 padding: 6px 16px;
                 border: none;
                 border-radius: 4px;
             }}
-            QPushButton:hover {{ background-color: #1765cc; }}
-            QPushButton:pressed {{ background-color: #145bb5; }}
-            QPushButton:disabled {{ background-color: #a7c6f5; color: #f0f0f0; }}
+            QPushButton:hover {{ background-color: {ACCENT_HOVER_COLOR}; }}
+            QPushButton:pressed {{ background-color: {ACCENT_PRESSED_COLOR}; }}
+            QPushButton:disabled {{
+                background-color: {ACCENT_DISABLED_COLOR}; color: {ON_ACCENT_DISABLED_TEXT_COLOR};
+            }}
             """
         )
         self.download_btn.setEnabled(False)
@@ -338,7 +357,9 @@ class Ui_MainWindow(QMainWindow):
         status_row = QHBoxLayout()
         self.spinner = SpinnerWidget()
         status_row.addWidget(self.spinner)
+        # 進捗表示にはyt-dlpが返す速度等の文字列が入る
         self.status_label = QLabel(IDLE_STATUS_TEXT)
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         status_row.addWidget(self.status_label)
         status_row.addStretch()
         self.log_toggle_btn = self._make_toggle_button(toggle_button_text("ログ", False), fixed_size=False)

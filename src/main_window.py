@@ -14,6 +14,7 @@ from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer
 from PyQt6.QtGui import QCloseEvent, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QProgressDialog
 
+import dialogs
 from clip_range import (
     auto_format_clip_input,
     format_clip_time,
@@ -70,6 +71,11 @@ class MainWindow(Ui_MainWindow):
     _WORKER_SHUTDOWN_WAIT_MS = 10000
     # ウィンドウの初回表示より前にアップデートのダイアログが割り込まないよう、表示後まで遅らせる時間
     _UPDATE_CHECK_DELAY_MS = 1000
+    # 別のダイアログを表示中にアップデートの提案が届いた場合、閉じられるまで提案を待たせる間隔
+    _UPDATE_PROMPT_RETRY_MS = 2000
+    # スライダーのドラッグ中に同時に取得するストーリーボード画像の上限。ドラッグで次々に
+    # 別の画像が必要になっても、スレッドと通信を際限なく増やさない(超えた分は次の操作で取り直す)
+    _MAX_STORYBOARD_WORKERS = 4
 
     def __init__(self) -> None:
         super().__init__()
@@ -81,8 +87,9 @@ class MainWindow(Ui_MainWindow):
         self._format_workers: set[FormatListWorker] = set()
         self.update_check_worker: UpdateCheckWorker | None = None
         self.update_download_worker: UpdateDownloadWorker | None = None
-        # ダウンロード済みで、アプリ終了時(closeEvent)に適用するアップデートのパス
+        # ダウンロード済みで、アプリ終了時(closeEvent)に適用するアップデートのパスと、その期待ハッシュ値
         self._pending_update_path: str | None = None
+        self._pending_update_sha256 = ""
         # 適用待ちの間に表示している「適用中」ダイアログ。終了が取り消された場合に閉じる
         self._update_progress_dialog: QProgressDialog | None = None
         self.last_output_dir: str | None = None
@@ -93,11 +100,22 @@ class MainWindow(Ui_MainWindow):
         self._storyboard_cache: dict[str, QPixmap] = {}
         self._storyboard_workers: set[StoryboardFragmentWorker] = set()
         self._pending_storyboard_urls: set[str] = set()
+        # 動画が切り替わるたびに増やす番号。取得中に動画が変わった古いストーリーボードの結果を
+        # 新しい動画のキャッシュに混ぜないよう、取得開始時の番号と照らし合わせる
+        self._storyboard_generation = 0
 
         self._info_fetch_timer = QTimer(self)
         self._info_fetch_timer.setSingleShot(True)
         self._info_fetch_timer.setInterval(CONFIG.info_fetch_debounce_ms)
         self._info_fetch_timer.timeout.connect(lambda: self.fetch_formats(auto=True))
+
+        # 他のダイアログの表示中に届いたアップデートの提案(version, download_url, asset_name, sha256)と、
+        # それを閉じられた後に改めて出すためのタイマー
+        self._deferred_update: tuple[str, str, str, str] | None = None
+        self._update_prompt_timer = QTimer(self)
+        self._update_prompt_timer.setSingleShot(True)
+        self._update_prompt_timer.setInterval(self._UPDATE_PROMPT_RETRY_MS)
+        self._update_prompt_timer.timeout.connect(self._offer_deferred_update)
 
         self.settings = QSettings("ytdlp-gui", "YTDownloaderGUI")
         default_out_dir = get_downloads_folder()
@@ -120,7 +138,11 @@ class MainWindow(Ui_MainWindow):
             QTimer.singleShot(self._UPDATE_CHECK_DELAY_MS, self._check_for_updates)
 
     def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:
-        if isinstance(event, QMouseEvent) and event.type() == QEvent.Type.MouseButtonPress:
+        # アプリ全体の全イベントがここを通るため、対象外のイベントは種類の比較だけで素通りさせる
+        # (子ウィジェットのどこをクリックしても拾う必要があり、フィルタ自体はアプリ全体に置く)
+        if event is None or event.type() != QEvent.Type.MouseButtonPress:
+            return super().eventFilter(obj, event)
+        if isinstance(event, QMouseEvent):
             focus_widget = QApplication.focusWidget()
             if isinstance(focus_widget, QLineEdit) and focus_widget.window() is self:
                 clicked_widget = QApplication.widgetAt(event.globalPosition().toPoint())
@@ -154,7 +176,10 @@ class MainWindow(Ui_MainWindow):
         )
 
     def _sync_window_height(self) -> None:
-        """現在表示中のウィジェットに合わせてウィンドウの高さだけを追従させる"""
+        """現在表示中のウィジェットに合わせてウィンドウの高さを追従させる。
+
+        伸縮できる中身はログ欄だけなので、ログ表示中にユーザーが広げた高さはそのまま残し
+        (ログ欄が使う)、ログを隠している間は中身にぴったり合わせる(余白しか残らないため)"""
         central = self.centralWidget()
         assert central is not None
         layout = central.layout()
@@ -165,10 +190,15 @@ class MainWindow(Ui_MainWindow):
         layout.activate()
         chrome_height = self.height() - central.height()
         target_height = layout.sizeHint().height() + chrome_height
+        if self.log_view.isVisible():
+            target_height = max(target_height, self.height())
         # QMainWindowは一度大きくなった最小サイズを記憶したままになることがあるため、
-        # 縮める前にリセットしてから目的の高さへ合わせる
+        # 縮める前にリセットしてから目的の高さへ合わせ、今の中身に応じた最小サイズを設定し直す
+        # (0のままだと、ユーザーが中身が潰れるまでウィンドウを縮められてしまう)
         self.setMinimumSize(0, 0)
         self.resize(self.width(), target_height)
+        minimum = layout.minimumSize()
+        self.setMinimumSize(minimum.width(), minimum.height() + chrome_height)
 
     def on_log_toggle(self, checked: bool) -> None:
         self.log_view.setVisible(checked)
@@ -229,6 +259,8 @@ class MainWindow(Ui_MainWindow):
         self.video_duration = None
         self.storyboard_format = None
         self._storyboard_cache = {}
+        self._storyboard_generation += 1
+        self._pending_storyboard_urls = set()
         self.detail_container.setEnabled(False)
         # 古い動画の長さに基づいた範囲(0〜635等)がハンドル位置に残ったままにならないよう、
         # スライダー自体もコンストラクタ相当の初期状態(全区間選択)に戻す
@@ -298,7 +330,7 @@ class MainWindow(Ui_MainWindow):
         worker: FormatListWorker,
         auto: bool = False,
     ) -> None:
-        self._format_workers.discard(worker)
+        self._release_format_worker(worker)
         if worker is not self.format_worker:
             return
 
@@ -325,6 +357,13 @@ class MainWindow(Ui_MainWindow):
         self.spinner.stop()
         self.info_ready = True
         self.download_btn.setEnabled(True)
+
+    def _release_format_worker(self, worker: FormatListWorker) -> None:
+        """結果を受け取った取得ワーカーを終了待ちの対象から外す。結果の通知はrun()が
+        戻る直前に届くため、参照を手放す前に終了を待つ(走行中のQThreadが破棄されると
+        プロセスごと落ちる)"""
+        worker.wait()
+        self._format_workers.discard(worker)
 
     def _populate_format_combos(self, formats: list[Format]) -> tuple[int, int]:
         """手動設定の動画/音声コンボにフォーマット一覧を流し込み、(動画件数, 音声件数)を返す"""
@@ -356,20 +395,27 @@ class MainWindow(Ui_MainWindow):
     def _fit_thumbnail_pixmap(self, pixmap: QPixmap) -> QPixmap:
         """thumbnail_labelの表示枠に合わせて、アスペクト比を保ったまま
         スムーズに縮小し、はみ出た部分を中央基準で切り出す(単純な引き伸ばし
-        によるぼやけ・歪みを避けるため)"""
-        target_size = self.thumbnail_label.size()
+        によるぼやけ・歪みを避けるため)。高DPI画面では実際の画素数で作り、
+        ぼやけないようにする"""
+        ratio = self.thumbnail_label.devicePixelRatioF()
+        logical_size = self.thumbnail_label.size()
+        target_width = round(logical_size.width() * ratio)
+        target_height = round(logical_size.height() * ratio)
         scaled = pixmap.scaled(
-            target_size,
+            target_width,
+            target_height,
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation,
         )
-        x = max(0, (scaled.width() - target_size.width()) // 2)
-        y = max(0, (scaled.height() - target_size.height()) // 2)
-        return scaled.copy(x, y, target_size.width(), target_size.height())
+        x = max(0, (scaled.width() - target_width) // 2)
+        y = max(0, (scaled.height() - target_height) // 2)
+        fitted = scaled.copy(x, y, target_width, target_height)
+        fitted.setDevicePixelRatio(ratio)
+        return fitted
 
     def on_formats_error(self, message: str, worker: FormatListWorker | None = None, auto: bool = False) -> None:
         if worker is not None:
-            self._format_workers.discard(worker)
+            self._release_format_worker(worker)
             if worker is not self.format_worker:
                 return
 
@@ -378,7 +424,7 @@ class MainWindow(Ui_MainWindow):
             self.status_label.setText("動画情報を取得できませんでした")
         else:
             self.status_label.setText("フォーマット取得に失敗しました")
-            QMessageBox.critical(self, "フォーマット取得エラー", message)
+            dialogs.critical(self, "フォーマット取得エラー", message)
 
     def _update_clip_slider_range(self) -> None:
         """動画の長さが判明した時点で、スライダーの範囲を0〜動画の長さに合わせる。
@@ -458,25 +504,39 @@ class MainWindow(Ui_MainWindow):
 
         if tile.fragment_url in self._pending_storyboard_urls:
             return
+        if len(self._storyboard_workers) >= self._MAX_STORYBOARD_WORKERS:
+            return
 
         self._pending_storyboard_urls.add(tile.fragment_url)
         worker = StoryboardFragmentWorker(tile.fragment_url)
         self._storyboard_workers.add(worker)
+        generation = self._storyboard_generation
         worker.finished_ok.connect(
-            lambda data, w=worker: self._on_storyboard_fragment_fetched(w, data, which)
+            lambda data, w=worker, g=generation: self._on_storyboard_fragment_fetched(w, data, which, g)
         )
-        worker.finished_error.connect(lambda message, w=worker: self._on_storyboard_fragment_failed(w))
+        worker.finished_error.connect(
+            lambda message, w=worker, g=generation: self._on_storyboard_fragment_failed(w, g)
+        )
         worker.start()
 
     def _apply_storyboard_tile(self, which: HandleName, sprite: QPixmap, tile: StoryboardTile) -> None:
         cropped = sprite.copy(tile.x, tile.y, tile.width, tile.height)
         self.clip_range_slider.set_preview_pixmap(which, cropped)
 
-    def _on_storyboard_fragment_fetched(
-        self, worker: StoryboardFragmentWorker, data: bytes, which: HandleName
-    ) -> None:
+    def _release_storyboard_worker(self, worker: StoryboardFragmentWorker, generation: int | None) -> bool:
+        """終わった取得ワーカーを手放し、その結果が今の動画のものか(使ってよいか)を返す"""
+        worker.wait()
         self._storyboard_workers.discard(worker)
+        if generation is not None and generation != self._storyboard_generation:
+            return False
         self._pending_storyboard_urls.discard(worker.url)
+        return True
+
+    def _on_storyboard_fragment_fetched(
+        self, worker: StoryboardFragmentWorker, data: bytes, which: HandleName, generation: int | None = None
+    ) -> None:
+        if not self._release_storyboard_worker(worker, generation):
+            return
 
         pixmap = QPixmap()
         if not pixmap.loadFromData(data):
@@ -497,9 +557,8 @@ class MainWindow(Ui_MainWindow):
             return
         self._apply_storyboard_tile(which, pixmap, tile)
 
-    def _on_storyboard_fragment_failed(self, worker: StoryboardFragmentWorker) -> None:
-        self._storyboard_workers.discard(worker)
-        self._pending_storyboard_urls.discard(worker.url)
+    def _on_storyboard_fragment_failed(self, worker: StoryboardFragmentWorker, generation: int | None = None) -> None:
+        self._release_storyboard_worker(worker, generation)
 
     def on_manual_selection_changed(self, *_: Any) -> None:
         if not self.manual_toggle_btn.isChecked():
@@ -557,6 +616,7 @@ class MainWindow(Ui_MainWindow):
         worker.start()
 
     def _on_update_check_settled(self, worker: UpdateCheckWorker) -> None:
+        worker.wait()
         if worker is self.update_check_worker:
             self.update_check_worker = None
 
@@ -566,16 +626,22 @@ class MainWindow(Ui_MainWindow):
         log_debug(f"_check_for_updates: アップデート確認に失敗しました ({message})")
         self._on_update_check_settled(worker)
 
-    def on_update_available(self, version: str, download_url: str, asset_name: str) -> None:
-        if not download_url or not asset_name:
+    def on_update_available(self, version: str, download_url: str, asset_name: str, sha256: str) -> None:
+        if not download_url or not asset_name or not sha256:
             return
         if self.download_worker is not None and self.download_worker.isRunning():
             # 更新の適用にはアプリの終了が必要なため、動画のダウンロード中には提案しない
             # (次回起動時に改めて確認される)
             log_debug(f"on_update_available: ダウンロード中のため {version} への更新提案を見送りました")
             return
+        if QApplication.activeModalWidget() is not None:
+            # 高解像度の確認などのダイアログの最中に割り込むと、承諾後にそのダイアログへ戻って
+            # 動画のダウンロードが始められてしまい、更新の適用(終了)と衝突する。閉じられるまで待つ
+            self._deferred_update = (version, download_url, asset_name, sha256)
+            self._update_prompt_timer.start()
+            return
 
-        reply = QMessageBox.question(
+        reply = dialogs.question(
             self,
             "アップデートがあります",
             f"新しいバージョン {version} が利用可能です。今すぐダウンロードしてインストールしますか?\n"
@@ -584,11 +650,17 @@ class MainWindow(Ui_MainWindow):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._start_update_download(download_url, asset_name)
+            self._start_update_download(download_url, asset_name, sha256)
 
-    def _start_update_download(self, download_url: str, asset_name: str) -> None:
+    def _offer_deferred_update(self) -> None:
+        if self._deferred_update is None:
+            return
+        deferred, self._deferred_update = self._deferred_update, None
+        self.on_update_available(*deferred)
+
+    def _start_update_download(self, download_url: str, asset_name: str, sha256: str) -> None:
         dest_path = os.path.join(download_dir(), asset_name)
-        worker = UpdateDownloadWorker(download_url, dest_path)
+        worker = UpdateDownloadWorker(download_url, dest_path, sha256)
         self.update_download_worker = worker
 
         progress = QProgressDialog("アップデートをダウンロード中...", "キャンセル", 0, 100, self)
@@ -640,6 +712,7 @@ class MainWindow(Ui_MainWindow):
         # 終了確認で「いいえ」を選ばれた場合でも実行中のアプリがインストーラーに
         # 強制終了され、進行中の動画ダウンロードが壊れてしまうため
         self._pending_update_path = local_path
+        self._pending_update_sha256 = worker.expected_sha256
         self._update_progress_dialog = progress
         self.close()
 
@@ -650,13 +723,15 @@ class MainWindow(Ui_MainWindow):
             return
         self.update_download_worker = None
         progress.close()
-        QMessageBox.critical(self, "アップデートのダウンロードに失敗しました", message)
+        progress.deleteLater()
+        dialogs.critical(self, "アップデートのダウンロードに失敗しました", message)
 
     def on_update_download_cancelled(self, worker: UpdateDownloadWorker, progress: QProgressDialog) -> None:
         if worker is not self.update_download_worker:
             return
         self.update_download_worker = None
         progress.close()
+        progress.deleteLater()
 
     def set_inputs_enabled(self, enabled: bool) -> None:
         for widget in self.input_widgets:
@@ -694,6 +769,7 @@ class MainWindow(Ui_MainWindow):
             return format_spec
 
         box = QMessageBox(self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("高解像度の動画です")
         box.setText(plan.message)
@@ -708,6 +784,8 @@ class MainWindow(Ui_MainWindow):
         box.exec()
 
         clicked = box.clickedButton()
+        # 親(このウィンドウ)が閉じるまで残り続けないよう、結果を読んだら破棄する
+        box.deleteLater()
         if clicked is best_btn:
             return format_spec
         if p1080_btn is not None and clicked is p1080_btn:
@@ -715,6 +793,11 @@ class MainWindow(Ui_MainWindow):
         return None
 
     def start_download(self) -> None:
+        if self.update_download_worker is not None:
+            # 更新の適用にはアプリの終了が必要なため、更新のダウンロード中に動画のダウンロードを
+            # 始めると、適用時に中止するかどうかを迫られることになる
+            dialogs.information(self, "アップデート中", "アップデートのダウンロード中は動画をダウンロードできません。")
+            return
         request = self._build_download_request()
         if request is None or not self._prepare_output_dir(request.out_dir):
             return
@@ -730,14 +813,18 @@ class MainWindow(Ui_MainWindow):
         self.download_worker.log.connect(self.append_log)
         self.download_worker.finished_ok.connect(self.on_finished_ok)
         self.download_worker.finished_error.connect(self.on_finished_error)
+        self.download_worker.cancelled.connect(self.on_cancelled)
         self.download_worker.start()
 
     def _build_download_request(self) -> DownloadRequest | None:
         """入力内容を検証・確認してダウンロード要求を組み立てる。入力エラーや
         ユーザーのキャンセルの場合は、ダイアログを出した上でNoneを返す"""
         url = self.url_edit.text().strip()
-        out_dir = self.out_edit.text().strip()
-        if not self._check_required_inputs(url, out_dir):
+        out_dir_text = self.out_edit.text().strip()
+        if not self._check_required_inputs(url, out_dir_text):
+            return None
+        out_dir = self._normalize_output_dir(out_dir_text)
+        if out_dir is None:
             return None
 
         try:
@@ -745,7 +832,7 @@ class MainWindow(Ui_MainWindow):
             clip_start, clip_end = resolve_clip_range(self.clip_start_edit.text(), self.clip_end_edit.text())
             self._check_clip_within_duration(clip_start, clip_end)
         except ValueError as e:
-            QMessageBox.warning(self, "入力エラー", str(e))
+            dialogs.warning(self, "入力エラー", str(e))
             return None
 
         format_spec = self._confirm_format_choice(selection)
@@ -765,13 +852,13 @@ class MainWindow(Ui_MainWindow):
 
     def _check_required_inputs(self, url: str, out_dir: str) -> bool:
         if not url:
-            QMessageBox.warning(self, "入力エラー", "URLを入力してください")
+            dialogs.warning(self, "入力エラー", "URLを入力してください")
             return False
         if not out_dir:
-            QMessageBox.warning(self, "入力エラー", "保存先フォルダを指定してください")
+            dialogs.warning(self, "入力エラー", "保存先フォルダを指定してください")
             return False
         if get_ffmpeg_location() is None:
-            QMessageBox.critical(
+            dialogs.critical(
                 self,
                 "ffmpegが見つかりません",
                 f"ffmpegが見つかりません。アプリの ffmpeg{os.sep}{FFMPEG_EXECUTABLE_NAME} を配置するか、"
@@ -779,6 +866,24 @@ class MainWindow(Ui_MainWindow):
             )
             return False
         return True
+
+    def _normalize_output_dir(self, out_dir: str) -> str | None:
+        """手入力の保存先を絶対パスに整える(入力エラーならダイアログを出してNone)。
+
+        "~"はシェルを通さないため展開されず、"~"という名前のフォルダが作られてしまう。
+        相対パスはアプリの作業フォルダ(起動方法で変わり、インストール先のこともある)基準に
+        なって保存先が分からなくなるため受け付けない"""
+        expanded = os.path.expanduser(out_dir)
+        if not os.path.isabs(expanded):
+            dialogs.warning(
+                self, "入力エラー", f"保存先フォルダはフルパスで指定してください:\n{out_dir}"
+            )
+            return None
+        normalized = os.path.normpath(expanded)
+        if normalized != out_dir:
+            # 実際に保存する場所が分かるよう、展開・整形した結果を入力欄にも反映する
+            self.out_edit.setText(normalized)
+        return normalized
 
     def _check_clip_within_duration(self, clip_start: float | None, clip_end: float | None) -> None:
         """resolve_clip_rangeは開始・終了の前後関係のみを見るため、動画の長さとの整合性は
@@ -806,7 +911,7 @@ class MainWindow(Ui_MainWindow):
         if not mismatched_fmts:
             return True
         ids = ", ".join(f"[{fmt.get('format_id')}]" for fmt in mismatched_fmts)
-        reply = QMessageBox.question(
+        reply = dialogs.question(
             self,
             "非推奨フォーマットの選択",
             f"選択中のフォーマット({ids})はコンテナとコーデックが一致しない非推奨のものです。"
@@ -823,7 +928,7 @@ class MainWindow(Ui_MainWindow):
             # 予約デバイス名(CON等)・禁止文字を含むパス・同名のファイルが既に存在する
             # パスなどを手入力した場合にここへ来る。他の入力ミスと同じ「入力エラー」で
             # 案内し、グローバルのexcepthookによる「予期しないエラー」に落とさない
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "入力エラー", f"保存先フォルダを作成できませんでした:\n{out_dir}\n\n{e}"
             )
             return False
@@ -855,7 +960,7 @@ class MainWindow(Ui_MainWindow):
         """
         assert event is not None
         if self.download_worker is not None and self.download_worker.isRunning():
-            reply = QMessageBox.question(
+            reply = dialogs.question(
                 self,
                 "ダウンロード中",
                 "ダウンロードが進行中です。中止して終了しますか?",
@@ -867,8 +972,9 @@ class MainWindow(Ui_MainWindow):
                     self._pending_update_path = None
                     if self._update_progress_dialog is not None:
                         self._update_progress_dialog.close()
+                        self._update_progress_dialog.deleteLater()
                         self._update_progress_dialog = None
-                    QMessageBox.information(
+                    dialogs.information(
                         self, "アップデート", "アップデートを中止しました。次回起動時に改めて確認します。"
                     )
                 event.ignore()
@@ -904,11 +1010,11 @@ class MainWindow(Ui_MainWindow):
             update_path = self._pending_update_path
             self._pending_update_path = None
             try:
-                apply_downloaded_update(update_path)
+                apply_downloaded_update(update_path, self._pending_update_sha256)
             except Exception as e:
                 # 元のアプリはそのまま残っているため、終了自体は続行して手動更新を案内する
                 log_debug(f"closeEvent: アップデートの適用に失敗しました ({e!r})")
-                QMessageBox.critical(
+                dialogs.critical(
                     self,
                     "アップデートの適用に失敗しました",
                     f"アップデートを適用できませんでした。手動でダウンロード・インストールしてください。\n\n{e}",
@@ -933,7 +1039,16 @@ class MainWindow(Ui_MainWindow):
         self.progress_bar.setValue(int(percent))
         self.status_label.setText(text)
 
+    def _release_download_worker(self) -> None:
+        """終わったダウンロードワーカーを手放す。完了の通知はrun()が戻る直前に届くため、
+        参照を手放す前に終了を待つ(走行中のQThreadが破棄されるとプロセスごと落ちる)"""
+        worker = self.download_worker
+        self.download_worker = None
+        if worker is not None:
+            worker.wait()
+
     def on_finished_ok(self) -> None:
+        self._release_download_worker()
         # url_edit.clear()がtextChangedを発火させ、on_url_changed内のリセット処理で
         # フォーマット選択・mp3変換・クリップ範囲・進捗バー等の入力内容が一括で初期化される
         self.url_edit.clear()
@@ -945,8 +1060,19 @@ class MainWindow(Ui_MainWindow):
         self.open_output_folder()
 
     def on_finished_error(self, message: str) -> None:
-        self.status_label.setText("エラーまたはキャンセル")
+        self._finish_without_success("失敗しました")
+        dialogs.critical(self, "ダウンロード失敗", message)
+
+    def on_cancelled(self) -> None:
+        """ユーザーが自分で止めた場合は失敗ではないため、エラーのダイアログは出さない"""
+        self._finish_without_success("キャンセルしました")
+
+    def _finish_without_success(self, status: str) -> None:
+        self._release_download_worker()
+        self.status_label.setText(status)
         self._set_busy(False)
         self.download_btn.setEnabled(self.info_ready)
+        # 失敗・キャンセルでも、後処理だけ失敗した完成品や開始前からのファイルを確かめられるよう、
+        # 保存先を開けるようにしておく
+        self.open_folder_btn.setEnabled(self.last_output_dir is not None)
         self.progress_bar.reset()
-        QMessageBox.critical(self, "ダウンロード失敗", message)

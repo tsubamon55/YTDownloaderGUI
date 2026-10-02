@@ -15,7 +15,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QKeyEvent, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 import widgets
@@ -97,6 +98,73 @@ class DragTest(unittest.TestCase):
         low, high = slider.values()
         self.assertLessEqual(low, high)
         self.assertEqual(high, 30)
+
+
+class MouseButtonTest(unittest.TestCase):
+    @staticmethod
+    def _press(slider, button, x):
+        return QMouseEvent(
+            QEvent.Type.MouseButtonPress, QPointF(x, 12), QPointF(x, 12), button, button,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+    def test_right_and_middle_click_do_not_move_handles(self):
+        slider = RangeSlider()
+        slider.resize(200, 24)
+        slider.setRange(0, 100)
+        slider.setValues(0, 100)
+        for button in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            slider.mousePressEvent(self._press(slider, button, 100))
+            self.assertEqual(slider.values(), (0, 100))
+            self.assertIsNone(slider.active_handle)
+
+    def test_left_click_moves_nearest_handle(self):
+        slider = RangeSlider()
+        slider.resize(200, 24)
+        slider.setRange(0, 100)
+        slider.setValues(0, 100)
+        slider.mousePressEvent(self._press(slider, Qt.MouseButton.LeftButton, 30))
+        self.assertGreater(slider.values()[0], 0)
+        slider._preview.hide_popup()
+
+
+class KeyboardTest(unittest.TestCase):
+    @staticmethod
+    def _key(slider, key):
+        slider.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
+
+    def _slider(self):
+        slider = RangeSlider()
+        slider.setRange(0, 100)
+        slider.setValues(20, 80)
+        events = []
+        slider.rangeChanged.connect(lambda low, high: events.append((low, high)))
+        return slider, events
+
+    def test_accepts_keyboard_focus(self):
+        self.assertEqual(RangeSlider().focusPolicy(), Qt.FocusPolicy.StrongFocus)
+
+    def test_arrow_and_page_keys_move_low_handle(self):
+        slider, events = self._slider()
+        self._key(slider, Qt.Key.Key_Right)
+        self._key(slider, Qt.Key.Key_PageUp)
+        self._key(slider, Qt.Key.Key_Left)
+        self.assertEqual(events, [(21, 80), (31, 80), (30, 80)])
+
+    def test_tab_switches_to_high_handle_then_leaves(self):
+        slider, events = self._slider()
+        self.assertTrue(slider.focusNextPrevChild(True))
+        self._key(slider, Qt.Key.Key_End)
+        self.assertEqual(events, [(20, 100)])
+        self.assertTrue(slider.focusNextPrevChild(False))
+        self._key(slider, Qt.Key.Key_Home)
+        self.assertEqual(events[-1], (0, 100))
+
+    def test_handles_do_not_cross_with_keyboard(self):
+        slider, _ = self._slider()
+        slider.setValues(50, 50)
+        self._key(slider, Qt.Key.Key_Right)
+        self.assertEqual(slider.values(), (50, 50))
 
 
 class OverlappingHandlesTest(unittest.TestCase):

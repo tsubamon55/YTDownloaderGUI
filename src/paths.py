@@ -15,16 +15,23 @@ def get_base_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _absolute_env_dir(name: str) -> str | None:
+    """環境変数nameのフォルダ。相対パスは起動したフォルダ次第で場所が変わってしまうため、
+    設定されていないものと同じく無視する(XDG Base Directory仕様も相対パスは無視するよう定めている)"""
+    value = os.getenv(name)
+    return value if value and os.path.isabs(value) else None
+
+
 def get_app_data_dir() -> str:
     """インストール先(Program Files/Applications等)は書き込み不可なことがあるため、
     OSごとの慣例に沿った、ユーザー書き込み可能なアプリデータ配置先を返す"""
     if sys.platform == "win32":
-        base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+        base = _absolute_env_dir("LOCALAPPDATA") or os.path.expanduser("~")
         return os.path.join(base, "YTDownloaderGUI")
     if sys.platform == "darwin":
         return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "YTDownloaderGUI")
     # Linux等: XDG Base Directory仕様
-    base = os.getenv("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    base = _absolute_env_dir("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
     return os.path.join(base, "YTDownloaderGUI")
 
 
@@ -87,19 +94,39 @@ def get_downloads_folder() -> str:
         return fallback
 
     try:
-        folder_id = _GUID("{374DE290-123F-4565-9164-39C4925E467B}")  # FOLDERID_Downloads
-        path_ptr = ctypes.c_wchar_p()
-        result = ctypes.windll.shell32.SHGetKnownFolderPath(
-            ctypes.byref(folder_id), 0, 0, ctypes.byref(path_ptr)
-        )
-        if result == 0 and path_ptr.value:
-            path = path_ptr.value
-            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
-            if os.path.isdir(path):
-                return path
+        path = _known_folder_path("{374DE290-123F-4565-9164-39C4925E467B}")  # FOLDERID_Downloads
+        if path and os.path.isdir(path):
+            return path
     except Exception as e:
         log_debug(f"get_downloads_folder: SHGetKnownFolderPathに失敗、~/Downloadsにフォールバック ({e!r})")
     return fallback
+
+
+def _known_folder_path(folder_guid: str) -> str | None:
+    """SHGetKnownFolderPathで既知フォルダのパスを求める(Windows専用。失敗時はNone)"""
+    if sys.platform != "win32":
+        return None
+    get_known_folder_path = ctypes.windll.shell32.SHGetKnownFolderPath
+    # 引数・戻り値の型を宣言しておかないと、64bit環境でポインタが切り詰められることがある
+    get_known_folder_path.argtypes = [
+        ctypes.POINTER(_GUID), ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_known_folder_path.restype = ctypes.c_long
+    co_task_mem_free = ctypes.windll.ole32.CoTaskMemFree
+    co_task_mem_free.argtypes = [ctypes.c_void_p]
+    co_task_mem_free.restype = None
+
+    folder_id = _GUID(folder_guid)
+    path_ptr = ctypes.c_void_p()
+    try:
+        result = get_known_folder_path(ctypes.byref(folder_id), 0, None, ctypes.byref(path_ptr))
+        if result != 0 or not path_ptr.value:
+            return None
+        return ctypes.wstring_at(path_ptr.value)
+    finally:
+        # 成功・失敗を問わず、返された領域は呼び出し側が解放する(APIの仕様)
+        if path_ptr.value:
+            co_task_mem_free(path_ptr)
 
 
 def _bundle_search_dirs() -> list[str]:

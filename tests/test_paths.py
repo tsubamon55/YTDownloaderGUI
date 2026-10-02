@@ -1,5 +1,6 @@
 """paths.py の単体テスト(OS固有APIに依存する箇所はsys.platformをパッチして各OSの挙動を検証)"""
 
+import ctypes
 import os
 import sys
 import tempfile
@@ -24,12 +25,26 @@ class GetBaseDirTest(unittest.TestCase):
         self.assertEqual(base_dir, expected)
 
 
+# 環境変数の相対パスは無視されるため、実行中のOSで絶対パスになるものを使う
+LOCAL_APP_DATA = os.path.abspath(os.path.join(os.sep, "Users", "test", "AppData", "Local"))
+XDG_DATA_HOME = os.path.abspath(os.path.join(os.sep, "home", "test", ".data"))
+
+
 class GetAppDataDirTest(unittest.TestCase):
     def test_uses_localappdata_on_windows(self):
-        with patch.object(sys, "platform", "win32"), \
-             patch.dict(os.environ, {"LOCALAPPDATA": os.path.join("C:", "Users", "test", "AppData", "Local")}):
+        with patch.object(sys, "platform", "win32"), patch.dict(os.environ, {"LOCALAPPDATA": LOCAL_APP_DATA}):
             path = paths.get_app_data_dir()
-        self.assertEqual(path, os.path.join("C:", "Users", "test", "AppData", "Local", "YTDownloaderGUI"))
+        self.assertEqual(path, os.path.join(LOCAL_APP_DATA, "YTDownloaderGUI"))
+
+    def test_relative_env_dirs_are_ignored(self):
+        """相対パスは起動したフォルダ次第で場所が変わるため、未設定と同じく既定の場所を使う"""
+        with patch.object(sys, "platform", "win32"), patch.dict(os.environ, {"LOCALAPPDATA": "relative"}):
+            self.assertEqual(paths.get_app_data_dir(), os.path.join(os.path.expanduser("~"), "YTDownloaderGUI"))
+        with patch.object(sys, "platform", "linux"), patch.dict(os.environ, {"XDG_DATA_HOME": "relative"}):
+            self.assertEqual(
+                paths.get_app_data_dir(),
+                os.path.join(os.path.expanduser("~"), ".local", "share", "YTDownloaderGUI"),
+            )
 
     def test_falls_back_to_home_when_localappdata_missing_on_windows(self):
         env = dict(os.environ)
@@ -46,10 +61,9 @@ class GetAppDataDirTest(unittest.TestCase):
         self.assertEqual(path, expected)
 
     def test_uses_xdg_data_home_on_linux(self):
-        with patch.object(sys, "platform", "linux"), \
-             patch.dict(os.environ, {"XDG_DATA_HOME": os.path.join("home", "test", ".data")}):
+        with patch.object(sys, "platform", "linux"), patch.dict(os.environ, {"XDG_DATA_HOME": XDG_DATA_HOME}):
             path = paths.get_app_data_dir()
-        self.assertEqual(path, os.path.join("home", "test", ".data", "YTDownloaderGUI"))
+        self.assertEqual(path, os.path.join(XDG_DATA_HOME, "YTDownloaderGUI"))
 
 
 class GetLogFilePathTest(unittest.TestCase):
@@ -76,6 +90,35 @@ class GetDownloadsFolderTest(unittest.TestCase):
             windll_mock.shell32.SHGetKnownFolderPath.side_effect = OSError("boom")
             result = paths.get_downloads_folder()
         self.assertEqual(result, os.path.join(os.path.expanduser("~"), "Downloads"))
+
+
+class KnownFolderPathTest(unittest.TestCase):
+    """SHGetKnownFolderPathが返した領域は、成功・失敗を問わず呼び出し側がCoTaskMemFreeで解放する"""
+
+    @staticmethod
+    def _fake_api(result, buffer=None):
+        def get_known_folder_path(folder_id, flags, token, out_ptr):
+            # byrefで渡されたポインタ変数へ、APIと同じく確保した領域のアドレスを書き込む
+            out_ptr._obj.value = ctypes.addressof(buffer) if buffer is not None else 0x1234
+            return result
+
+        return get_known_folder_path
+
+    def test_returns_path_and_frees_memory_on_success(self):
+        buffer = ctypes.create_unicode_buffer(os.path.join("C:", "Users", "test", "Downloads"))
+        with patch.object(sys, "platform", "win32"), patch("ctypes.windll", create=True) as windll_mock, \
+             patch("os.path.isdir", return_value=True):
+            windll_mock.shell32.SHGetKnownFolderPath.side_effect = self._fake_api(0, buffer)
+            result = paths.get_downloads_folder()
+        self.assertEqual(result, os.path.join("C:", "Users", "test", "Downloads"))
+        windll_mock.ole32.CoTaskMemFree.assert_called_once()
+
+    def test_frees_memory_even_when_api_fails(self):
+        with patch.object(sys, "platform", "win32"), patch("ctypes.windll", create=True) as windll_mock:
+            windll_mock.shell32.SHGetKnownFolderPath.side_effect = self._fake_api(-2147024894)
+            result = paths.get_downloads_folder()
+        self.assertEqual(result, os.path.join(os.path.expanduser("~"), "Downloads"))
+        windll_mock.ole32.CoTaskMemFree.assert_called_once()
 
 
 class GetFfmpegLocationTest(unittest.TestCase):

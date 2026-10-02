@@ -2,11 +2,20 @@ import os
 import sys
 import traceback
 
-from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication, QMessageBox
-
-from main_window import MainWindow
+# 標準ライブラリだけに依存するため、これより後の読み込みの失敗も記録できる
 from paths import append_log_entry, find_bundled_file, get_log_file_path
+
+try:
+    from PyQt6.QtCore import QThread
+    from PyQt6.QtGui import QIcon
+    from PyQt6.QtWidgets import QApplication
+
+    import dialogs
+except Exception:
+    # Qtの共有ライブラリの欠落など、例外フックを入れる前の読み込みで失敗した場合も、
+    # コンソールの無いGUIビルドでは何も表示されずに終了してしまうため、crash.logに残す
+    append_log_entry(f"起動時の読み込みに失敗\n{traceback.format_exc()}")
+    raise
 
 APP_ICON_PATH = os.path.join("downloader-icon", "app-icon-1024.png")
 
@@ -33,13 +42,16 @@ def install_exception_hook() -> None:
         # 残っていないログの場所を案内すると、調査の際に誤った手がかりを与えてしまう
         logged = append_log_entry(f"未処理の例外\n{message}", log_path)
 
-        if QApplication.instance() is not None:
+        app = QApplication.instance()
+        # QThread.run()内など、GUIスレッド以外で起きた例外もここに来る。GUIスレッド以外から
+        # ダイアログを出すとQtがクラッシュするため、その場合はログへの記録だけにする
+        if app is not None and QThread.currentThread() == app.thread():
             detail = (
                 f"詳細はログに記録しました:\n{log_path}"
                 if logged
                 else f"ログファイルへの記録には失敗しました:\n{log_path}"
             )
-            QMessageBox.critical(
+            dialogs.critical(
                 None,
                 "予期しないエラー",
                 "予期しないエラーが発生しました。動作が不安定な場合はアプリを再起動してください。\n\n"
@@ -51,6 +63,9 @@ def install_exception_hook() -> None:
 
 def main() -> None:
     install_exception_hook()
+    # 画面関連のモジュールは例外フックを入れた後に読み込み、その失敗も記録・表示されるようにする
+    from main_window import MainWindow
+
     app = QApplication(sys.argv)
 
     # QApplication側に設定しておくと、個別にsetWindowIconしていないダイアログ
@@ -68,5 +83,9 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        traceback.print_exc()
+        message = traceback.format_exc()
+        append_log_entry(f"起動に失敗\n{message}")
+        # コンソールの無いGUIビルドではsys.stderrがNoneになる
+        if sys.stderr is not None:
+            sys.stderr.write(message)
         sys.exit(1)

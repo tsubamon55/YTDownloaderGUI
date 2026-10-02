@@ -19,10 +19,15 @@ from PyQt6.QtCore import QBuffer, QEvent, QIODevice, QPointF, Qt
 from PyQt6.QtGui import QMouseEvent, QPixmap
 from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox
 
+import dialogs
 import main_window as main_window_module
 from main_window import IDLE_STATUS_TEXT, MainWindow
 
 _app = QApplication.instance() or QApplication(sys.argv)
+
+# 保存先は絶対パスでなければ入力エラーになるため、実行中のOSで絶対パスになるものを使う
+OUT_DIR = os.path.abspath(os.path.join(os.sep, "out"))
+SHA256 = "0" * 64
 
 
 def make_video(format_id="137", ext="mp4", vcodec="avc1.640028", height=1080, width=None,
@@ -382,7 +387,7 @@ class OnFormatsErrorTest(MainWindowTestCase):
         self.assertEqual(self.window.status_label.text(), "動画情報を取得できませんでした")
 
     def test_manual_fetch_error_shows_dialog(self):
-        with patch.object(QMessageBox, "critical") as critical_mock:
+        with patch.object(dialogs, "critical") as critical_mock:
             self.window.on_formats_error("network error", worker=None, auto=False)
         critical_mock.assert_called_once()
         self.assertEqual(self.window.status_label.text(), "フォーマット取得に失敗しました")
@@ -393,6 +398,30 @@ class OnFormatsErrorTest(MainWindowTestCase):
         self.window.status_label.setText("初期値")
         self.window.on_formats_error("network error", worker=MagicMock(), auto=True)
         self.assertEqual(self.window.status_label.text(), "初期値")
+
+
+class WindowHeightTest(MainWindowTestCase):
+    def test_minimum_size_is_not_zero(self):
+        """最小サイズが0だと、中身が潰れるまでウィンドウを縮められてしまう"""
+        self.window._sync_window_height()
+        self.assertGreater(self.window.minimumHeight(), 0)
+        self.assertGreater(self.window.minimumWidth(), 0)
+
+    def test_user_enlarged_height_is_kept_while_log_is_shown(self):
+        self.window.log_toggle_btn.setChecked(True)
+        enlarged = self.window.height() + 200
+        self.window.resize(self.window.width(), enlarged)
+        self.window.detail_toggle_btn.setChecked(True)
+        self.window.detail_toggle_btn.setChecked(False)
+        self.assertEqual(self.window.height(), enlarged)
+
+    def test_height_fits_content_when_log_is_hidden(self):
+        self.window.log_toggle_btn.setChecked(True)
+        self.window.resize(self.window.width(), self.window.height() + 200)
+        self.window.log_toggle_btn.setChecked(False)
+        central = self.window.centralWidget()
+        chrome = self.window.height() - central.height()
+        self.assertEqual(self.window.height(), central.layout().sizeHint().height() + chrome)
 
 
 class OnDetailToggledTest(MainWindowTestCase):
@@ -561,6 +590,36 @@ class OnClipPreviewRequestedTest(MainWindowTestCase):
         # 取得結果自体は次回以降のために引き続きキャッシュされる
         self.assertIn(url, self.window._storyboard_cache)
 
+    def test_result_for_previous_video_is_not_cached(self):
+        """取得中にURLが変わった場合、古い動画のストーリーボードを新しい動画のキャッシュに混ぜない"""
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+        url = storyboard["fragments"][0]["url"]
+        with patch.object(main_window_module, "StoryboardFragmentWorker") as worker_cls:
+            worker_cls.return_value.url = url
+            self.window.on_clip_preview_requested("low", 10)
+        worker = worker_cls.return_value
+        on_fetched = worker.finished_ok.connect.call_args.args[0]
+
+        self.window.url_edit.setText("https://example.com/watch?v=other")
+        self.window.storyboard_format = storyboard
+        sprite = QPixmap(480, 270)
+        sprite.fill()
+        on_fetched(encode_pixmap_png(sprite))
+
+        self.assertNotIn(url, self.window._storyboard_cache)
+        self.assertNotIn(worker, self.window._storyboard_workers)
+
+    def test_concurrent_fetches_are_capped(self):
+        storyboard = make_storyboard()
+        self.window.storyboard_format = storyboard
+        for i in range(MainWindow._MAX_STORYBOARD_WORKERS):
+            self.window._storyboard_workers.add(MagicMock(name=f"worker{i}"))
+        with patch.object(main_window_module, "StoryboardFragmentWorker") as worker_cls:
+            self.window.on_clip_preview_requested("low", 10)
+        worker_cls.assert_not_called()
+        self.window._storyboard_workers.clear()
+
 
 class OnManualSelectionChangedTest(MainWindowTestCase):
     def setUp(self):
@@ -625,8 +684,8 @@ class ResolveFormatSpecTest(MainWindowTestCase):
 class StartDownloadValidationTest(MainWindowTestCase):
     def test_empty_url_shows_warning_and_stops(self):
         self.window.url_edit.setText("")
-        self.window.out_edit.setText("C:/out")
-        with patch.object(QMessageBox, "warning") as warning_mock:
+        self.window.out_edit.setText(OUT_DIR)
+        with patch.object(dialogs, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
         self.assertIsNone(self.window.download_worker)
@@ -634,33 +693,33 @@ class StartDownloadValidationTest(MainWindowTestCase):
     def test_empty_out_dir_shows_warning_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
         self.window.out_edit.setText("")
-        with patch.object(QMessageBox, "warning") as warning_mock:
+        with patch.object(dialogs, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
         self.assertIsNone(self.window.download_worker)
 
     def test_missing_ffmpeg_shows_critical_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         with patch.object(main_window_module, "get_ffmpeg_location", return_value=None), \
-             patch.object(QMessageBox, "critical") as critical_mock:
+             patch.object(dialogs, "critical") as critical_mock:
             self.window.start_download()
         critical_mock.assert_called_once()
         self.assertIsNone(self.window.download_worker)
 
     def test_manual_mode_value_error_shows_warning(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.manual_toggle_btn.setChecked(True)  # 動画・音声とも未選択のためValueErrorになる
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
-             patch.object(QMessageBox, "warning") as warning_mock:
+             patch.object(dialogs, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
         self.assertIsNone(self.window.download_worker)
 
     def test_valid_input_starts_worker(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
              patch.object(main_window_module.os, "makedirs") as makedirs_mock, \
              patch.object(main_window_module, "DownloadWorker") as worker_cls:
@@ -668,22 +727,47 @@ class StartDownloadValidationTest(MainWindowTestCase):
             worker_cls.return_value = worker_instance
             self.window.start_download()
 
-        makedirs_mock.assert_called_once_with("C:/out", exist_ok=True)
+        makedirs_mock.assert_called_once_with(OUT_DIR, exist_ok=True)
         worker_cls.assert_called_once()
         worker_instance.start.assert_called_once()
         self.assertFalse(self.window.download_btn.isEnabled())
         self.assertTrue(self.window.cancel_btn.isEnabled())
+
+    def test_relative_out_dir_is_rejected(self):
+        """相対パスは起動方法で変わる作業フォルダ基準になり、保存先が分からなくなる"""
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText("videos")
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs") as makedirs_mock, \
+             patch.object(dialogs, "warning") as warning_mock:
+            self.window.start_download()
+        warning_mock.assert_called_once()
+        makedirs_mock.assert_not_called()
+        self.assertIsNone(self.window.download_worker)
+
+    def test_tilde_out_dir_is_expanded(self):
+        """"~"はシェルを通さないため、そのままだと"~"という名前のフォルダが作られる"""
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText(os.path.join("~", "Videos"))
+        expected = os.path.normpath(os.path.join(os.path.expanduser("~"), "Videos"))
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs") as makedirs_mock, \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            self.window.start_download()
+        makedirs_mock.assert_called_once_with(expected, exist_ok=True)
+        self.assertEqual(worker_cls.call_args.args[0].out_dir, expected)
+        self.assertEqual(self.window.out_edit.text(), expected)
 
     def test_makedirs_failure_shows_input_error_and_stops(self):
         """予約デバイス名(CON等)や同名ファイルが存在するパスを手入力した場合、
         他の入力ミスと同じ「入力エラー」で案内する。try/exceptがないと
         グローバルのexcepthookに捕まり「予期しないエラー」という技術的な文言になる"""
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out/CON")
+        self.window.out_edit.setText(os.path.join(OUT_DIR, "CON"))
         with (
             patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"),
             patch.object(main_window_module.os, "makedirs", side_effect=OSError("Invalid argument")),
-            patch.object(QMessageBox, "warning") as warning_mock,
+            patch.object(dialogs, "warning") as warning_mock,
             patch.object(main_window_module, "DownloadWorker") as worker_cls,
         ):
             self.window.start_download()
@@ -695,7 +779,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
 
     def test_clip_range_is_passed_to_worker(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.clip_start_edit.setText("1:00")
         self.window.clip_end_edit.setText("2:00")
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
@@ -710,11 +794,11 @@ class StartDownloadValidationTest(MainWindowTestCase):
 
     def test_invalid_clip_range_shows_warning_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.clip_start_edit.setText("2:00")
         self.window.clip_end_edit.setText("1:00")
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
-             patch.object(QMessageBox, "warning") as warning_mock, \
+             patch.object(dialogs, "warning") as warning_mock, \
              patch.object(main_window_module, "DownloadWorker") as worker_cls:
             self.window.start_download()
 
@@ -725,11 +809,11 @@ class StartDownloadValidationTest(MainWindowTestCase):
         # 前の動画(長さ不明時や別動画)の入力が残っていた等、動画より長い開始時刻を
         # 指定した場合はダウンロード開始前に弾く
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.video_duration = 90.0
         self.window.clip_start_edit.setText("2:00")  # 120秒 > 90秒
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
-             patch.object(QMessageBox, "warning") as warning_mock, \
+             patch.object(dialogs, "warning") as warning_mock, \
              patch.object(main_window_module, "DownloadWorker") as worker_cls:
             self.window.start_download()
 
@@ -738,11 +822,11 @@ class StartDownloadValidationTest(MainWindowTestCase):
 
     def test_clip_end_beyond_video_duration_shows_warning_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.video_duration = 90.0
         self.window.clip_end_edit.setText("2:00")  # 120秒 > 90秒
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
-             patch.object(QMessageBox, "warning") as warning_mock, \
+             patch.object(dialogs, "warning") as warning_mock, \
              patch.object(main_window_module, "DownloadWorker") as worker_cls:
             self.window.start_download()
 
@@ -752,7 +836,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
     def test_clip_end_equal_to_video_duration_is_allowed(self):
         # 末尾(動画の長さそのもの)までを終了時刻に指定するのは正当な範囲
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.video_duration = 90.0
         self.window.clip_end_edit.setText("1:30")  # 90秒 == 90秒
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
@@ -766,7 +850,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
     def test_clip_range_beyond_duration_skipped_when_duration_unknown(self):
         # ライブ配信等、長さが不明な場合は範囲チェックできないためスキップされる
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.video_duration = None
         self.window.clip_start_edit.setText("100:00:00")
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
@@ -779,14 +863,14 @@ class StartDownloadValidationTest(MainWindowTestCase):
 
     def test_mismatched_manual_selection_cancelled_by_user_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.manual_toggle_btn.setChecked(True)
         mismatched = make_video(format_id="399", ext="mp4", vcodec="vp9")
         self.window.video_format_combo.addItem("v", userData=mismatched)
         self.window.video_format_combo.setCurrentIndex(self.window.video_format_combo.count() - 1)
 
         with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
-             patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question_mock, \
+             patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No) as question_mock, \
              patch.object(main_window_module, "DownloadWorker") as worker_cls:
             self.window.start_download()
 
@@ -900,12 +984,46 @@ class ProgressAndFinishHandlersTest(MainWindowTestCase):
     def test_on_finished_error_shows_dialog_and_resets_state(self):
         self.window.info_ready = True
         self.window.cancel_btn.setEnabled(True)
-        with patch.object(QMessageBox, "critical") as critical_mock:
+        with patch.object(dialogs, "critical") as critical_mock:
             self.window.on_finished_error("failed")
         critical_mock.assert_called_once()
         self.assertFalse(self.window.cancel_btn.isEnabled())
         self.assertTrue(self.window.download_btn.isEnabled())
-        self.assertEqual(self.window.status_label.text(), "エラーまたはキャンセル")
+        self.assertEqual(self.window.status_label.text(), "失敗しました")
+
+    def test_on_cancelled_shows_no_error_dialog(self):
+        """ユーザーが自分で止めたキャンセルを「ダウンロード失敗」として扱わない"""
+        self.window.info_ready = True
+        self.window.cancel_btn.setEnabled(True)
+        with patch.object(dialogs, "critical") as critical_mock:
+            self.window.on_cancelled()
+        critical_mock.assert_not_called()
+        self.assertFalse(self.window.cancel_btn.isEnabled())
+        self.assertTrue(self.window.download_btn.isEnabled())
+        self.assertEqual(self.window.status_label.text(), "キャンセルしました")
+
+    def test_open_folder_is_enabled_after_failure_or_cancel(self):
+        self.window.last_output_dir = OUT_DIR
+        for finish in (lambda: self.window.on_finished_error("failed"), self.window.on_cancelled):
+            self.window.open_folder_btn.setEnabled(False)
+            with patch.object(dialogs, "critical"):
+                finish()
+            self.assertTrue(self.window.open_folder_btn.isEnabled())
+
+    def test_finished_worker_is_waited_and_released(self):
+        worker = MagicMock()
+        self.window.download_worker = worker
+        with patch.object(dialogs, "critical"):
+            self.window.on_finished_error("failed")
+        worker.wait.assert_called_once()
+        self.assertIsNone(self.window.download_worker)
+
+    def test_title_is_shown_as_plain_text(self):
+        """動画タイトルの"<b>"等をHTMLとして描画しない"""
+        self.window.format_worker = worker = MagicMock()
+        self.window.on_formats_fetched([], "<b>title</b>", b"", None, worker)
+        self.assertEqual(self.window.title_label.textFormat(), Qt.TextFormat.PlainText)
+        self.assertEqual(self.window.title_label.text(), "<b>title</b>")
 
     def test_cancel_download_calls_worker_cancel(self):
         worker = MagicMock()
@@ -953,9 +1071,9 @@ class SignalWiringTest(MainWindowTestCase):
 
     def test_download_button_click_triggers_start_download(self):
         self.window.url_edit.setText("")
-        self.window.out_edit.setText("C:/out")
+        self.window.out_edit.setText(OUT_DIR)
         self.window.download_btn.setEnabled(True)
-        with patch.object(QMessageBox, "warning") as warning_mock:
+        with patch.object(dialogs, "warning") as warning_mock:
             self.window.download_btn.click()
         warning_mock.assert_called_once()
 
@@ -968,12 +1086,12 @@ class SignalWiringTest(MainWindowTestCase):
         self.assertEqual(self.window.status_label.text(), "キャンセル中...")
 
     def test_open_folder_button_click_opens_last_output_dir(self):
-        self.window.last_output_dir = "C:/out"
+        self.window.last_output_dir = OUT_DIR
         self.window.open_folder_btn.setEnabled(True)
         with patch.object(main_window_module.os.path, "isdir", return_value=True), \
              patch.object(main_window_module, "open_folder") as open_folder_mock:
             self.window.open_folder_btn.click()
-        open_folder_mock.assert_called_once_with("C:/out")
+        open_folder_mock.assert_called_once_with(OUT_DIR)
 
     def test_log_toggle_button_shows_log_view(self):
         self.window.log_toggle_btn.setChecked(True)
@@ -1010,7 +1128,7 @@ class CloseEventTest(MainWindowTestCase):
         self.window.download_worker = worker
         event = self._event()
 
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
             self.window.closeEvent(event)
 
         worker.cancel.assert_called_once()
@@ -1023,7 +1141,7 @@ class CloseEventTest(MainWindowTestCase):
         self.window.download_worker = worker
         event = self._event()
 
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No):
             self.window.closeEvent(event)
 
         event.ignore.assert_called_once()
@@ -1040,7 +1158,7 @@ class CloseEventTest(MainWindowTestCase):
         self.window._storyboard_workers.add(storyboard_worker)
         event = self._event()
 
-        with patch.object(QMessageBox, "question") as question_mock:
+        with patch.object(dialogs, "question") as question_mock:
             self.window.closeEvent(event)
 
         question_mock.assert_not_called()
@@ -1057,7 +1175,7 @@ class CloseEventTest(MainWindowTestCase):
         event = self._event()
 
         with (
-            patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes),
             patch.object(main_window_module, "log_debug") as log_debug_mock,
         ):
             self.window.closeEvent(event)
@@ -1126,17 +1244,17 @@ class UpdateAvailablePromptTest(MainWindowTestCase):
     承諾された場合のみダウンロードを開始すること"""
 
     def test_offers_update_and_starts_download_on_yes(self):
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes) as question_mock, \
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes) as question_mock, \
              patch.object(MainWindow, "_start_update_download") as start_mock:
-            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe")
+            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe", SHA256)
 
         question_mock.assert_called_once()
-        start_mock.assert_called_once_with("https://example.com/Setup.exe", "Setup.exe")
+        start_mock.assert_called_once_with("https://example.com/Setup.exe", "Setup.exe", SHA256)
 
     def test_declining_does_not_start_download(self):
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No), \
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No), \
              patch.object(MainWindow, "_start_update_download") as start_mock:
-            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe")
+            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe", SHA256)
 
         start_mock.assert_not_called()
 
@@ -1145,16 +1263,41 @@ class UpdateAvailablePromptTest(MainWindowTestCase):
         worker.isRunning.return_value = True
         self.window.download_worker = worker
 
-        with patch.object(QMessageBox, "question") as question_mock, \
+        with patch.object(dialogs, "question") as question_mock, \
              patch.object(MainWindow, "_start_update_download") as start_mock:
-            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe")
+            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe", SHA256)
 
         question_mock.assert_not_called()
         start_mock.assert_not_called()
 
+    def test_prompt_waits_while_another_dialog_is_open(self):
+        """高解像度確認などのダイアログの最中に割り込まず、閉じられた後に改めて提案する"""
+        with patch.object(QApplication, "activeModalWidget", return_value=object()), \
+             patch.object(dialogs, "question") as question_mock:
+            self.window.on_update_available("9.9.9", "https://example.com/Setup.exe", "Setup.exe", SHA256)
+        question_mock.assert_not_called()
+        self.assertTrue(self.window._update_prompt_timer.isActive())
+        self.window._update_prompt_timer.stop()
+
+        with patch.object(QApplication, "activeModalWidget", return_value=None), \
+             patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No) as question_mock:
+            self.window._offer_deferred_update()
+        question_mock.assert_called_once()
+
+    def test_video_download_is_refused_while_update_downloads(self):
+        self.window.update_download_worker = MagicMock()
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText(OUT_DIR)
+        with patch.object(dialogs, "information") as info_mock, \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            self.window.start_download()
+        info_mock.assert_called_once()
+        worker_cls.assert_not_called()
+        self.window.update_download_worker = None
+
     def test_missing_asset_info_is_ignored(self):
-        with patch.object(QMessageBox, "question") as question_mock:
-            self.window.on_update_available("9.9.9", "", "")
+        with patch.object(dialogs, "question") as question_mock:
+            self.window.on_update_available("9.9.9", "", "", "")
 
         question_mock.assert_not_called()
 
@@ -1202,7 +1345,7 @@ class UpdateDownloadCallbackTest(MainWindowTestCase):
         progress = MagicMock()
         self.window.update_download_worker = worker
 
-        with patch.object(QMessageBox, "critical") as critical_mock:
+        with patch.object(dialogs, "critical") as critical_mock:
             self.window.on_update_download_error("network down", worker, progress)
 
         progress.close.assert_called_once()
@@ -1214,7 +1357,7 @@ class UpdateDownloadCallbackTest(MainWindowTestCase):
         progress = MagicMock()
         self.window.update_download_worker = worker
 
-        with patch.object(QMessageBox, "critical") as critical_mock:
+        with patch.object(dialogs, "critical") as critical_mock:
             self.window.on_update_download_cancelled(worker, progress)
 
         progress.close.assert_called_once()
@@ -1241,7 +1384,7 @@ class UpdateCancelWiringTest(MainWindowTestCase):
             finished_error = pyqtSignal(str)
             cancelled = pyqtSignal()
 
-            def __init__(self, url, dest_path):
+            def __init__(self, url, dest_path, expected_sha256):
                 super().__init__()
 
             def cancel(self):
@@ -1251,8 +1394,8 @@ class UpdateCancelWiringTest(MainWindowTestCase):
                 self.cancelled.emit()
 
         with patch.object(main_window_module, "UpdateDownloadWorker", FakeUpdateDownloadWorker), \
-             patch.object(QMessageBox, "critical") as critical_mock:
-            self.window._start_update_download("https://example.com/Setup.exe", "Setup.exe")
+             patch.object(dialogs, "critical") as critical_mock:
+            self.window._start_update_download("https://example.com/Setup.exe", "Setup.exe", SHA256)
 
         critical_mock.assert_not_called()
         self.assertIsNone(self.window.update_download_worker)
@@ -1264,12 +1407,14 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
 
     def test_pending_update_is_applied_before_closing(self):
         self.window._pending_update_path = "C:/tmp/Setup.exe"
+        self.window._pending_update_sha256 = SHA256
         event = CloseEventTest._event()
 
         with patch.object(main_window_module, "apply_downloaded_update") as apply_mock:
             self.window.closeEvent(event)
 
-        apply_mock.assert_called_once_with("C:/tmp/Setup.exe")
+        # 適用直前にもハッシュ値を確かめられるよう、ダウンロード時の期待値も渡す
+        apply_mock.assert_called_once_with("C:/tmp/Setup.exe", SHA256)
         self.assertIsNone(self.window._pending_update_path)
         event.accept.assert_called_once()
 
@@ -1280,7 +1425,7 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         with patch.object(
                 main_window_module, "apply_downloaded_update", side_effect=RuntimeError("boom")
              ), \
-             patch.object(QMessageBox, "critical") as critical_mock:
+             patch.object(dialogs, "critical") as critical_mock:
             self.window.closeEvent(event)
 
         critical_mock.assert_called_once()
@@ -1297,7 +1442,7 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         event = CloseEventTest._event()
 
         with (
-            patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes),
             patch.object(main_window_module, "apply_downloaded_update") as apply_mock,
             patch.object(main_window_module, "log_debug"),
         ):
@@ -1319,8 +1464,8 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         with patch.object(MainWindow, "close"):
             self.window.on_update_download_finished("C:/tmp/Setup.exe", update_worker, progress)
         with (
-            patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No),
-            patch.object(QMessageBox, "information"),
+            patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No),
+            patch.object(dialogs, "information"),
         ):
             self.window.closeEvent(CloseEventTest._event())
 
@@ -1335,8 +1480,8 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         self.window._pending_update_path = "C:/tmp/Setup.exe"
         event = CloseEventTest._event()
 
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No), \
-             patch.object(QMessageBox, "information") as information_mock, \
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No), \
+             patch.object(dialogs, "information") as information_mock, \
              patch.object(main_window_module, "apply_downloaded_update") as apply_mock:
             self.window.closeEvent(event)
 

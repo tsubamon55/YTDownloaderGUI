@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFocusEvent, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QLabel,
@@ -25,7 +25,14 @@ from formats import (
     FORMAT_MISMATCH_ROLE,
     FORMAT_ROW_HEIGHT,
 )
-from theme import ACCENT_COLOR
+from theme import (
+    ACCENT_COLOR,
+    DISABLED_CONTROL_RGB,
+    NEUTRAL_RGB,
+    POPUP_BACKGROUND_COLOR,
+    POPUP_IMAGE_BACKGROUND,
+    POPUP_TEXT_COLOR,
+)
 
 # RangeSliderの2つのハンドル(開始側/終了側)
 HandleName = Literal["low", "high"]
@@ -51,7 +58,7 @@ class FormatItemDelegate(QStyledItemDelegate):
         else:
             if index.data(FORMAT_MISMATCH_ROLE):
                 # コンテナ/コーデック不一致の非推奨フォーマットだと分かるよう背景をグレーにする
-                painter.fillRect(option.rect, QColor(128, 128, 128, 60))
+                painter.fillRect(option.rect, QColor(*NEUTRAL_RGB, 60))
             painter.setPen(option.palette.text().color())
 
         columns = index.data(FORMAT_COLUMN_ROLE)
@@ -176,7 +183,7 @@ class ScrubPreviewPopup(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setStyleSheet("background-color: #202124; border-radius: 4px;")
+        self.setStyleSheet(f"background-color: {POPUP_BACKGROUND_COLOR}; border-radius: 4px;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -185,12 +192,12 @@ class ScrubPreviewPopup(QWidget):
         self._image_label = QLabel()
         self._image_label.setFixedSize(self.PREVIEW_SIZE)
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image_label.setStyleSheet("background-color: rgba(255, 255, 255, 30); border-radius: 2px;")
+        self._image_label.setStyleSheet(f"background-color: {POPUP_IMAGE_BACKGROUND}; border-radius: 2px;")
         layout.addWidget(self._image_label)
 
         self._time_label = QLabel()
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._time_label.setStyleSheet("color: #ffffff; font-weight: bold;")
+        self._time_label.setStyleSheet(f"color: {POPUP_TEXT_COLOR}; font-weight: bold;")
         layout.addWidget(self._time_label)
 
     def set_time_text(self, text: str) -> None:
@@ -224,6 +231,9 @@ class RangeSlider(QWidget):
     双方向同期を行っても無限ループにならない。
     ドラッグ中はpreviewRequestedを発行するので、呼び出し側はそれを使って
     サムネイル等を取得し、set_preview_pixmapで返せば追従ポップアップに表示される。
+
+    キーボードでも操作できる(矢印キーで1、PageUp/PageDownで10ずつ動かし、Home/Endで端へ。
+    Tab/Shift+Tabで開始・終了のハンドルを切り替える)。
     """
 
     rangeChanged = pyqtSignal(int, int)
@@ -231,6 +241,7 @@ class RangeSlider(QWidget):
 
     _HANDLE_RADIUS = 7
     _GROOVE_HEIGHT = 4
+    _PAGE_STEP = 10
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -239,8 +250,11 @@ class RangeSlider(QWidget):
         self._low = 0
         self._high = 100
         self._active_handle: HandleName | None = None
+        # キーボード操作の対象。最後にマウスで掴んだハンドルに合わせる
+        self._keyboard_handle: HandleName = "low"
         self._preview = ScrubPreviewPopup(self)
         self.setFixedHeight(24)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     @property
     def active_handle(self) -> HandleName | None:
@@ -284,6 +298,10 @@ class RangeSlider(QWidget):
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         if not self.isEnabled() or event is None:
             return
+        # 右クリック(コンテキストメニューのつもり)や中クリックで値が動かないよう、左ボタンだけで操作する
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
         x = event.position().x()
         low_x, high_x = self._value_to_x(self._low), self._value_to_x(self._high)
         self._active_handle = "low" if abs(x - low_x) <= abs(x - high_x) else "high"
@@ -295,9 +313,68 @@ class RangeSlider(QWidget):
         self._drag_to(event.position().x())
 
     def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
+        if event is not None and event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._active_handle is not None:
+            self._keyboard_handle = self._active_handle
         self._active_handle = None
         self.update()
         self._preview.hide_popup()
+
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        if event is None or not self.isEnabled():
+            return super().keyPressEvent(event)
+        current = self._low if self._keyboard_handle == "low" else self._high
+        targets = {
+            Qt.Key.Key_Left: current - 1,
+            Qt.Key.Key_Down: current - 1,
+            Qt.Key.Key_Right: current + 1,
+            Qt.Key.Key_Up: current + 1,
+            Qt.Key.Key_PageDown: current - self._PAGE_STEP,
+            Qt.Key.Key_PageUp: current + self._PAGE_STEP,
+            Qt.Key.Key_Home: self._minimum,
+            Qt.Key.Key_End: self._maximum,
+        }
+        target = targets.get(Qt.Key(event.key()))
+        if target is None:
+            return super().keyPressEvent(event)
+        self._move_handle(self._keyboard_handle, target)
+        event.accept()
+
+    def focusNextPrevChild(self, next: bool) -> bool:
+        """Tabで開始→終了、Shift+Tabで終了→開始のハンドルへ移り、端からさらに進むと
+        通常どおり隣のウィジェットへフォーカスを移す"""
+        if next and self._keyboard_handle == "low":
+            self._keyboard_handle = "high"
+        elif not next and self._keyboard_handle == "high":
+            self._keyboard_handle = "low"
+        else:
+            return super().focusNextPrevChild(next)
+        self.update()
+        return True
+
+    def focusInEvent(self, event: QFocusEvent | None) -> None:
+        self.update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event: QFocusEvent | None) -> None:
+        self.update()
+        super().focusOutEvent(event)
+
+    def _move_handle(self, which: HandleName, value: int) -> None:
+        """whichのハンドルをvalueへ動かす(もう一方のハンドルは越えない)。変わればrangeChangedを出す"""
+        value = min(max(value, self._minimum), self._maximum)
+        if which == "low":
+            value = min(value, self._high)
+            changed = value != self._low
+            self._low = value
+        else:
+            value = max(value, self._low)
+            changed = value != self._high
+            self._high = value
+        if changed:
+            self.update()
+            self.rangeChanged.emit(self._low, self._high)
 
     def _drag_to(self, x: float) -> None:
         value = self._x_to_value(x)
@@ -312,17 +389,9 @@ class RangeSlider(QWidget):
             elif self._active_handle == "high" and value < self._high:
                 self._active_handle = "low"
 
-        if self._active_handle == "low":
-            value = min(value, self._high)
-            changed = value != self._low
-            self._low = value
-        else:
-            value = max(value, self._low)
-            changed = value != self._high
-            self._high = value
-        if changed:
-            self.update()
-            self.rangeChanged.emit(self._low, self._high)
+        handle: HandleName = "low" if self._active_handle == "low" else "high"
+        self._move_handle(handle, value)
+        value = self._low if handle == "low" else self._high
 
         # ハンドルが近接していると、どちら側を動かしているのか見た目だけでは
         # 分かりにくいため、ドラッグ中は現在値と(取得できれば)サムネイルを追従表示する
@@ -347,23 +416,25 @@ class RangeSlider(QWidget):
             max(self.width() - 2 * self._HANDLE_RADIUS, 0), self._GROOVE_HEIGHT,
         )
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(128, 128, 128, 90))
+        painter.setBrush(QColor(*NEUTRAL_RGB, 90))
         painter.drawRoundedRect(groove_rect, 2, 2)
 
         # disabled中(URL未入力等)は有効時と同じ見た目にならないよう、
         # 選択バー・ハンドルをグレーにする(Qt標準ウィジェットと違い自前描画のため
         # isEnabled()を明示的に見ないと自動でグレーアウトされない)
-        accent_color = QColor(ACCENT_COLOR) if self.isEnabled() else QColor(160, 160, 160)
+        accent_color = QColor(ACCENT_COLOR) if self.isEnabled() else QColor(*DISABLED_CONTROL_RGB)
 
         low_x, high_x = self._value_to_x(self._low), self._value_to_x(self._high)
         selected_rect = QRectF(low_x, mid_y - self._GROOVE_HEIGHT / 2, high_x - low_x, self._GROOVE_HEIGHT)
         painter.setBrush(accent_color)
         painter.drawRoundedRect(selected_rect, 2, 2)
 
-        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.setPen(QPen(QColor(POPUP_TEXT_COLOR), 1))
         for which, x in (("low", low_x), ("high", high_x)):
             # ドラッグ中のハンドルだけ一回り大きく描き、2つのハンドルが近接していても
             # どちら(開始/終了)を操作しているか見た目で分かるようにする
-            radius = self._HANDLE_RADIUS + 2 if which == self._active_handle else self._HANDLE_RADIUS
+            # キーボード操作中(フォーカスあり)は操作対象のハンドルも同様に大きく描いて示す
+            emphasized = which == self._active_handle or (self.hasFocus() and which == self._keyboard_handle)
+            radius = self._HANDLE_RADIUS + 2 if emphasized else self._HANDLE_RADIUS
             painter.drawEllipse(QPointF(x, mid_y), radius, radius)
         painter.end()

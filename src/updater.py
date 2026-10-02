@@ -1,14 +1,20 @@
 """起動時のアップデート確認・ダウンロード・適用(インストーラー実行/再起動)。
 
 GitHub Releases (tsubamon55/YTDownloaderGUI) の最新リリースをGitHub APIで問い合わせ、
-同梱のVERSIONファイルより新しいtag_nameがあれば、OSに応じたアセット(Windows: Setup*.exe,
-macOS: *.dmg)をダウンロードして適用する。リリースが1件も無い/該当アセットが無い場合は
-「アップデート無し」と同じ扱いにし、ユーザーには何も表示しない(バックグラウンドの
+同梱のVERSIONファイルより新しいtag_nameがあれば、OSに応じたアセット(Windows: *Setup*.exe,
+macOS: 実行中のCPUに合う*.dmg)をダウンロードして適用する。リリースが1件も無い/該当アセットが
+無い場合は「アップデート無し」と同じ扱いにし、ユーザーには何も表示しない(バックグラウンドの
 自動確認でエラーを見せても対処法が無く、単に不安を与えるだけのため)。
+
+ダウンロードしたファイルは、同じリリースに添付されたSHA256SUMS(release.ymlが生成)の値と
+照合してから適用する。SHA256SUMSが無い・記載が無いリリースは適用しない(アップデートは
+確認なしでサイレント実行されるため、破損・差し替えられたファイルを実行しないことを優先する)。
 """
 
+import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -24,6 +30,14 @@ GITHUB_REPO = "tsubamon55/YTDownloaderGUI"
 GITHUB_API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 VERSION_FILE_NAME = "VERSION"
 _REQUEST_HEADERS = {"User-Agent": "YTDownloaderGUI"}
+# アセットのダウンロードURLは、このリポジトリのリリース配下以外を受け付けない
+# (APIの応答が想定外の内容でも、無関係な場所からファイルを取得して実行しないため)
+_ASSET_URL_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
+# アセット名はダウンロード先のファイル名にそのまま使うため、フォルダ区切り等を含むものは拒否する
+_ASSET_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
+CHECKSUMS_ASSET_NAME = "SHA256SUMS"
+_MAX_CHECKSUMS_BYTES = 64 * 1024
+_SHA256SUMS_LINE = re.compile(r"([0-9a-fA-F]{64}) [ *](.+)")
 
 
 class UpdateCancelledError(Exception):
@@ -64,26 +78,106 @@ def is_newer_version(remote: str, local: str) -> bool:
     return remote_parts > local_parts
 
 
+def _macos_arch() -> str:
+    """実行中のプロセスのCPUアーキテクチャ("arm64"または"x86_64")"""
+    return "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x86_64"
+
+
+def _dmg_arch(name: str) -> str | None:
+    """dmgのファイル名に書かれた対応アーキテクチャ(書かれていなければNone)"""
+    lowered = name.lower()
+    if "universal" in lowered:
+        return "universal"
+    if "arm64" in lowered:
+        return "arm64"
+    if "x86_64" in lowered or "intel" in lowered:
+        return "x86_64"
+    return None
+
+
 def _select_asset(assets: list[dict]) -> dict | None:
-    """OSに応じたリリースアセットを選ぶ(Windows: Setup*.exe、macOS: *.dmg)。
-    Windows用インストーラーが複数見つかった場合はファイル名に"setup"を含むものを優先する
-    (installer.issのOutputBaseFilenameが"YTDownloaderGUI-Setup-<version>"のため)"""
+    """OSに応じたリリースアセットを選ぶ。
+
+    Windowsはファイル名に"setup"を含むexeだけを選ぶ(installer.issのOutputBaseFilenameが
+    "YTDownloaderGUI-Setup-<version>"のため)。それ以外のexeは/VERYSILENTを付けて実行して
+    よいインストーラーとは限らないため選ばない。
+    macOSは実行中のCPUに合うdmgを選ぶ。アーキテクチャの書かれていないdmgは、
+    名前に付けるようにする前のApple Silicon専用ビルドなので、Apple Siliconでのみ選ぶ
+    (Intel Macへ配ると、更新後に起動できなくなる)"""
     if sys.platform == "win32":
-        candidates = [a for a in assets if a.get("name", "").lower().endswith(".exe")]
-        candidates.sort(key=lambda a: "setup" not in a.get("name", "").lower())
+        candidates = [
+            a for a in assets
+            if a.get("name", "").lower().endswith(".exe") and "setup" in a.get("name", "").lower()
+        ]
         return candidates[0] if candidates else None
     if sys.platform == "darwin":
-        candidates = [a for a in assets if a.get("name", "").lower().endswith(".dmg")]
-        return candidates[0] if candidates else None
+        arch = _macos_arch()
+        dmgs = [a for a in assets if a.get("name", "").lower().endswith(".dmg")]
+        preferences: list[str | None] = [arch, "universal"]
+        if arch == "arm64":
+            preferences.append(None)
+        for wanted in preferences:
+            for asset in dmgs:
+                if _dmg_arch(asset.get("name", "")) == wanted:
+                    return asset
+        return None
     return None
+
+
+def _is_trusted_asset(name: str, url: str) -> bool:
+    """アセット名がファイル名として安全で、URLがこのリポジトリのリリース配下か"""
+    return bool(_ASSET_NAME_PATTERN.fullmatch(name)) and ".." not in name and url.startswith(_ASSET_URL_PREFIX)
+
+
+def parse_sha256sums(text: str, name: str) -> str | None:
+    """sha256sum形式("<64桁の16進数>  <ファイル名>")の一覧から、nameのハッシュ値(小文字)を返す"""
+    for line in text.splitlines():
+        match = _SHA256SUMS_LINE.fullmatch(line.strip())
+        if match and match.group(2) == name:
+            return match.group(1).lower()
+    return None
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_sha256(path: str, expected_sha256: str) -> None:
+    """pathの内容がexpected_sha256と一致しなければRuntimeErrorを送出する"""
+    actual = file_sha256(path)
+    if actual != expected_sha256.lower():
+        raise RuntimeError(
+            "ダウンロードしたファイルが破損しているか、配布元のものと異なるため適用できません"
+            f"(SHA-256 期待値: {expected_sha256}, 実際: {actual})"
+        )
 
 
 def download_dir() -> str:
     return os.path.join(get_app_data_dir(), "updates")
 
 
+def remove_stale_update_files() -> None:
+    """以前のアップデートでダウンロードしたインストーラー・dmg・適用用スクリプトを削除する。
+    適用後も残しておく理由は無く、放っておくと版を重ねるごとに数十MBずつ溜まっていくため。
+    (実行中で削除できないものは次回に回す)"""
+    folder = download_dir()
+    try:
+        names = os.listdir(folder)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        log_debug(f"remove_stale_update_files: {folder} の一覧取得に失敗 ({e!r})")
+        return
+    for name in names:
+        remove_file_quietly(os.path.join(folder, name), "remove_stale_update_files")
+
+
 class UpdateCheckWorker(QThread):
-    update_available = pyqtSignal(str, str, str)  # version, download_url, asset_name
+    update_available = pyqtSignal(str, str, str, str)  # version, download_url, asset_name, sha256
     up_to_date = pyqtSignal()
     check_failed = pyqtSignal(str)
 
@@ -92,6 +186,7 @@ class UpdateCheckWorker(QThread):
         if current_version is None:
             self.up_to_date.emit()
             return
+        remove_stale_update_files()
 
         try:
             request = urllib.request.Request(GITHUB_API_LATEST_RELEASE_URL, headers=_REQUEST_HEADERS)
@@ -114,13 +209,47 @@ class UpdateCheckWorker(QThread):
             self.up_to_date.emit()
             return
 
-        asset = _select_asset(data.get("assets") or [])
+        assets = data.get("assets") or []
+        asset = _select_asset(assets)
         if asset is None:
-            log_debug(f"UpdateCheckWorker: 対応するアセットが見つかりません (assets={data.get('assets')!r})")
+            log_debug(f"UpdateCheckWorker: 対応するアセットが見つかりません (assets={assets!r})")
+            self.up_to_date.emit()
+            return
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        if not _is_trusted_asset(name, url):
+            log_debug(f"UpdateCheckWorker: アセットの名前・URLが想定外のため無視します ({name!r}, {url!r})")
             self.up_to_date.emit()
             return
 
-        self.update_available.emit(remote_version, asset.get("browser_download_url", ""), asset.get("name", ""))
+        try:
+            expected_sha256 = self._fetch_expected_sha256(assets, name)
+        except Exception as e:
+            self.check_failed.emit(f"{CHECKSUMS_ASSET_NAME}の取得に失敗しました ({e})")
+            return
+        if expected_sha256 is None:
+            log_debug(f"UpdateCheckWorker: {remote_version} の{CHECKSUMS_ASSET_NAME}に {name} の記載が無いため適用しません")
+            self.up_to_date.emit()
+            return
+
+        self.update_available.emit(remote_version, url, name, expected_sha256)
+
+    @staticmethod
+    def _fetch_expected_sha256(assets: list[dict], name: str) -> str | None:
+        """リリースに添付されたSHA256SUMSから、nameの期待ハッシュ値を求める(無ければNone)"""
+        checksums = next((a for a in assets if a.get("name") == CHECKSUMS_ASSET_NAME), None)
+        if checksums is None:
+            return None
+        url = str(checksums.get("browser_download_url") or "")
+        if not _is_trusted_asset(CHECKSUMS_ASSET_NAME, url):
+            log_debug(f"UpdateCheckWorker: {CHECKSUMS_ASSET_NAME}のURLが想定外のため無視します ({url!r})")
+            return None
+        request = urllib.request.Request(url, headers=_REQUEST_HEADERS)
+        with urllib.request.urlopen(request, timeout=CONFIG.update_check_timeout_seconds) as resp:
+            data = resp.read(_MAX_CHECKSUMS_BYTES + 1)
+        if len(data) > _MAX_CHECKSUMS_BYTES:
+            raise ValueError(f"{CHECKSUMS_ASSET_NAME}が大きすぎます")
+        return parse_sha256sums(data.decode("utf-8", errors="replace"), name)
 
 
 class UpdateDownloadWorker(QThread):
@@ -133,10 +262,14 @@ class UpdateDownloadWorker(QThread):
     # サムネイル等の小さい取得と異なり数十MB単位のインストーラーを読むため、チャンクは大きめにする
     _CHUNK_SIZE = 256 * 1024
 
-    def __init__(self, url: str, dest_path: str):
+    def __init__(self, url: str, dest_path: str, expected_sha256: str):
         super().__init__()
         self.url = url
         self.dest_path = dest_path
+        self.expected_sha256 = expected_sha256
+        # 完成前のファイルは別名で書き、検証が済んでから本来の名前にする。途中で落ちても
+        # 本来の名前の(実行され得る)ファイルが中途半端な内容で残らないようにするため
+        self._part_path = f"{dest_path}.part"
         self._is_cancelled = False
 
     def cancel(self) -> None:
@@ -149,7 +282,7 @@ class UpdateDownloadWorker(QThread):
             with urllib.request.urlopen(request, timeout=CONFIG.update_check_timeout_seconds) as resp:
                 total = int(resp.headers.get("Content-Length") or 0)
                 downloaded = 0
-                with open(self.dest_path, "wb") as f:
+                with open(self._part_path, "wb") as f:
                     while True:
                         if self._is_cancelled:
                             raise UpdateCancelledError()
@@ -165,6 +298,8 @@ class UpdateDownloadWorker(QThread):
             # (そのまま適用すると、途中までのインストーラーがサイレント実行されてしまう)
             if total and downloaded != total:
                 raise OSError(f"ダウンロードが途中で切断されました ({downloaded}/{total} バイト)")
+            verify_sha256(self._part_path, self.expected_sha256)
+            os.replace(self._part_path, self.dest_path)
             self.finished_ok.emit(self.dest_path)
         except UpdateCancelledError:
             self._cleanup_partial_file()
@@ -174,6 +309,7 @@ class UpdateDownloadWorker(QThread):
             self.finished_error.emit(str(e))
 
     def _cleanup_partial_file(self) -> None:
+        remove_file_quietly(self._part_path, "UpdateDownloadWorker")
         remove_file_quietly(self.dest_path, "UpdateDownloadWorker")
 
 
@@ -223,8 +359,12 @@ if [ -n "$APP" ] && ditto "$APP" "$STAGE"; then
             rm -rf "$DEST.old"
         else
             echo "updater: 新しい.appの配置に失敗したため元に戻します"
-            mv "$DEST.old" "$DEST"
+            if ! mv "$DEST.old" "$DEST"; then
+                echo "updater: 元の.appを戻せませんでした。$DEST.old を $DEST へ手動で戻してください"
+            fi
         fi
+    else
+        echo "updater: 実行中だった.appを退避できなかったため、更新を中止しました"
     fi
 else
     echo "updater: .appのコピーに失敗しました"
@@ -270,10 +410,14 @@ def _launch_macos_updater(dmg_path: str) -> None:
         )
 
 
-def apply_downloaded_update(local_path: str) -> None:
+def apply_downloaded_update(local_path: str, expected_sha256: str) -> None:
     """ダウンロード済みのインストーラー/dmgを適用するプロセスを起動する。
     どちらのOSでもこのアプリの終了後に差し替え・再起動が行われる前提のため、
-    呼び出し元は実行中の処理を止めた上でアプリを終了させてから呼ぶこと"""
+    呼び出し元は実行中の処理を止めた上でアプリを終了させてから呼ぶこと。
+
+    ダウンロード完了から適用(アプリの終了時)までの間にファイルが差し替えられていないよう、
+    起動の直前にもう一度ハッシュ値を確かめる"""
+    verify_sha256(local_path, expected_sha256)
     if sys.platform == "win32":
         _launch_windows_installer(local_path)
     elif sys.platform == "darwin":

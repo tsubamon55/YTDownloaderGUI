@@ -3,12 +3,22 @@
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from PyQt6.QtCore import QThread
+
 import main
+
+
+def fake_app():
+    """このスレッド(テストを実行しているスレッド)をGUIスレッドとする、起動済みQApplicationの代わり"""
+    gui_thread = QThread.currentThread()
+    return SimpleNamespace(thread=lambda: gui_thread)
 
 
 class InstallExceptionHookTest(unittest.TestCase):
@@ -54,9 +64,8 @@ class InstallExceptionHookTest(unittest.TestCase):
             with patch.object(main, "get_log_file_path", return_value=log_path):
                 main.install_exception_hook()
 
-            fake_app = object()
-            with patch.object(main.QApplication, "instance", return_value=fake_app), \
-                 patch.object(main.QMessageBox, "critical") as critical_mock:
+            with patch.object(main.QApplication, "instance", return_value=fake_app()), \
+                 patch.object(main.dialogs, "critical") as critical_mock:
                 try:
                     raise RuntimeError("oops")
                 except RuntimeError:
@@ -73,8 +82,8 @@ class InstallExceptionHookTest(unittest.TestCase):
 
             with (
                 patch.object(sys, "stderr", None),
-                patch.object(main.QApplication, "instance", return_value=object()),
-                patch.object(main.QMessageBox, "critical") as critical_mock,
+                patch.object(main.QApplication, "instance", return_value=fake_app()),
+                patch.object(main.dialogs, "critical") as critical_mock,
             ):
                 try:
                     raise ValueError("boom")
@@ -110,8 +119,8 @@ class InstallExceptionHookTest(unittest.TestCase):
                 main.install_exception_hook()
 
             with (
-                patch.object(main.QApplication, "instance", return_value=object()),
-                patch.object(main.QMessageBox, "critical") as critical_mock,
+                patch.object(main.QApplication, "instance", return_value=fake_app()),
+                patch.object(main.dialogs, "critical") as critical_mock,
             ):
                 try:
                     raise ValueError("boom")
@@ -129,8 +138,8 @@ class InstallExceptionHookTest(unittest.TestCase):
                 main.install_exception_hook()
 
             with (
-                patch.object(main.QApplication, "instance", return_value=object()),
-                patch.object(main.QMessageBox, "critical") as critical_mock,
+                patch.object(main.QApplication, "instance", return_value=fake_app()),
+                patch.object(main.dialogs, "critical") as critical_mock,
             ):
                 try:
                     raise ValueError("boom")
@@ -140,6 +149,31 @@ class InstallExceptionHookTest(unittest.TestCase):
             body = critical_mock.call_args[0][2]
             self.assertIn("詳細はログに記録しました", body)
             self.assertIn(log_path, body)
+
+    def test_exception_in_worker_thread_is_logged_without_dialog(self):
+        """QThread.run()内の例外もここに来る。GUIスレッド以外からダイアログを出すとQtが落ちる"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, "crash.log")
+            with patch.object(main, "get_log_file_path", return_value=log_path):
+                main.install_exception_hook()
+
+            def raise_in_thread():
+                try:
+                    raise ValueError("from worker")
+                except ValueError:
+                    sys.excepthook(*sys.exc_info())
+
+            with (
+                patch.object(main.QApplication, "instance", return_value=fake_app()),
+                patch.object(main.dialogs, "critical") as critical_mock,
+            ):
+                thread = threading.Thread(target=raise_in_thread)
+                thread.start()
+                thread.join()
+
+            critical_mock.assert_not_called()
+            with open(log_path, encoding="utf-8") as f:
+                self.assertIn("from worker", f.read())
 
 
 if __name__ == "__main__":
