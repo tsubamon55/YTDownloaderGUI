@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from live import (
     CatchUpTracker,
     catch_up_text,
+    live_range_label,
     recording_text,
     strip_live_title_suffix,
 )
@@ -23,6 +24,32 @@ class StripLiveTitleSuffixTest(unittest.TestCase):
 
     def test_keeps_date_in_the_middle_of_title(self):
         self.assertEqual(strip_live_title_suffix("2026-10-02 19:06 振り返り"), "2026-10-02 19:06 振り返り")
+
+
+class LiveRangeLabelTest(unittest.TestCase):
+    def test_from_now_stopped(self):
+        self.assertEqual(live_range_label(1000, 1059, 14.2, reached_end=False), "0:59-1:13")
+
+    def test_from_now_until_end(self):
+        self.assertEqual(live_range_label(1000, 1059, 14.2, reached_end=True), "0:59-")
+
+    def test_from_start_stopped(self):
+        self.assertEqual(live_range_label(1000, None, 73.4, reached_end=False), "-1:13")
+
+    def test_whole_stream_has_no_label(self):
+        self.assertIsNone(live_range_label(1000, None, 73.4, reached_end=True))
+
+    def test_from_start_without_stream_start_time(self):
+        self.assertEqual(live_range_label(None, None, 73.4, reached_end=False), "-1:13")
+
+    def test_unknown_stream_start_cannot_label_from_now(self):
+        self.assertIsNone(live_range_label(None, 1059, 14.2, reached_end=False))
+
+    def test_unknown_duration_cannot_label_end(self):
+        self.assertIsNone(live_range_label(1000, 1059, None, reached_end=False))
+
+    def test_long_stream_uses_hours(self):
+        self.assertEqual(live_range_label(0, 3600, 4000, reached_end=False), "1:00:00-2:06:40")
 
 
 class ProgressTextTest(unittest.TestCase):

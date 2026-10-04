@@ -14,10 +14,10 @@ from typing import Any
 
 import yt_dlp
 from PyQt6.QtCore import QThread, pyqtSignal
-from yt_dlp.postprocessor import FFmpegPostProcessor
+from yt_dlp.postprocessor import EmbedThumbnailPP, FFmpegPostProcessor
 
 from clip_range import clip_range_label, format_clip_time
-from clip_trimmer import ClipCancelledError, trim_clip
+from clip_trimmer import ClipCancelledError, FFmpegRunner, probe_metadata, trim_clip
 from config import CONFIG
 from errors import describe_error
 from formats import (
@@ -38,6 +38,7 @@ from live import (
     LiveInfo,
     LiveMode,
     catch_up_text,
+    live_range_label,
     recording_text,
     strip_live_title_suffix,
 )
@@ -291,6 +292,10 @@ class DownloadWorker(QThread):
         self._live_started_at: float | None = None
         self._live_bytes: dict[str, int] = {}
         self._live_ended = False
+        # 今からの録画を始めた時刻(UNIX時刻)。配信の最初からの録画ではNoneのまま
+        self._live_recording_started_at: float | None = None
+        # 停止せずに配信の終わりまで録画できたか(保存するファイル名に録画した範囲を付けるかに使う)
+        self._live_reached_end = False
 
     # 作業フォルダ名の接頭辞。アプリが強制終了して残った場合でも、何のフォルダか見分けられるようにする
     # TODO: アプリのクラッシュ・強制終了時は_discard_work_dirが走らず、作業フォルダが保存先に残る。
@@ -715,6 +720,7 @@ class DownloadWorker(QThread):
                 with yt_dlp.YoutubeDL(download_opts) as ydl:
                     self._register_format_exclusion(ydl)
                     ydl.download([self.request.url])
+                self._live_reached_end = not self._is_cancelled
 
             if self._is_discarded:
                 # 結合・変換まで済んだ後に破棄が選ばれた場合も、保存先には移さずに消す
@@ -856,8 +862,11 @@ class DownloadWorker(QThread):
             should_stop=lambda: self._is_cancelled,
         )
         self._start_live_state(probe_info)
+        self._live_recording_started_at = time.time()
         returncode = recorder.record()
         self._end_live_state()
+        # 停止の"q"でもffmpegは正常に終わるため、停止していないことも確かめる
+        self._live_reached_end = returncode == 0 and not self._is_cancelled
         if self._is_discarded:
             # 変換せずに戻り、_runで作業フォルダごと消す
             return
@@ -881,6 +890,43 @@ class DownloadWorker(QThread):
         else:
             remove_file_quietly(ts_path, "_record_live_from_now")
         self._final_filepath = output_path
+        self._embed_live_thumbnail(probe_info, output_path, ffmpeg_location)
+
+    def _embed_live_thumbnail(self, probe_info: Format, output_path: str, ffmpeg_location: str | None) -> None:
+        """録画を入れ替えたファイルへ、通常のダウンロード(EmbedThumbnail)と同じくサムネイルを埋め込む。
+        録画はyt-dlpのダウンロード・後処理を通らないため、画像の取得と埋め込みをここで行う。
+        サムネイルが無くても録画の価値は変わらないため、失敗してもログに残して録画は保存する"""
+        assert self._work_dir is not None and self._file_stem is not None
+        ext = os.path.splitext(output_path)[1][1:]
+        if ext not in self.THUMBNAIL_EMBEDDABLE_EXTS:
+            # 入れ替えに失敗して.tsのまま保存する場合
+            return
+        candidates = FormatListWorker._thumbnail_url_candidates(probe_info)[: FormatListWorker.MAX_THUMBNAIL_CANDIDATES]
+        for url in candidates:
+            try:
+                data = fetch_image_bytes(url, FormatListWorker.THUMBNAIL_FETCH_TIMEOUT_SECONDS)
+            except Exception as e:
+                log_debug(f"DownloadWorker: サムネイル取得に失敗 ({url!r}: {e!r})")
+                continue
+            if data:
+                break
+        else:
+            if candidates:
+                self.log.emit("サムネイルを取得できなかったため、埋め込まずに保存します")
+            return
+        # 拡張子はEmbedThumbnailが形式の判定(webpのpngへの変換等)に使う
+        thumbnail_path = os.path.join(self._work_dir, f"{self._file_stem}.{yt_dlp.utils.determine_ext(url, 'jpg')}")
+        try:
+            with open(thumbnail_path, "wb") as f:
+                f.write(data)
+            info = {**probe_info, "ext": ext, "filepath": output_path, "thumbnails": [{"url": url, "filepath": thumbnail_path}]}
+            opts = _base_ydl_opts(ffmpeg_location=ffmpeg_location)
+            opts["postprocessor_hooks"] = [self._postprocessor_hook]
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.run_pp(EmbedThumbnailPP(ydl), info)
+        except Exception as e:
+            _log_traceback("DownloadWorker: 録画へのサムネイルの埋め込みに失敗")
+            self.log.emit(f"サムネイルを埋め込めなかったため、埋め込まずに保存します: {e}")
 
     def _on_live_recording_progress(self, progress: RecordingProgress) -> None:
         self.progress.emit(LIVE_RECORDING_PERCENT, recording_text(progress.seconds, progress.size_bytes))
@@ -898,7 +944,44 @@ class DownloadWorker(QThread):
         # 完成済みの最終ファイルは削除せずに残す(未完成の中間ファイルのみ削除)
         self._finish_with_cleanup(preserve_final=True)
 
+    def _add_live_range_to_name(self, ffmpeg_location: str | None) -> None:
+        """配信の最初から最後までを録画できなかった場合、切り抜きと同じく、保存するファイル名に
+        録画した範囲(配信開始からの時刻)を付ける(例: "Title [0_59-1_13].mp4")"""
+        assert self._file_stem is not None  # _prepare_output_nameで確定済み
+        files = self._completed_files(allow_guess=True)
+        if not files:
+            return
+        recorded_seconds = None if self._live_reached_end else self._recorded_duration(files[0], ffmpeg_location)
+        label = live_range_label(
+            self._live_started_at, self._live_recording_started_at, recorded_seconds, self._live_reached_end
+        )
+        if label is None:
+            return
+        new_stem = yt_dlp.utils.sanitize_filename(f"{self._file_stem} [{label}]", restricted=False)
+        renamed = []
+        for path in files:
+            name = os.path.basename(path)
+            if not name.startswith(self._file_stem):
+                renamed.append(path)
+                continue
+            new_path = os.path.join(os.path.dirname(path), new_stem + name[len(self._file_stem):])
+            os.replace(path, new_path)
+            renamed.append(new_path)
+        self._final_filepath = renamed[0]
+
+    @staticmethod
+    def _recorded_duration(path: str, ffmpeg_location: str | None) -> float | None:
+        """録画したファイルの長さ(秒)。さかのぼりの途中で停止した場合もあるため、経過時間ではなく
+        ファイルから調べる。分からなければNone"""
+        duration = probe_metadata(FFmpegRunner(ffmpeg_location), path).get("format", {}).get("duration")
+        try:
+            return float(duration) if duration is not None else None
+        except ValueError:
+            return None
+
     def _finish_success(self, ffmpeg_location: str | None = None) -> None:
+        if self.request.live_mode is not None:
+            self._add_live_range_to_name(ffmpeg_location)
         if self.request.has_clip:
             self._trim_clip_locally(ffmpeg_location)
         delivered = self._deliver_completed_files(allow_guess=True)

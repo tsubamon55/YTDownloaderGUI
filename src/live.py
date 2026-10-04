@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from clip_range import format_clip_time
+from clip_range import clip_range_label, format_clip_time
 from formats import format_size
 
 # 録画の開始位置。"from_start"は配信の最初からさかのぼって、"from_now"は今から録画する
@@ -28,6 +28,30 @@ _LIVE_TITLE_SUFFIX = re.compile(r" \d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
 
 def strip_live_title_suffix(title: str) -> str:
     return _LIVE_TITLE_SUFFIX.sub("", title)
+
+
+def live_range_label(
+    stream_started_at: float | None,
+    recording_started_at: float | None,
+    recorded_seconds: float | None,
+    reached_end: bool,
+) -> str | None:
+    """録画した範囲を、配信開始からの時刻でファイル名に添えるラベルにする(例: "0:59-1:13")。
+    クリップ範囲のラベル(clip_range_label)と同じく、配信の最初からの側・最後までの側は空にし、
+    最初から最後まで録画できた場合はNoneを返す。recording_started_atがNoneなら配信の最初から
+    録画したとみなす。配信開始時刻・録画した長さが分からず範囲を表せない場合もNone"""
+    if recording_started_at is None:
+        start = None
+    elif stream_started_at is None:
+        return None
+    else:
+        start = max(round(recording_started_at - stream_started_at), 0)
+    end = None
+    if not reached_end:
+        if recorded_seconds is None:
+            return None
+        end = (start or 0) + round(recorded_seconds)
+    return clip_range_label(start, end)
 
 
 # progressシグナルで「割合がない(録画中)」ことを表す値。DownloadTaskWidgetは進捗バーを不定表示にする

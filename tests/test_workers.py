@@ -715,10 +715,10 @@ def _make_ydl_factory(probe_info, download_side_effect):
     return factory
 
 
-def run_worker(worker, download_side_effect, write_part=True):
+def run_worker(worker, download_side_effect, write_part=True, probe_info=None):
     """yt-dlpをモックしてworker.run()を同期実行し、(失敗/キャンセルの通知, ログ)を返す。
     write_part=Trueなら、ダウンロード開始時に作業フォルダへ未完成の.partを書き出す"""
-    probe_info = {"title": "My Video", "ext": "mp4"}
+    probe_info = {"title": "My Video", "ext": "mp4", **(probe_info or {})}
 
     def download(urls):
         if write_part:
@@ -1349,6 +1349,15 @@ class LiveFromNowRunTest(unittest.TestCase):
             self.assertEqual(errors, ["録画できたデータがありません"])
             self.assertEqual(os.listdir(tmp), [])
 
+    def test_thumbnail_is_embedded_into_remuxed_file(self):
+        """今からの録画はyt-dlpの後処理を通らないため、サムネイルの埋め込みを別に行う"""
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(DownloadWorker, "_embed_live_thumbnail") as embed_mock:
+            oks, *_ = self._run(tmp)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            embed_mock.assert_called_once()
+            self.assertEqual(os.path.basename(embed_mock.call_args.args[1]), "My Video.mp4")
+
     def test_stop_request_is_passed_to_recorder(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker = make_worker(out_dir=tmp, live_mode="from_now")
@@ -1366,6 +1375,153 @@ class LiveFromNowRunTest(unittest.TestCase):
             self.assertFalse(captured["should_stop"]())
             worker.cancel()
             self.assertTrue(captured["should_stop"]())
+
+
+class EmbedLiveThumbnailTest(unittest.TestCase):
+    PROBE_INFO = {
+        "title": "My Video",
+        "vcodec": "avc1.4d401f",
+        "acodec": "mp4a.40.2",
+        "thumbnail": "https://example.com/maxresdefault_live.webp",
+        "thumbnails": [{"url": "https://example.com/hqdefault_live.jpg", "width": 480, "height": 360}],
+    }
+
+    def _embed(self, tmp, name="My Video.mp4", fetch=None, pp_run=None):
+        worker = make_worker(out_dir=tmp, live_mode="from_now")
+        worker._work_dir = tmp
+        worker._file_stem = "My Video"
+        output_path = os.path.join(tmp, name)
+        open(output_path, "wb").close()
+        logs = []
+        worker.log.connect(logs.append)
+        pp = MagicMock()
+        pp.run.side_effect = pp_run or (lambda info: ([], info))
+        with patch("workers.fetch_image_bytes", side_effect=fetch or (lambda url, timeout: b"image")) as fetch_mock, \
+             patch("workers.EmbedThumbnailPP", return_value=pp):
+            worker._embed_live_thumbnail(self.PROBE_INFO, output_path, None)
+        return pp, fetch_mock, logs
+
+    def test_embeds_downloaded_thumbnail_into_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, _, logs = self._embed(tmp)
+            info = pp.run.call_args.args[0]
+            self.assertEqual(info["filepath"], os.path.join(tmp, "My Video.mp4"))
+            self.assertEqual(info["ext"], "mp4")
+            thumbnail_path = info["thumbnails"][-1]["filepath"]
+            self.assertEqual(thumbnail_path, os.path.join(tmp, "My Video.webp"))
+            with open(thumbnail_path, "rb") as f:
+                self.assertEqual(f.read(), b"image")
+            self.assertEqual(logs, [])
+
+    def test_falls_back_to_next_candidate(self):
+        def fetch(url, timeout):
+            if url.endswith(".webp"):
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            return b"jpg"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, _, _ = self._embed(tmp, fetch=fetch)
+            info = pp.run.call_args.args[0]
+            self.assertEqual(info["thumbnails"][-1]["filepath"], os.path.join(tmp, "My Video.jpg"))
+
+    def test_fetch_failure_keeps_recording_without_thumbnail(self):
+        def fetch(url, timeout):
+            raise urllib.error.URLError("offline")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, _, logs = self._embed(tmp, fetch=fetch)
+            pp.run.assert_not_called()
+            self.assertTrue(any("サムネイルを取得できなかった" in msg for msg in logs))
+
+    def test_embed_failure_is_logged_not_raised(self):
+        def pp_run(info):
+            raise yt_dlp.utils.PostProcessingError("embed failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, logs = self._embed(tmp, pp_run=pp_run)
+            self.assertTrue(any("embed failed" in msg for msg in logs))
+
+    def test_ts_fallback_is_not_embedded(self):
+        """入れ替えに失敗して.tsのまま保存する場合、.tsには埋め込めないため取得もしない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, fetch_mock, _ = self._embed(tmp, name="My Video.ts")
+            fetch_mock.assert_not_called()
+            pp.run.assert_not_called()
+
+
+class LiveRangeInFileNameTest(unittest.TestCase):
+    """配信の最初から最後までを録画できなかった場合、ファイル名に録画した範囲(配信開始からの時刻)を付ける"""
+
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def _run_from_now(self, tmp, cancel=False):
+        worker = make_worker(out_dir=tmp, live_mode="from_now")
+        oks = []
+        worker.finished_ok.connect(oks.append)
+
+        class StoppableRecorder(FakeLiveRecorder):
+            def record(self):
+                if cancel:
+                    worker.cancel()
+                return super().record()
+
+        # 配信開始(941)の59秒後(1000)に録画を始め、14秒録画した
+        with patch("workers.LiveRecorder", StoppableRecorder), \
+             patch("workers.live_inputs", return_value=[]), \
+             patch("workers.remux_recording", side_effect=fake_remux), \
+             patch("workers.time.time", return_value=1000.0), \
+             patch.object(DownloadWorker, "_recorded_duration", return_value=14.2):
+            errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False,
+                                   probe_info={"release_timestamp": 941})
+        self.assertEqual(errors, [])
+        return oks
+
+    def test_from_now_stopped_has_start_and_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks = self._run_from_now(tmp, cancel=True)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [0_59-1_13].mp4")])
+            self.assertEqual(os.listdir(tmp), ["My Video [0_59-1_13].mp4"])
+
+    def test_from_now_interrupted_by_ffmpeg_failure_has_end(self):
+        FakeLiveRecorder.returncode = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            oks = self._run_from_now(tmp)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [0_59-1_13].mp4")])
+
+    def test_from_now_until_stream_end_has_start_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks = self._run_from_now(tmp)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [0_59-].mp4")])
+
+    def _run_from_start(self, tmp, cancel):
+        worker = make_worker(out_dir=tmp, live_mode="from_start")
+        oks = []
+        worker.finished_ok.connect(oks.append)
+
+        def download(urls):
+            write_final(worker)
+            if cancel:
+                worker.cancel()
+            return 0
+
+        with patch.object(DownloadWorker, "_recorded_duration", return_value=73.0) as duration_mock:
+            errors, _ = run_worker(worker, download, probe_info={"release_timestamp": 941})
+        self.assertEqual(errors, [])
+        return oks, duration_mock
+
+    def test_from_start_stopped_has_end_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, _ = self._run_from_start(tmp, cancel=True)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [-1_13].mp4")])
+
+    def test_from_start_until_stream_end_keeps_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, duration_mock = self._run_from_start(tmp, cancel=False)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            duration_mock.assert_not_called()
 
 
 class LiveFromNowFormatFallbackTest(unittest.TestCase):
