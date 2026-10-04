@@ -393,5 +393,48 @@ class DownloadTaskLiveTest(unittest.TestCase):
         self.assertEqual(self.task.progress_bar.maximum(), 100)
 
 
+class MarqueeProgressBarTest(unittest.TestCase):
+    """割合が無い間の流れる線。スタイルシートの既定ではバーの半分の長さで回り込むため、自前で描く"""
+
+    def _bar(self, width):
+        bar = widgets.MarqueeProgressBar("#d93025")
+        self.addCleanup(bar.deleteLater)
+        bar.setFixedSize(width, 6)
+        return bar
+
+    def test_segment_is_quarter_of_width(self):
+        self.assertEqual(self._bar(300).segment_rect(0).width(), 75)
+
+    def test_narrow_bar_keeps_minimum_segment(self):
+        self.assertEqual(self._bar(60).segment_rect(0).width(), widgets.MarqueeProgressBar.MIN_SEGMENT_WIDTH)
+
+    def test_segment_enters_from_left_and_leaves_to_right_without_wrapping(self):
+        bar = self._bar(300)
+        self.assertEqual(bar.segment_rect(0).right(), 0)
+        self.assertAlmostEqual(bar.segment_rect(bar.CYCLE_MS // 2).center().x(), 150)
+        self.assertAlmostEqual(bar.segment_rect(bar.CYCLE_MS - 1).left(), 300, delta=1)
+
+    def test_animates_only_while_visible_and_busy(self):
+        bar = self._bar(300)
+        bar.setRange(0, 0)
+        self.assertFalse(bar._timer.isActive())
+        bar.show()
+        self.assertTrue(bar._timer.isActive())
+        bar.setRange(0, 100)
+        self.assertFalse(bar._timer.isActive())
+        bar.setRange(0, 0)
+        bar.hide()
+        self.assertFalse(bar._timer.isActive())
+
+    def test_task_finished_stops_animation(self):
+        task = widgets.DownloadTaskWidget("title")
+        self.addCleanup(task.deleteLater)
+        task.show()
+        task.set_progress(-1.0, "録画中 0:05")
+        self.assertTrue(task.progress_bar._timer.isActive())
+        task.mark_finished("完了", saved_path="/out/x.mp4")
+        self.assertFalse(task.progress_bar._timer.isActive())
+
+
 if __name__ == "__main__":
     unittest.main()

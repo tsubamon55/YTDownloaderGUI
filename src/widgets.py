@@ -3,8 +3,32 @@
 from collections.abc import Iterable
 from typing import Literal
 
-from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFocusEvent, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QElapsedTimer,
+    QModelIndex,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QFocusEvent,
+    QHideEvent,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPaintEvent,
+    QPen,
+    QPixmap,
+    QShowEvent,
+)
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -15,6 +39,7 @@ from PyQt6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionComboBox,
+    QStyleOptionProgressBar,
     QStyleOptionViewItem,
     QStylePainter,
     QVBoxLayout,
@@ -161,6 +186,85 @@ class SpinnerWidget(QWidget):
         radius = self._diameter / 2 - 2
         rect = QRect(int(-radius), int(-radius), int(radius * 2), int(radius * 2))
         painter.drawArc(rect, 0, 270 * 16)
+        painter.end()
+
+
+class MarqueeProgressBar(QProgressBar):
+    """割合が無い間(setRange(0, 0))、短い線が左から右へ流れ続ける進捗バー。
+
+    スタイルシートで色を付けたQProgressBarは、割合が無い間の線をバーの幅の半分の長さで描き、
+    右端からはみ出した分を左端に回り込ませるため、ほとんどバー全体が埋まって見える。
+    そこで溝はスタイルシートのまま描かせ、線だけをOSの一般的な表示(幅の1/4程度の線が、
+    左端から入り右端へ抜けていく)に倣って自前で描く"""
+
+    SEGMENT_RATIO = 0.25
+    # 狭い一覧でも動いていることが分かる最短の長さ
+    MIN_SEGMENT_WIDTH = 24
+    # 線が左端から右端を抜けるまでの時間
+    CYCLE_MS = 1600
+    _FRAME_MS = 16
+
+    def __init__(self, color: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._easing = QEasingCurve(QEasingCurve.Type.InOutSine)
+        # 描画の遅れで速さが変わらないよう、位置はコマ数ではなく経過時間から求める
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._FRAME_MS)
+        self._timer.timeout.connect(self.update)
+
+    def is_busy(self) -> bool:
+        return self.minimum() == 0 and self.maximum() == 0
+
+    def setRange(self, minimum: int, maximum: int) -> None:
+        super().setRange(minimum, maximum)
+        self._update_timer()
+
+    def showEvent(self, event: QShowEvent | None) -> None:
+        super().showEvent(event)
+        self._update_timer()
+
+    def hideEvent(self, event: QHideEvent | None) -> None:
+        super().hideEvent(event)
+        self._update_timer()
+
+    def _update_timer(self) -> None:
+        """見えていて割合が無い間だけ動かす(終わった項目・隠れた項目で描き続けない)"""
+        if self.is_busy() and self.isVisible():
+            if not self._timer.isActive():
+                self._clock.start()
+                self._timer.start()
+        else:
+            self._timer.stop()
+
+    def segment_rect(self, elapsed_ms: int) -> QRectF:
+        """経過時間での線の位置。左端の外から入り、右端の外へ抜ける"""
+        width = self.width()
+        segment = max(width * self.SEGMENT_RATIO, min(self.MIN_SEGMENT_WIDTH, width))
+        progress = self._easing.valueForProgress((elapsed_ms % self.CYCLE_MS) / self.CYCLE_MS)
+        x = -segment + (width + segment) * progress
+        return QRectF(x, 0, segment, self.height())
+
+    def paintEvent(self, event: QPaintEvent | None) -> None:
+        if not self.is_busy():
+            super().paintEvent(event)
+            return
+        painter = QStylePainter(self)
+        # 溝だけをスタイル(スタイルシート)に描かせるため、割合0のバーとして描く
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+        option.minimum, option.maximum, option.progress = 0, 100, 0
+        painter.drawControl(QStyle.ControlElement.CE_ProgressBar, option)
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        radius = self.height() / 2
+        groove = QPainterPath()
+        groove.addRoundedRect(QRectF(self.rect()), radius, radius)
+        painter.setClipPath(groove)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._color)
+        painter.drawRoundedRect(self.segment_rect(self._clock.elapsed()), radius, radius)
         painter.end()
 
 
@@ -505,7 +609,8 @@ class DownloadTaskWidget(QFrame):
         header_layout.addWidget(self.title_label, stretch=1, alignment=Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(header)
 
-        self.progress_bar = QProgressBar()
+        # 割合が無いのはライブの録画中・保存中だけのため、流れる線はLIVEバッジと同じ赤にする
+        self.progress_bar = MarqueeProgressBar(LIVE_COLOR)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
