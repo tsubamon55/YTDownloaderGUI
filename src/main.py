@@ -7,7 +7,7 @@ from paths import append_log_entry, find_bundled_file, get_log_file_path
 
 try:
     from PyQt6.QtCore import QThread
-    from PyQt6.QtGui import QIcon
+    from PyQt6.QtGui import QFontDatabase, QIcon
     from PyQt6.QtWidgets import QApplication
 
     import dialogs
@@ -61,12 +61,50 @@ def install_exception_hook() -> None:
     sys.excepthook = handle_exception
 
 
+WSLG_RUNTIME_DIR = "/mnt/wslg/runtime-dir"
+
+
+def fix_wslg_runtime_dir(environ=os.environ, wslg_dir: str = WSLG_RUNTIME_DIR) -> None:
+    """WSLgではWaylandのソケットが/mnt/wslg/runtime-dirにあるが、systemdのセッションが
+    XDG_RUNTIME_DIRを/run/user/<uid>に上書きしていると接続に失敗し、Qtがxcbに切り替わる。
+    xcbではタイトルバーをWSLg側が描くため日本語が□になる。Waylandならタイトルバーも
+    Qtが描くので、ソケットが見つからないときだけ向き先を直す"""
+    display = environ.get("WAYLAND_DISPLAY")
+    if not display or os.path.isabs(display):
+        return
+    runtime_dir = environ.get("XDG_RUNTIME_DIR", "")
+    if os.path.exists(os.path.join(runtime_dir, display)):
+        return
+    if os.path.exists(os.path.join(wslg_dir, display)):
+        environ["XDG_RUNTIME_DIR"] = wslg_dir
+
+
+def warn_if_no_japanese_font() -> None:
+    """Linuxでは日本語フォントが未導入だと、Qtが代替の字形を見つけられず画面の日本語がすべて□になる。
+    その状態は画面からは原因が分からないため、標準エラーに対処法を出す"""
+    if not sys.platform.startswith("linux"):
+        return
+    if QFontDatabase.families(QFontDatabase.WritingSystem.Japanese):
+        return
+    message = (
+        "日本語フォントが見つからないため、画面の文字が□で表示されます。"
+        "フォントを導入してください (例: sudo apt install fonts-noto-cjk)\n"
+        "No Japanese font found; the UI text will render as boxes. "
+        "Install one (e.g. sudo apt install fonts-noto-cjk).\n"
+    )
+    if sys.stderr is not None:
+        sys.stderr.write(message)
+
+
 def main() -> None:
     install_exception_hook()
     # 画面関連のモジュールは例外フックを入れた後に読み込み、その失敗も記録・表示されるようにする
     from main_window import MainWindow
 
+    if sys.platform.startswith("linux"):
+        fix_wslg_runtime_dir()
     app = QApplication(sys.argv)
+    warn_if_no_japanese_font()
 
     # QApplication側に設定しておくと、個別にsetWindowIconしていないダイアログ
     # (QMessageBox等)にもそのまま適用され、Windowsではタスクバーのアイコンにもなる
