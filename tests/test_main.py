@@ -21,6 +21,41 @@ def fake_app():
     return SimpleNamespace(thread=lambda: gui_thread)
 
 
+class FixWslgRuntimeDirTest(unittest.TestCase):
+    def run_fix(self, environ, runtime_sockets, wslg_sockets):
+        with tempfile.TemporaryDirectory() as runtime, tempfile.TemporaryDirectory() as wslg:
+            for name in runtime_sockets:
+                open(os.path.join(runtime, name), "w").close()
+            for name in wslg_sockets:
+                open(os.path.join(wslg, name), "w").close()
+            if "XDG_RUNTIME_DIR" in environ:
+                environ["XDG_RUNTIME_DIR"] = runtime
+            main.fix_wslg_runtime_dir(environ, wslg)
+            return environ, runtime, wslg
+
+    def test_redirects_when_socket_only_in_wslg_dir(self):
+        environ, _, wslg = self.run_fix(
+            {"WAYLAND_DISPLAY": "wayland-0", "XDG_RUNTIME_DIR": "x"}, [], ["wayland-0"]
+        )
+        self.assertEqual(environ["XDG_RUNTIME_DIR"], wslg)
+
+    def test_keeps_dir_when_socket_already_there(self):
+        environ, runtime, _ = self.run_fix(
+            {"WAYLAND_DISPLAY": "wayland-0", "XDG_RUNTIME_DIR": "x"}, ["wayland-0"], ["wayland-0"]
+        )
+        self.assertEqual(environ["XDG_RUNTIME_DIR"], runtime)
+
+    def test_noop_without_wayland_display(self):
+        environ, runtime, _ = self.run_fix({"XDG_RUNTIME_DIR": "x"}, [], ["wayland-0"])
+        self.assertEqual(environ["XDG_RUNTIME_DIR"], runtime)
+
+    def test_noop_when_no_socket_anywhere(self):
+        environ, runtime, _ = self.run_fix(
+            {"WAYLAND_DISPLAY": "wayland-0", "XDG_RUNTIME_DIR": "x"}, [], []
+        )
+        self.assertEqual(environ["XDG_RUNTIME_DIR"], runtime)
+
+
 class InstallExceptionHookTest(unittest.TestCase):
     def setUp(self):
         self._original_excepthook = sys.excepthook

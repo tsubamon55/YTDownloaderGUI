@@ -8,6 +8,7 @@
 
 import os
 import sys
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -21,13 +22,17 @@ from PyQt6.QtWidgets import QApplication, QLineEdit, QMessageBox
 
 import dialogs
 import main_window as main_window_module
+from live import LiveInfo
 from main_window import IDLE_STATUS_TEXT, MainWindow
+from main_window_ui import DOWNLOAD_BUTTON_TEXT, RECORD_BUTTON_TEXT
+from widgets import DownloadTaskWidget
 
 _app = QApplication.instance() or QApplication(sys.argv)
 
 # 保存先は絶対パスでなければ入力エラーになるため、実行中のOSで絶対パスになるものを使う
 OUT_DIR = os.path.abspath(os.path.join(os.sep, "out"))
 SHA256 = "0" * 64
+SAVED_PATH = os.path.join(OUT_DIR, "title.mp4")
 
 
 def make_video(format_id="137", ext="mp4", vcodec="avc1.640028", height=1080, width=None,
@@ -114,9 +119,19 @@ class MainWindowTestCase(unittest.TestCase):
         # クラッシュを招く。テスト終了時に必ず止めて、次のイベントループ処理へ
         # 持ち越さないようにする
         self.addCleanup(self.window._info_fetch_timer.stop)
+        # 終了時の録画の保存待ちで出すダイアログはウィンドウモーダルのため、テスト後に開いたまま残ると
+        # QApplication.activeModalWidget()を通じて後続のテスト(アップデートの提案等)の動作を変えてしまう
+        self.addCleanup(self._close_saving_dialog)
         # isVisible()は祖先を含めた実際の表示状態を返すため、offscreenプラットフォームでも
         # トップレベルウィンドウ自体をshowしておく必要がある
         self.window.show()
+
+
+    def _close_saving_dialog(self):
+        # 保存待ちの間は閉じても出し直されるため、先に参照を外してから閉じる
+        dialog, self.window._saving_dialog = self.window._saving_dialog, None
+        if dialog is not None:
+            dialog.close()
 
 
 class MainWindowTestIsolationTest(MainWindowTestCase):
@@ -199,8 +214,8 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.window.on_url_changed("https://example.com/watch?v=abc")
         self.assertTrue(self.window._info_fetch_timer.isActive())
 
-    def test_changing_to_new_valid_url_resets_previous_format_and_progress_state(self):
-        # 動画Aを読み込み済みの状態を再現する(フォーマット選択・mp3変換・進捗バー等)
+    def test_changing_to_new_valid_url_resets_previous_format_state(self):
+        # 動画Aを読み込み済みの状態を再現する(フォーマット選択・mp3変換等)
         self.window.video_format_combo.addItem("dummy")
         self.window.video_format_combo.setEnabled(True)
         self.window.available_formats = [make_video()]
@@ -208,7 +223,6 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.window.mp3_checkbox.setChecked(True)
         self.window.mp3_label.setEnabled(True)
         self.window.merge_note_label.setText("動画と音声を合成してダウンロードします")
-        self.window.progress_bar.setValue(55)
         self.window.video_duration = 300.0
 
         # URLを空にせず、別の有効なURLに貼り替えた場合でも即座に(fetch_formats実行前に)
@@ -222,7 +236,6 @@ class OnUrlChangedTest(MainWindowTestCase):
         self.assertFalse(self.window.mp3_checkbox.isEnabled())
         self.assertFalse(self.window.mp3_label.isEnabled())
         self.assertEqual(self.window.merge_note_label.text(), "")
-        self.assertLess(self.window.progress_bar.value(), 0)  # reset()後は無効値
         self.assertIsNone(self.window.video_duration)
         # リセット後も有効なURLなので取得タイマーは開始される
         self.assertTrue(self.window._info_fetch_timer.isActive())
@@ -338,6 +351,17 @@ class OnFormatsFetchedTest(MainWindowTestCase):
         self.assertTrue(self.window.download_btn.isEnabled())
         self.assertTrue(self.window.clip_range_slider.isEnabled())
         self.assertEqual(self.window.clip_range_slider.values(), (0, 125))
+
+    def test_live_info_is_kept_until_url_changes(self):
+        worker = MagicMock()
+        self.window.format_worker = worker
+        live_info = LiveInfo(started_at=1790928042, can_record_from_start=True)
+
+        self.window.on_formats_fetched([], "Stream", b"", None, worker, live_info=live_info)
+        self.assertEqual(self.window.live_info, live_info)
+
+        self.window.url_edit.setText("https://example.com/watch?v=other")
+        self.assertIsNone(self.window.live_info)
 
     def test_stale_worker_result_is_ignored(self):
         stale_worker = MagicMock()
@@ -693,6 +717,54 @@ class ResolveFormatSpecTest(MainWindowTestCase):
         self.assertEqual(spec, "137+140")
 
 
+class ManualModeWidthTest(MainWindowTestCase):
+    """手動設定はフォーマットの列幅の分だけウィンドウを広げるため、自動設定に戻したら元の幅に戻す"""
+
+    def test_returning_to_auto_restores_width(self):
+        width = self.window.width()
+        self.window.manual_toggle_btn.setChecked(True)
+        self.window.resize(width + 230, self.window.height())  # 列幅に合わせて広がった状態
+        self.window.manual_toggle_btn.setChecked(False)
+        self.assertEqual(self.window.width(), width)
+
+    def test_download_panel_toggled_while_manual_is_accounted_for(self):
+        width = self.window.width()
+        self.window.manual_toggle_btn.setChecked(True)
+        task = DownloadTaskWidget("title")
+        self.window._add_task_widget(task)
+        self.window.manual_toggle_btn.setChecked(False)
+        # 一覧の分だけ広い幅に戻る
+        self.assertEqual(self.window.width(), width + panel_width_delta(self.window))
+
+    def test_starting_download_returns_to_auto_and_restores_width(self):
+        width = self.window.width()
+        self.window.manual_toggle_btn.setChecked(True)
+        self.window.resize(width + 230, self.window.height())  # 列幅に合わせて広がった状態
+        # URLの変更でフォーマットの選択は消えるため、URLを先に入れてから選ぶ
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.window.out_edit.setText(OUT_DIR)
+        self.window._populate_format_combos([make_video(), make_audio()])
+        self.window.video_format_combo.setCurrentIndex(1)
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker"):
+            self.window.start_download()
+
+        self.assertFalse(self.window.manual_toggle_btn.isChecked())
+        self.assertFalse(self.window.manual_container.isVisibleTo(self.window))
+        # 一覧が出た分だけ広く、手動設定で広がった分は戻る
+        self.assertEqual(self.window.width(), width + panel_width_delta(self.window))
+
+    def test_width_is_kept_when_manual_was_never_opened(self):
+        self.window.resize(700, self.window.height())
+        self.window.on_manual_toggled(False)
+        self.assertEqual(self.window.width(), 700)
+
+
+def panel_width_delta(window):
+    return main_window_module.DOWNLOAD_PANEL_WIDTH + window.centralWidget().layout().spacing()
+
+
 class StartDownloadValidationTest(MainWindowTestCase):
     def test_empty_url_shows_warning_and_stops(self):
         self.window.url_edit.setText("")
@@ -700,7 +772,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
         with patch.object(dialogs, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
-        self.assertIsNone(self.window.download_worker)
+        self.assertEqual(self.window._download_tasks, {})
 
     def test_empty_out_dir_shows_warning_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -708,7 +780,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
         with patch.object(dialogs, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
-        self.assertIsNone(self.window.download_worker)
+        self.assertEqual(self.window._download_tasks, {})
 
     def test_missing_ffmpeg_shows_critical_and_stops(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -717,7 +789,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
              patch.object(dialogs, "critical") as critical_mock:
             self.window.start_download()
         critical_mock.assert_called_once()
-        self.assertIsNone(self.window.download_worker)
+        self.assertEqual(self.window._download_tasks, {})
 
     def test_manual_mode_value_error_shows_warning(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -727,7 +799,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
              patch.object(dialogs, "warning") as warning_mock:
             self.window.start_download()
         warning_mock.assert_called_once()
-        self.assertIsNone(self.window.download_worker)
+        self.assertEqual(self.window._download_tasks, {})
 
     def test_valid_input_starts_worker(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -742,8 +814,41 @@ class StartDownloadValidationTest(MainWindowTestCase):
         makedirs_mock.assert_called_once_with(OUT_DIR, exist_ok=True)
         worker_cls.assert_called_once()
         worker_instance.start.assert_called_once()
+        self.assertIn(worker_instance, self.window._download_tasks)
+        self.assertFalse(self.window.download_panel.isHidden())
+        # 続けて次の動画を入力できるよう、入力欄は空に戻る
+        self.assertEqual(self.window.url_edit.text(), "")
         self.assertFalse(self.window.download_btn.isEnabled())
-        self.assertTrue(self.window.cancel_btn.isEnabled())
+
+    def test_downloads_run_in_parallel(self):
+        workers = [MagicMock(), MagicMock()]
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", side_effect=workers):
+            for video_id in ("a", "b"):
+                self.window.url_edit.setText(f"https://example.com/watch?v={video_id}")
+                self.window.out_edit.setText(OUT_DIR)
+                self.window.start_download()
+
+        for worker in workers:
+            worker.start.assert_called_once()
+        self.assertEqual(list(self.window._download_tasks), workers)
+        # 末尾の伸縮用スペーサーに加えて2件並ぶ
+        self.assertEqual(self.window.download_list_layout.count(), 3)
+
+    def test_same_url_is_refused_while_downloading(self):
+        """同じ動画を同時に落とすとファイル名を奪い合い、片方の後片付けがもう片方の途中のファイルを消す"""
+        url = "https://example.com/watch?v=x"
+        running = MagicMock()
+        running.request.url = url
+        self.window._download_tasks[running] = DownloadTaskWidget("title")
+        self.window.url_edit.setText(url)
+        self.window.out_edit.setText(OUT_DIR)
+        with patch.object(dialogs, "information") as information_mock, \
+             patch.object(main_window_module, "DownloadWorker") as worker_cls:
+            self.window.start_download()
+        information_mock.assert_called_once()
+        worker_cls.assert_not_called()
 
     def test_relative_out_dir_is_rejected(self):
         """相対パスは起動方法で変わる作業フォルダ基準になり、保存先が分からなくなる"""
@@ -755,7 +860,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
             self.window.start_download()
         warning_mock.assert_called_once()
         makedirs_mock.assert_not_called()
-        self.assertIsNone(self.window.download_worker)
+        self.assertEqual(self.window._download_tasks, {})
 
     def test_tilde_out_dir_is_expanded(self):
         """"~"はシェルを通さないため、そのままだと"~"という名前のフォルダが作られる"""
@@ -787,7 +892,7 @@ class StartDownloadValidationTest(MainWindowTestCase):
         warning_mock.assert_called_once()
         self.assertEqual(warning_mock.call_args[0][1], "入力エラー")
         worker_cls.assert_not_called()
-        self.assertIsNone(self.window.download_worker)
+        self.assertEqual(self.window._download_tasks, {})
 
     def test_clip_range_is_passed_to_worker(self):
         self.window.url_edit.setText("https://example.com/watch?v=x")
@@ -975,60 +1080,147 @@ class LooksLikeUrlTest(unittest.TestCase):
 
 
 class ProgressAndFinishHandlersTest(MainWindowTestCase):
-    def test_on_progress_updates_bar_and_status(self):
-        self.window.on_progress(42.5, "42.5% 速度:1MiB/s 残り:01:00")
-        self.assertEqual(self.window.progress_bar.value(), 42)
-        self.assertEqual(self.window.status_label.text(), "42.5% 速度:1MiB/s 残り:01:00")
+    def _start_task(self, thumbnail=None):
+        """start_downloadを通して1件開始し、(ワーカー, 一覧の表示)を返す"""
+        self._task_count = getattr(self, "_task_count", 0) + 1
+        self.window.url_edit.setText(f"https://example.com/watch?v={self._task_count}")
+        self.window.out_edit.setText(OUT_DIR)
+        self.window.title_label.setText("title")
+        if thumbnail is not None:
+            # URLの変更でサムネイルは消えるため、動画情報の取得後と同じくURLの後に設定する
+            self.window.thumbnail_label.setPixmap(thumbnail)
+        worker = MagicMock()
+        worker.request.out_dir = OUT_DIR
+        worker.request.live_mode = None
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", return_value=worker):
+            self.window.start_download()
+        return worker, self.window._download_tasks[worker]
 
-    def test_on_finished_ok_resets_state(self):
-        self.window.url_edit.setText("https://example.com/watch?v=x")
-        self.window.download_btn.setEnabled(True)
-        self.window.cancel_btn.setEnabled(True)
-        with patch.object(self.window, "open_output_folder") as open_folder_mock:
-            self.window.on_finished_ok()
-        self.assertEqual(self.window.url_edit.text(), "")
-        self.assertFalse(self.window.download_btn.isEnabled())
-        self.assertFalse(self.window.cancel_btn.isEnabled())
-        self.assertTrue(self.window.open_folder_btn.isEnabled())
-        self.assertEqual(self.window.status_label.text(), "完了")
-        open_folder_mock.assert_called_once()
+    def test_task_progress_updates_bar_and_status(self):
+        task = DownloadTaskWidget("title")
+        self.addCleanup(task.deleteLater)
+        task.set_progress(42.5, "42% 1.00MiB/s 残り01:00")
+        self.assertEqual(task.progress_bar.value(), 42)
+        self.assertEqual(task.status_label.text(), "42% 1.00MiB/s 残り01:00")
 
-    def test_on_finished_error_shows_dialog_and_resets_state(self):
-        self.window.info_ready = True
-        self.window.cancel_btn.setEnabled(True)
+    def test_finished_ok_marks_task_done_without_opening_folder(self):
+        """並列に何本も完了するとウィンドウが増え続けるため、フォルダは自動では開かない"""
+        worker, task = self._start_task()
+        with patch.object(main_window_module, "open_folder") as open_folder_mock, \
+             patch.object(main_window_module, "reveal_file") as reveal_mock:
+            self.window.on_download_finished_ok(worker, SAVED_PATH)
+        self.assertTrue(task.finished)
+        self.assertEqual(task.status_label.text(), "完了")
+        self.assertEqual(task.progress_bar.value(), 100)
+        self.assertTrue(task.reveal_btn.isVisibleTo(task))
+        open_folder_mock.assert_not_called()
+        reveal_mock.assert_not_called()
+
+    def test_reveal_button_selects_saved_file(self):
+        worker, task = self._start_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        with patch.object(main_window_module.os.path, "isfile", return_value=True), \
+             patch.object(main_window_module, "reveal_file") as reveal_mock:
+            task.reveal_btn.click()
+        reveal_mock.assert_called_once_with(SAVED_PATH)
+
+    def test_reveal_falls_back_to_folder_when_file_was_moved(self):
+        worker, task = self._start_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        with patch.object(main_window_module.os.path, "isfile", return_value=False), \
+             patch.object(main_window_module.os.path, "isdir", return_value=True), \
+             patch.object(main_window_module, "open_folder") as open_folder_mock:
+            task.reveal_btn.click()
+        open_folder_mock.assert_called_once_with(OUT_DIR)
+
+    def test_reveal_reports_when_folder_is_gone(self):
+        worker, task = self._start_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        with patch.object(main_window_module.os.path, "isfile", return_value=False), \
+             patch.object(main_window_module.os.path, "isdir", return_value=False), \
+             patch.object(dialogs, "information") as information_mock:
+            task.reveal_btn.click()
+        information_mock.assert_called_once()
+
+    def test_failed_task_has_no_reveal_button(self):
+        """後処理だけの失敗も完全な失敗として扱い、保存したファイルは無いため開くボタンも出さない"""
+        worker, task = self._start_task()
+        with patch.object(dialogs, "critical"):
+            self.window.on_download_error(worker, "failed")
+        self.assertFalse(task.reveal_btn.isVisibleTo(task))
+
+    def test_finished_ok_does_not_touch_current_input(self):
+        """完了したのは前に入力した動画なので、入力中の次の動画は消さない"""
+        worker, _ = self._start_task()
+        self.window.url_edit.setText("https://example.com/watch?v=next")
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        self.assertEqual(self.window.url_edit.text(), "https://example.com/watch?v=next")
+
+    def test_error_shows_dialog_with_title(self):
+        worker, task = self._start_task()
         with patch.object(dialogs, "critical") as critical_mock:
-            self.window.on_finished_error("failed")
+            self.window.on_download_error(worker, "failed")
         critical_mock.assert_called_once()
-        self.assertFalse(self.window.cancel_btn.isEnabled())
-        self.assertTrue(self.window.download_btn.isEnabled())
-        self.assertEqual(self.window.status_label.text(), "失敗しました")
+        self.assertIn("title", critical_mock.call_args[0][2])
+        self.assertTrue(task.finished)
+        self.assertEqual(task.status_label.text(), "失敗しました")
 
-    def test_on_cancelled_shows_no_error_dialog(self):
+    def test_cancelled_shows_no_error_dialog(self):
         """ユーザーが自分で止めたキャンセルを「ダウンロード失敗」として扱わない"""
-        self.window.info_ready = True
-        self.window.cancel_btn.setEnabled(True)
+        worker, task = self._start_task()
         with patch.object(dialogs, "critical") as critical_mock:
-            self.window.on_cancelled()
+            self.window.on_download_cancelled(worker)
         critical_mock.assert_not_called()
-        self.assertFalse(self.window.cancel_btn.isEnabled())
-        self.assertTrue(self.window.download_btn.isEnabled())
-        self.assertEqual(self.window.status_label.text(), "キャンセルしました")
 
-    def test_open_folder_is_enabled_after_failure_or_cancel(self):
-        self.window.last_output_dir = OUT_DIR
-        for finish in (lambda: self.window.on_finished_error("failed"), self.window.on_cancelled):
-            self.window.open_folder_btn.setEnabled(False)
-            with patch.object(dialogs, "critical"):
-                finish()
-            self.assertTrue(self.window.open_folder_btn.isEnabled())
+    def test_task_shows_video_thumbnail(self):
+        pixmap = QPixmap(320, 180)
+        pixmap.fill(Qt.GlobalColor.red)
+        _, task = self._start_task(thumbnail=pixmap)
+        shown = task.thumbnail_label.pixmap()
+        self.assertFalse(shown.isNull())
+        self.assertEqual(shown.size(), DownloadTaskWidget.THUMBNAIL_SIZE)
+        # 次の動画の入力のために本体のサムネイルが消えても、一覧の表示は残る
+        self.assertTrue(self.window.thumbnail_label.pixmap().isNull())
+
+    def test_task_without_thumbnail_shows_placeholder(self):
+        _, task = self._start_task()
+        self.assertTrue(task.thumbnail_label.pixmap().isNull())
+
+    def test_cancelled_task_is_removed_from_panel(self):
+        worker, task = self._start_task()
+        other, other_task = self._start_task()
+        self.window.on_download_cancelled(worker)
+        self.assertEqual(self.window.download_list_layout.indexOf(task), -1)
+        # 他のダウンロードの表示は残り、一覧も表示されたまま
+        self.assertNotEqual(self.window.download_list_layout.indexOf(other_task), -1)
+        self.assertFalse(self.window.download_panel.isHidden())
 
     def test_finished_worker_is_waited_and_released(self):
-        worker = MagicMock()
-        self.window.download_worker = worker
+        worker, _ = self._start_task()
         with patch.object(dialogs, "critical"):
-            self.window.on_finished_error("failed")
+            self.window.on_download_error(worker, "failed")
         worker.wait.assert_called_once()
-        self.assertIsNone(self.window.download_worker)
+        self.assertEqual(self.window._download_tasks, {})
+
+    def test_cancelling_last_task_hides_panel_and_restores_width(self):
+        width = self.window.width()
+        worker, _ = self._start_task()
+        self.window.on_download_cancelled(worker)
+        self.assertTrue(self.window.download_panel.isHidden())
+        self.assertEqual(self.window.width(), width)
+
+    def test_dismissing_last_task_hides_panel_and_restores_width(self):
+        width = self.window.width()
+        worker, task = self._start_task()
+        self.assertFalse(self.window.download_panel.isHidden())
+        self.assertGreater(self.window.width(), width)
+        with patch.object(dialogs, "critical"):
+            self.window.on_download_error(worker, "failed")
+        task.action_btn.click()
+        self.assertTrue(self.window.download_panel.isHidden())
+        self.assertEqual(self.window.width(), width)
 
     def test_title_is_shown_as_plain_text(self):
         """動画タイトルの"<b>"等をHTMLとして描画しない"""
@@ -1037,16 +1229,14 @@ class ProgressAndFinishHandlersTest(MainWindowTestCase):
         self.assertEqual(self.window.title_label.textFormat(), Qt.TextFormat.PlainText)
         self.assertEqual(self.window.title_label.text(), "<b>title</b>")
 
-    def test_cancel_download_calls_worker_cancel(self):
-        worker = MagicMock()
-        self.window.download_worker = worker
-        self.window.cancel_download()
+    def test_cancel_download_cancels_only_that_worker(self):
+        worker, task = self._start_task()
+        other, _ = self._start_task()
+        task.action_btn.click()
         worker.cancel.assert_called_once()
-        self.assertEqual(self.window.status_label.text(), "キャンセル中...")
-
-    def test_cancel_download_noop_without_worker(self):
-        self.window.download_worker = None
-        self.window.cancel_download()  # 例外にならないことを確認
+        other.cancel.assert_not_called()
+        self.assertEqual(task.status_label.text(), "キャンセル中...")
+        self.assertFalse(task.action_btn.isEnabled())
 
 
 class SignalWiringTest(MainWindowTestCase):
@@ -1089,22 +1279,6 @@ class SignalWiringTest(MainWindowTestCase):
             self.window.download_btn.click()
         warning_mock.assert_called_once()
 
-    def test_cancel_button_click_cancels_worker(self):
-        worker = MagicMock()
-        self.window.download_worker = worker
-        self.window.cancel_btn.setEnabled(True)
-        self.window.cancel_btn.click()
-        worker.cancel.assert_called_once()
-        self.assertEqual(self.window.status_label.text(), "キャンセル中...")
-
-    def test_open_folder_button_click_opens_last_output_dir(self):
-        self.window.last_output_dir = OUT_DIR
-        self.window.open_folder_btn.setEnabled(True)
-        with patch.object(main_window_module.os.path, "isdir", return_value=True), \
-             patch.object(main_window_module, "open_folder") as open_folder_mock:
-            self.window.open_folder_btn.click()
-        open_folder_mock.assert_called_once_with(OUT_DIR)
-
     def test_log_toggle_button_shows_log_view(self):
         self.window.log_toggle_btn.setChecked(True)
         self.assertTrue(self.window.log_view.isVisible())
@@ -1117,10 +1291,11 @@ class CloseEventTest(MainWindowTestCase):
     打ち切られて未完成ファイルが残る"""
 
     @staticmethod
-    def _running_worker():
+    def _running_worker(live_mode=None):
         worker = MagicMock()
         worker.isRunning.return_value = True
         worker.wait.return_value = True
+        worker.request.live_mode = live_mode
         return worker
 
     @staticmethod
@@ -1128,6 +1303,114 @@ class CloseEventTest(MainWindowTestCase):
         event = MagicMock()
         event.accepted = True
         return event
+
+    def test_recording_is_stopped_and_close_waits_for_saving(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        event = self._event()
+
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes) as question_mock:
+            self.window.closeEvent(event)
+
+        self.assertIn("録画中の1件を停止・保存", question_mock.call_args.args[2])
+        recording.cancel.assert_called_once()
+        # 保存(結合・再格納)は数分かかることがあるため、ここでは待たずに終了をいったん取り消す
+        recording.wait.assert_not_called()
+        event.ignore.assert_called_once()
+        self.assertIsNotNone(self.window._saving_dialog)
+
+        recording.isRunning.return_value = False
+        with patch.object(MainWindow, "close") as close_mock:
+            self.window.on_download_finished_ok(recording, SAVED_PATH)
+        close_mock.assert_called_once()
+        self.assertIsNone(self.window._saving_dialog)
+
+    def test_recording_that_ends_while_confirming_does_not_leave_window_unclosable(self):
+        """確認ダイアログを出している間に録画が終わった場合、保存待ちに入らずにそのまま閉じる"""
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        event = self._event()
+
+        def answer_after_recording_ended(*args, **kwargs):
+            recording.isRunning.return_value = False
+            self.window.on_download_finished_ok(recording, SAVED_PATH)
+            return QMessageBox.StandardButton.Yes
+
+        with patch.object(dialogs, "question", side_effect=answer_after_recording_ended):
+            self.window.closeEvent(event)
+
+        self.assertIsNone(self.window._saving_dialog)
+        event.accept.assert_called_once()
+
+    def test_saving_dialog_cannot_be_dismissed(self):
+        """保存待ちのダイアログをEsc等で閉じられると、操作を続けた後に突然アプリが終了してしまう"""
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+        dialog = self.window._saving_dialog
+
+        dialog.reject()
+        QApplication.processEvents()
+        self.assertTrue(dialog.isVisible())
+
+        dialog.close()
+        QApplication.processEvents()
+        self.assertTrue(dialog.isVisible())
+
+    def test_prompt_mentions_both_recordings_and_downloads(self):
+        recording = self._running_worker(live_mode="from_start")
+        download = self._running_worker()
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        self.window._download_tasks[download] = DownloadTaskWidget("video")
+
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No) as question_mock:
+            self.window.closeEvent(self._event())
+
+        self.assertEqual(
+            question_mock.call_args.args[2],
+            "録画中の1件を停止・保存し、ダウンロード中の1件を中止して終了しますか?",
+        )
+
+    def test_second_close_after_saving_does_not_ask_again(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+
+        recording.isRunning.return_value = False
+        with patch.object(MainWindow, "close"):
+            self.window._close_after_recordings()  # 保存が終わり、改めて閉じる
+        event = self._event()
+        with patch.object(dialogs, "question") as question_mock:
+            self.window.closeEvent(event)
+        question_mock.assert_not_called()
+        event.accept.assert_called_once()
+
+    def test_closing_again_while_saving_is_ignored_quietly(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+
+        event = self._event()
+        with patch.object(dialogs, "question") as question_mock:
+            self.window.closeEvent(event)
+        question_mock.assert_not_called()
+        event.ignore.assert_called_once()
+        recording.cancel.assert_called_once()
+
+    def test_recording_error_while_closing_does_not_block_with_dialog(self):
+        recording = self._running_worker(live_mode="from_now")
+        self.window._download_tasks[recording] = DownloadTaskWidget("stream")
+        with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.closeEvent(self._event())
+
+        recording.isRunning.return_value = False
+        with patch.object(dialogs, "critical") as critical_mock, patch.object(MainWindow, "close") as close_mock:
+            self.window.on_download_error(recording, "録画できたデータがありません")
+        critical_mock.assert_not_called()
+        close_mock.assert_called_once()
 
     def test_no_worker_closes_immediately(self):
         event = self._event()
@@ -1137,7 +1420,7 @@ class CloseEventTest(MainWindowTestCase):
 
     def test_running_download_asks_and_cancels_then_waits(self):
         worker = self._running_worker()
-        self.window.download_worker = worker
+        self.window._download_tasks[worker] = DownloadTaskWidget("title")
         event = self._event()
 
         with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.Yes):
@@ -1150,7 +1433,7 @@ class CloseEventTest(MainWindowTestCase):
 
     def test_declining_the_prompt_keeps_the_window_open(self):
         worker = self._running_worker()
-        self.window.download_worker = worker
+        self.window._download_tasks[worker] = DownloadTaskWidget("title")
         event = self._event()
 
         with patch.object(dialogs, "question", return_value=QMessageBox.StandardButton.No):
@@ -1183,7 +1466,7 @@ class CloseEventTest(MainWindowTestCase):
         ことがある。その場合もUIスレッドからできることはないので記録だけ残して閉じる"""
         worker = self._running_worker()
         worker.wait.return_value = False
-        self.window.download_worker = worker
+        self.window._download_tasks[worker] = DownloadTaskWidget("title")
         event = self._event()
 
         with (
@@ -1241,7 +1524,7 @@ class CloseEventTest(MainWindowTestCase):
     def test_finished_worker_is_not_waited_on(self):
         worker = MagicMock()
         worker.isRunning.return_value = False
-        self.window.download_worker = worker
+        self.window._download_tasks[worker] = DownloadTaskWidget("title")
         event = self._event()
 
         self.window.closeEvent(event)
@@ -1273,7 +1556,7 @@ class UpdateAvailablePromptTest(MainWindowTestCase):
     def test_no_prompt_while_video_download_is_running(self):
         worker = MagicMock()
         worker.isRunning.return_value = True
-        self.window.download_worker = worker
+        self.window._download_tasks[worker] = DownloadTaskWidget("title")
 
         with patch.object(dialogs, "question") as question_mock, \
              patch.object(MainWindow, "_start_update_download") as start_mock:
@@ -1449,7 +1732,8 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         worker = MagicMock()
         worker.isRunning.return_value = True
         worker.wait.return_value = False
-        self.window.download_worker = worker
+        worker.request.live_mode = None
+        self.window._download_tasks[worker] = DownloadTaskWidget("title")
         self.window._pending_update_path = "C:/tmp/Setup.exe"
         event = CloseEventTest._event()
 
@@ -1468,7 +1752,7 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         「適用中」ダイアログ(ウィンドウモーダル)が残り、ウィンドウを操作できなくなる"""
         download = MagicMock()
         download.isRunning.return_value = True
-        self.window.download_worker = download
+        self.window._download_tasks[download] = DownloadTaskWidget("title")
         update_worker = MagicMock()
         progress = MagicMock()
         self.window.update_download_worker = update_worker
@@ -1488,7 +1772,7 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         アップデートも一緒に取り消す(強制終了でダウンロードが壊れるのを防ぐため)"""
         worker = MagicMock()
         worker.isRunning.return_value = True
-        self.window.download_worker = worker
+        self.window._download_tasks[worker] = DownloadTaskWidget("title")
         self.window._pending_update_path = "C:/tmp/Setup.exe"
         event = CloseEventTest._event()
 
@@ -1502,6 +1786,260 @@ class CloseEventUpdateApplyTest(MainWindowTestCase):
         self.assertIsNone(self.window._pending_update_path)
         event.ignore.assert_called_once()
         event.accept.assert_not_called()
+
+
+class LiveFormTest(MainWindowTestCase):
+    def _fetch_live(self, can_record_from_start=True, started_ago=7170):
+        self.window.url_edit.setText("https://www.youtube.com/live/abc")
+        worker = MagicMock()
+        self.window.format_worker = worker
+        live_info = LiveInfo(started_at=time.time() - started_ago, can_record_from_start=can_record_from_start)
+        self.window.on_formats_fetched([make_video(), make_audio()], "Stream", b"", None, worker, live_info=live_info)
+
+    def test_starting_recording_widens_window_by_panel_width_only(self):
+        """「配信の最初から（H:MM:SS さかのぼる）」で左側の最小幅が広がっていても、ダウンロード一覧を
+        出した分だけ広げる。一覧を出した瞬間にQtが最小幅まで広げた分を、二重に足さない"""
+        self.window.show()
+        self._fetch_live(started_ago=3 * 3600)
+        self.window.out_edit.setText(OUT_DIR)
+        QApplication.processEvents()
+        width = self.window.width()
+        worker = MagicMock()
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", return_value=worker):
+            self.window.start_download()
+        QApplication.processEvents()
+        self.assertEqual(self.window.width(), width + panel_width_delta(self.window))
+
+    def test_live_shows_badge_elapsed_time_and_record_button(self):
+        self._fetch_live()
+        self.assertTrue(self.window.live_header.isVisible())
+        self.assertEqual(self.window.live_badge_label.text(), "● LIVE")
+        self.assertEqual(self.window.live_elapsed_label.text(), "配信開始から 1:59:30")
+        self.assertEqual(self.window.download_btn.text(), RECORD_BUTTON_TEXT)
+        self.assertEqual(self.window.status_label.text(), "配信中のライブを検出しました")
+
+    def test_live_that_can_go_back_offers_both_positions_defaulting_to_start(self):
+        self._fetch_live()
+        self.assertTrue(self.window.live_start_container.isVisible())
+        self.assertTrue(self.window.live_from_start_radio.isChecked())
+        self.assertEqual(self.window.live_from_start_radio.text(), "配信の最初から（1:59:30 さかのぼる）")
+        self.assertTrue(self.window.live_from_now_radio.isVisible())
+        self.assertFalse(self.window.live_unavailable_label.isVisible())
+        self.assertEqual(self.window._selected_live_mode(), "from_start")
+
+    def test_choosing_now(self):
+        self._fetch_live()
+        self.window.live_from_now_radio.setChecked(True)
+        self.assertEqual(self.window._selected_live_mode(), "from_now")
+
+    def test_live_that_cannot_go_back_shows_note_instead_of_choices(self):
+        self._fetch_live(can_record_from_start=False)
+        self.assertFalse(self.window.live_from_start_radio.isVisible())
+        self.assertFalse(self.window.live_from_now_radio.isVisible())
+        self.assertTrue(self.window.live_unavailable_label.isVisible())
+        self.assertEqual(self.window._selected_live_mode(), "from_now")
+
+    def test_options_not_usable_for_live_are_hidden_and_closed(self):
+        self.window.detail_toggle_btn.setChecked(True)
+        self._fetch_live()
+        self.assertFalse(self.window.manual_toggle_btn.isVisible())
+        self.assertFalse(self.window.detail_toggle_btn.isVisible())
+        self.assertFalse(self.window.detail_container.isVisible())
+
+    def test_elapsed_time_keeps_updating(self):
+        self._fetch_live(started_ago=59)
+        self.assertTrue(self.window._live_elapsed_timer.isActive())
+        with patch.object(main_window_module.time, "time", return_value=self.window.live_info.started_at + 61):
+            self.window._live_elapsed_timer.timeout.emit()
+        self.assertEqual(self.window.live_elapsed_label.text(), "配信開始から 1:01")
+
+    def test_unknown_start_time_shows_badge_only(self):
+        self.window.url_edit.setText("https://www.youtube.com/live/abc")
+        worker = MagicMock()
+        self.window.format_worker = worker
+        self.window.on_formats_fetched([], "Stream", b"", None, worker,
+                                       live_info=LiveInfo(started_at=None, can_record_from_start=True))
+        self.assertEqual(self.window.live_elapsed_label.text(), "")
+        self.assertEqual(self.window.live_from_start_radio.text(), "配信の最初から")
+
+    def test_changing_to_normal_video_restores_form(self):
+        self._fetch_live()
+        self.window.url_edit.setText("https://example.com/watch?v=x")
+        self.assertFalse(self.window.live_header.isVisible())
+        self.assertFalse(self.window.live_start_container.isVisible())
+        self.assertTrue(self.window.manual_toggle_btn.isVisible())
+        self.assertTrue(self.window.detail_toggle_btn.isVisible())
+        self.assertEqual(self.window.download_btn.text(), DOWNLOAD_BUTTON_TEXT)
+        self.assertFalse(self.window._live_elapsed_timer.isActive())
+
+    def test_live_title_and_badge_fit_in_preview(self):
+        """LIVE見出しの分だけタイトルの高さを詰め、サムネイルの高さからはみ出さない"""
+        self._fetch_live()
+        header = self.window.live_header.maximumHeight()
+        self.assertLessEqual(header + self.window.title_label.maximumHeight(), self.window.thumbnail_label.height())
+
+    def test_download_request_carries_live_mode(self):
+        self._fetch_live()
+        self.window.out_edit.setText(OUT_DIR)
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"):
+            request = self.window._build_download_request()
+        self.assertEqual(request.live_mode, "from_start")
+        self.assertIsNone(request.clip_start)
+
+
+class LiveTaskOrderingTest(MainWindowTestCase):
+    def _start_live_task(self, live_mode_now=False, name="live"):
+        self.window.url_edit.setText(f"https://www.youtube.com/live/{name}{live_mode_now}")
+        self.window.out_edit.setText(OUT_DIR)
+        fetch_worker = MagicMock()
+        self.window.format_worker = fetch_worker
+        self.window.on_formats_fetched([make_video(), make_audio()], "Stream", b"", None, fetch_worker,
+                                       live_info=LiveInfo(started_at=None, can_record_from_start=True))
+        if live_mode_now:
+            self.window.live_from_now_radio.setChecked(True)
+        worker = MagicMock()
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", return_value=worker) as worker_cls:
+            self.window.start_download()
+        request = worker_cls.call_args.args[0]
+        worker.request = request
+        return worker, self.window._download_tasks[worker]
+
+    def _start_normal_task(self):
+        return self._start_normal_task_named("normal")
+
+    def _start_normal_task_named(self, name):
+        self.window.url_edit.setText(f"https://example.com/watch?v={name}")
+        self.window.out_edit.setText(OUT_DIR)
+        self.window.title_label.setText(name)
+        worker = MagicMock()
+        worker.request.live_mode = None
+        with patch.object(main_window_module, "get_ffmpeg_location", return_value="C:/ffmpeg"), \
+             patch.object(main_window_module.os, "makedirs"), \
+             patch.object(main_window_module, "DownloadWorker", return_value=worker):
+            self.window.start_download()
+        return worker, self.window._download_tasks[worker]
+
+    def _list_order(self):
+        layout = self.window.download_list_layout
+        return [layout.itemAt(i).widget() for i in range(layout.count()) if layout.itemAt(i).widget() is not None]
+
+    def test_recording_task_is_placed_at_top_of_scrolling_list(self):
+        _, task = self._start_live_task()
+        self.assertEqual(self._list_order(), [task])
+        self.assertTrue(task.is_live)
+
+    def test_normal_task_started_later_goes_below_recordings(self):
+        _, live_a = self._start_live_task(name="a")
+        _, live_b = self._start_live_task(name="b")
+        _, normal = self._start_normal_task()
+        self.assertEqual(self._list_order(), [live_b, live_a, normal])
+
+    def test_many_recordings_share_the_scrolling_list(self):
+        """録画が何件あっても、スクロールする一覧の中に並ぶため押しつぶされない"""
+        tasks = [self._start_live_task(name=str(i))[1] for i in range(4)]
+        self.assertEqual(self._list_order(), list(reversed(tasks)))
+        self.assertFalse(hasattr(self.window, "pinned_list_layout"))
+
+    def test_live_end_moves_task_below_remaining_recordings(self):
+        worker_a, live_a = self._start_live_task(name="a")
+        _, live_b = self._start_live_task(name="b")
+        _, normal = self._start_normal_task()
+        live_state_slot = worker_a.live_state_changed.connect.call_args.args[0]
+        live_state_slot(False)
+        self.assertEqual(self._list_order(), [live_b, live_a, normal])
+        worker_b = next(w for w, t in self.window._download_tasks.items() if t is live_b)
+        worker_b.live_state_changed.connect.call_args.args[0](False)
+        self.assertEqual(self._list_order(), [live_b, live_a, normal])
+        _, normal2 = self._start_normal_task_named("normal2")
+        self.assertEqual(self._list_order(), [normal2, live_b, live_a, normal])
+
+    def test_failed_recording_moves_below_remaining_recordings(self):
+        _, live_a = self._start_live_task(name="a")
+        worker_b, live_b = self._start_live_task(name="b")
+        with patch.object(dialogs, "critical"):
+            self.window.on_download_error(worker_b, "録画できたデータがありません")
+        self.assertEqual(self._list_order(), [live_a, live_b])
+
+    def test_dismissing_recording_keeps_order_of_others(self):
+        worker_a, live_a = self._start_live_task(name="a")
+        _, live_b = self._start_live_task(name="b")
+        self.window.on_download_finished_ok(worker_a, SAVED_PATH)
+        self.window._remove_task_widget(live_a)
+        _, normal = self._start_normal_task()
+        self.assertEqual(self._list_order(), [live_b, normal])
+
+    def test_dismissing_last_task_hides_panel(self):
+        worker, task = self._start_live_task()
+        self.window.on_download_finished_ok(worker, SAVED_PATH)
+        self.window._remove_task_widget(task)
+        self.assertFalse(self.window.download_panel.isVisible())
+
+    def test_stop_choice_continue_keeps_recording(self):
+        worker, task = self._start_live_task()
+        with patch.object(self.window, "_ask_recording_stop_action", return_value=None):
+            task.stop_requested.emit()
+        worker.cancel.assert_not_called()
+        worker.discard.assert_not_called()
+        self.assertTrue(task.action_btn.isEnabled())
+
+    def test_stop_choice_save_stops_and_saves(self):
+        worker, task = self._start_live_task()
+        with patch.object(self.window, "_ask_recording_stop_action", return_value="save"):
+            task.stop_requested.emit()
+        worker.cancel.assert_called_once()
+        worker.discard.assert_not_called()
+        self.assertEqual(task.status_label.text(), "保存しています...")
+
+    def test_stop_choice_discard_discards(self):
+        worker, task = self._start_live_task()
+        with patch.object(self.window, "_ask_recording_stop_action", return_value="discard"):
+            task.stop_requested.emit()
+        worker.discard.assert_called_once()
+        worker.cancel.assert_not_called()
+        self.assertEqual(task.status_label.text(), "破棄しています...")
+
+    def _ask_with_clicked_button(self, label):
+        """録画の停止ダイアログで、指定の文字のボタン(Noneなら×やEsc)が押されたことにする"""
+        captured = {}
+        original_add_button = main_window_module.QMessageBox.addButton
+
+        def capturing_add_button(box_self, *args, **kwargs):
+            btn = original_add_button(box_self, *args, **kwargs)
+            captured.setdefault("buttons", {})[btn.text()] = btn
+            captured["box"] = box_self
+            return btn
+
+        def clicked(box_self):
+            if label is None:
+                return box_self.escapeButton()
+            return captured["buttons"][label]
+
+        with patch.object(main_window_module.QMessageBox, "addButton", capturing_add_button), \
+             patch.object(main_window_module.QMessageBox, "exec", return_value=0), \
+             patch.object(main_window_module.QMessageBox, "clickedButton", clicked):
+            result = self.window._ask_recording_stop_action()
+        return result, captured
+
+    def test_stop_dialog_offers_save_discard_cancel(self):
+        _, captured = self._ask_with_clicked_button("キャンセル")
+        self.assertEqual(list(captured["buttons"]), ["保存", "破棄", "キャンセル"])
+        box = captured["box"]
+        self.assertEqual(box.text(), "録画を停止します。録画した分を保存しますか?")
+        self.assertIs(box.defaultButton(), captured["buttons"]["キャンセル"])
+
+    def test_stop_dialog_maps_buttons_to_actions(self):
+        self.assertEqual(self._ask_with_clicked_button("保存")[0], "save")
+        self.assertEqual(self._ask_with_clicked_button("破棄")[0], "discard")
+        self.assertIsNone(self._ask_with_clicked_button("キャンセル")[0])
+        self.assertIsNone(self._ask_with_clicked_button(None)[0])
+
+    def test_request_carries_selected_live_mode(self):
+        worker, _ = self._start_live_task(live_mode_now=True)
+        self.assertEqual(worker.request.live_mode, "from_now")
 
 
 if __name__ == "__main__":

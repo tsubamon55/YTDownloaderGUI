@@ -1,11 +1,14 @@
 """workers.py の DownloadWorker のうち、実ダウンロードやQtイベントループに
 依存しないロジック(進捗計算・ファイル名解決・後処理判定等)の単体テスト"""
 
+import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 import urllib.error
+import weakref
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -15,7 +18,9 @@ from yt_dlp.postprocessor import FFmpegPostProcessor
 
 from clip_trimmer import ClipCancelledError
 from formats import is_codec_container_mismatch
+from live import LiveInfo
 from workers import (
+    DownloadCancelledByUser,
     DownloadRequest,
     DownloadWorker,
     FormatListWorker,
@@ -126,7 +131,7 @@ class FormatListWorkerRunTest(unittest.TestCase):
             worker.run()
 
         self.assertEqual(len(results), 1)
-        _, _, thumbnail_bytes, _ = results[0]
+        _, _, thumbnail_bytes, _, _ = results[0]
         self.assertEqual(thumbnail_bytes, b"fallback-bytes")
 
     def test_stops_at_first_successful_candidate(self):
@@ -208,7 +213,7 @@ class FormatListWorkerRunTest(unittest.TestCase):
             worker.run()
 
         self.assertEqual(len(results), 1)
-        _, _, thumbnail_bytes, _ = results[0]
+        _, _, thumbnail_bytes, _, _ = results[0]
         self.assertEqual(thumbnail_bytes, b"")
 
     def test_network_error_during_extract_info_yields_friendly_message(self):
@@ -402,46 +407,54 @@ class BuildTitleTest(unittest.TestCase):
         self.assertEqual(worker._build_title({"title": "My Video"}), "My Video [-2:00]")
 
 
-class ResolveUniqueTitleTest(unittest.TestCase):
-    def test_no_conflict_returns_sanitized_title(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            worker = make_worker(out_dir=tmp)
-            title = worker._resolve_unique_title("My Video", "mp4")
-            self.assertEqual(title, "My Video")
+class MoveToOutputTest(unittest.TestCase):
+    def _completed(self, work_dir, name="My Video.mp4", content="new"):
+        path = os.path.join(work_dir, name)
+        with open(path, "w") as f:
+            f.write(content)
+        return path
 
-    def test_conflict_with_known_ext_appends_counter(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            open(os.path.join(tmp, "My Video.mp4"), "w").close()
+    def test_moves_file_with_original_name(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as work:
             worker = make_worker(out_dir=tmp)
-            title = worker._resolve_unique_title("My Video", "mp4")
-            self.assertEqual(title, "My Video (1)")
+            dest = worker._move_to_output(self._completed(work))
+            self.assertEqual(dest, os.path.join(tmp, "My Video.mp4"))
+            self.assertEqual(os.listdir(work), [])
 
-    def test_conflict_increments_until_free_name_found(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            open(os.path.join(tmp, "My Video.mp4"), "w").close()
-            open(os.path.join(tmp, "My Video (1).mp4"), "w").close()
+    def test_existing_file_is_kept_and_counter_is_appended(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as work:
+            for name in ("My Video.mp4", "My Video (1).mp4"):
+                with open(os.path.join(tmp, name), "w") as f:
+                    f.write("old")
             worker = make_worker(out_dir=tmp)
-            title = worker._resolve_unique_title("My Video", "mp4")
-            self.assertEqual(title, "My Video (2)")
 
-    def test_unknown_ext_treats_any_extension_as_conflict(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            open(os.path.join(tmp, "My Video.mkv"), "w").close()
+            dest = worker._move_to_output(self._completed(work))
+
+            self.assertEqual(dest, os.path.join(tmp, "My Video (2).mp4"))
+            with open(os.path.join(tmp, "My Video.mp4")) as f:
+                self.assertEqual(f.read(), "old")
+            with open(dest) as f:
+                self.assertEqual(f.read(), "new")
+
+    def test_other_extension_is_not_a_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as work:
+            open(os.path.join(tmp, "My Video.mp3"), "w").close()
             worker = make_worker(out_dir=tmp)
-            title = worker._resolve_unique_title("My Video", None)
-            self.assertEqual(title, "My Video (1)")
+            dest = worker._move_to_output(self._completed(work))
+            self.assertEqual(dest, os.path.join(tmp, "My Video.mp4"))
 
-    def test_nonexistent_out_dir_returns_sanitized_title_without_error(self):
-        worker = make_worker(out_dir="C:/definitely/does/not/exist/xyz")
-        title = worker._resolve_unique_title("My Video", "mp4")
-        self.assertEqual(title, "My Video")
+    def test_reserved_placeholder_is_removed_when_move_fails(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as work:
+            worker = make_worker(out_dir=tmp)
+            with patch("workers.os.replace", side_effect=PermissionError("locked")), \
+                 self.assertRaises(PermissionError):
+                worker._move_to_output(self._completed(work))
+            self.assertEqual(os.listdir(tmp), [])
 
 
 class PrepareOutputNameTest(unittest.TestCase):
-    def test_audio_conversion_avoids_existing_source_file(self):
-        """mp3変換時、yt-dlpは変換前の名前(Title.webm)が既にあるとダウンロード済みとみなして
-        それを変換の入力に使い、変換後に削除する。既存のユーザーファイルを消さないよう、
-        最終拡張子だけでなく変換前の拡張子の同名ファイルも衝突とみなす"""
+    def test_existing_file_does_not_change_name_inside_work_dir(self):
+        """作業フォルダの中は空なので、保存先の既存ファイルとの重複は移すときに避ける"""
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "My Video.webm"), "w").close()
             worker = make_worker(
@@ -451,32 +464,77 @@ class PrepareOutputNameTest(unittest.TestCase):
 
             worker._prepare_output_name({"title": "My Video", "ext": "webm"})
 
-            self.assertEqual(worker._unique_title, "My Video (1)")
+            self.assertEqual(worker._file_stem, "My Video")
+
+    def test_title_is_sanitized_for_file_name(self):
+        worker = make_worker()
+        worker._prepare_output_name({"title": "a/b", "ext": "mp4"})
+        self.assertNotIn("/", worker._file_stem)
 
 
 class DownloadOutputTemplateTest(unittest.TestCase):
     """タイトルや保存先に含まれる"%("がyt-dlpの出力テンプレートとして解釈されると、
-    実際の保存名が_unique_titleとずれて、衝突判定や後片付けが効かなくなる"""
+    実際の保存名がずれてしまう"""
 
     def test_percent_sequences_in_title_and_folder_are_kept_literally(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out_dir = os.path.join(tmp, "dir %(id)s")
-            worker = make_worker(out_dir=out_dir)
-            worker._unique_title = "50%(half)s [a] 100%"
+            work_dir = os.path.join(tmp, "dir %(id)s")
+            worker = make_worker(out_dir=tmp)
+            worker._work_dir = work_dir
+            worker._file_stem = "50%(half)s [a] 100%"
 
             opts = worker._build_download_opts("mp4", None)
             with yt_dlp.YoutubeDL(opts) as ydl:
                 filename = ydl.prepare_filename({"id": "x", "title": "t", "ext": "mp4"})
 
-            self.assertEqual(filename, os.path.join(out_dir, "50%(half)s [a] 100%.mp4"))
+            self.assertEqual(filename, os.path.join(work_dir, "50%(half)s [a] 100%.mp4"))
+
+
+class WorkDirTest(unittest.TestCase):
+    def test_work_dir_is_created_inside_out_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=os.path.join(tmp, "new"))
+            worker._create_work_dir()
+            self.assertEqual(os.path.dirname(worker._work_dir), os.path.join(tmp, "new"))
+            self.assertTrue(os.path.basename(worker._work_dir).startswith(DownloadWorker.WORK_DIR_PREFIX))
+
+    def test_discard_removes_work_dir_with_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            worker._create_work_dir()
+            open(os.path.join(worker._work_dir, "My Video.mp4.part"), "w").close()
+            worker._discard_work_dir()
+            self.assertEqual(os.listdir(tmp), [])
+            self.assertIsNone(worker._work_dir)
+
+    def test_guess_ignores_incomplete_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            worker._create_work_dir()
+            for name in ("My Video.mp4", "My Video.f137.mp4", "My Video.mp4.part"):
+                open(os.path.join(worker._work_dir, name), "w").close()
+            self.assertEqual(
+                worker._completed_files(allow_guess=True), [os.path.join(worker._work_dir, "My Video.mp4")]
+            )
+            self.assertEqual(worker._completed_files(allow_guess=False), [])
+
+
+class ProgressTextTest(unittest.TestCase):
+    def test_short_text_for_download_list(self):
+        self.assertEqual(
+            DownloadWorker._format_progress_text(42.5, "  1.20MiB/s", "01:00"), "42% 1.20MiB/s 残り01:00"
+        )
+
+    def test_unknown_speed_is_omitted(self):
+        self.assertEqual(DownloadWorker._format_progress_text(0.0, " Unknown B/s", "--:--"), "0% 残り--:--")
+        self.assertEqual(DownloadWorker._format_progress_text(10.0, "", "02:00"), "10% 残り02:00")
 
 
 class ProgressHookTest(unittest.TestCase):
-    def test_cancelled_raises_download_error(self):
-        import yt_dlp
+    def test_cancelled_raises_cancel_exception(self):
         worker = make_worker()
         worker._is_cancelled = True
-        with self.assertRaises(yt_dlp.utils.DownloadError):
+        with self.assertRaises(DownloadCancelledByUser):
             worker._progress_hook({"status": "downloading"})
 
     def test_downloading_emits_progress_and_logs_format_once(self):
@@ -557,27 +615,6 @@ class PostprocessorHookTest(unittest.TestCase):
         worker._postprocessor_hook({"status": "finished", "postprocessor": EXCLUDE_FORMATS_PP_KEY, "info_dict": {}})
         self.assertEqual(logs, [])
         self.assertEqual(worker._active_postprocessors, {})
-
-
-class CleanupLeftoverFilesTest(unittest.TestCase):
-    def test_removes_files_matching_title_prefix(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            worker = make_worker(out_dir=tmp)
-            worker._unique_title = "My Video"
-            open(os.path.join(tmp, "My Video.mp4.part"), "w").close()
-            open(os.path.join(tmp, "Other.mp4"), "w").close()
-
-            worker._cleanup_leftover_files()
-
-            remaining = os.listdir(tmp)
-            self.assertEqual(remaining, ["Other.mp4"])
-
-    def test_noop_when_title_not_resolved_yet(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            worker = make_worker(out_dir=tmp)
-            open(os.path.join(tmp, "Other.mp4"), "w").close()
-            worker._cleanup_leftover_files()
-            self.assertEqual(os.listdir(tmp), ["Other.mp4"])
 
 
 class FormatExclusionRegistrationTest(unittest.TestCase):
@@ -667,66 +704,74 @@ class RunRegistersFfmpegLocationTest(unittest.TestCase):
         self.assertEqual(FFmpegPostProcessor._ffmpeg_location.get(), "C:/previous/ffmpeg")
 
 
+def _make_ydl_factory(probe_info, download_side_effect):
+    def factory(opts):
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        ydl.extract_info.return_value = probe_info
+        ydl.download.side_effect = download_side_effect
+        return ydl
+    return factory
+
+
+def run_worker(worker, download_side_effect, write_part=True, probe_info=None):
+    """yt-dlpをモックしてworker.run()を同期実行し、(失敗/キャンセルの通知, ログ)を返す。
+    write_part=Trueなら、ダウンロード開始時に作業フォルダへ未完成の.partを書き出す"""
+    probe_info = {"title": "My Video", "ext": "mp4", **(probe_info or {})}
+
+    def download(urls):
+        if write_part:
+            open(os.path.join(worker._work_dir, "My Video.mp4.part"), "w").close()
+        if isinstance(download_side_effect, BaseException):
+            raise download_side_effect
+        return download_side_effect(urls)
+
+    errors = []
+    logs = []
+    worker.finished_error.connect(lambda msg: errors.append(msg))
+    # キャンセルは失敗(finished_error)とは別のシグナルで通知される
+    worker.cancelled.connect(lambda: errors.append(CANCELLED))
+    worker.log.connect(lambda msg: logs.append(msg))
+
+    with patch("workers.get_ffmpeg_location", return_value=None), \
+         patch("workers.yt_dlp.YoutubeDL", side_effect=_make_ydl_factory(probe_info, download)):
+        worker.run()
+
+    return errors, logs
+
+
+def write_final(worker, name="My Video.mp4"):
+    """後処理フックが最終ファイルを報告した状態を再現する"""
+    path = os.path.join(worker._work_dir, name)
+    open(path, "w").close()
+    worker._final_filepath = path
+
+
 class RunErrorHandlingTest(unittest.TestCase):
     """run()が失敗した際、キャンセル・ネットワーク切断・その他のいずれの原因でも
-    未完成ファイルを必ず削除すること、およびネットワーク切断時は分かりやすい
+    作業フォルダごと未完成ファイルを必ず削除すること、およびネットワーク切断時は分かりやすい
     日本語メッセージへ変換されることを検証する"""
 
-    @staticmethod
-    def _make_ydl_factory(probe_info, download_side_effect):
-        def factory(opts):
-            ydl = MagicMock()
-            ydl.__enter__.return_value = ydl
-            ydl.__exit__.return_value = False
-            ydl.extract_info.return_value = probe_info
-            ydl.download.side_effect = download_side_effect
-            return ydl
-        return factory
-
     def _run_with(self, tmp, download_side_effect, worker=None):
-        probe_info = {"title": "My Video", "ext": "mp4"}
         worker = worker or make_worker(out_dir=tmp)
-        open(os.path.join(tmp, "My Video.mp4.part"), "w").close()
+        return run_worker(worker, download_side_effect)
 
-        errors = []
-        logs = []
-        worker.finished_error.connect(lambda msg: errors.append(msg))
-        # キャンセルは失敗(finished_error)とは別のシグナルで通知される
-        worker.cancelled.connect(lambda: errors.append(CANCELLED))
-        worker.log.connect(lambda msg: logs.append(msg))
-
-        with patch("workers.get_ffmpeg_location", return_value=None), \
-             patch("workers.yt_dlp.YoutubeDL", side_effect=self._make_ydl_factory(probe_info, download_side_effect)):
-            worker.run()
-
-        return errors, logs
-
-    def test_network_error_removes_leftover_part_file(self):
+    def test_network_error_removes_work_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             errors, _ = self._run_with(tmp, urllib.error.URLError("no route to host"))
             self.assertEqual(len(errors), 1)
-            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertEqual(os.listdir(tmp), [])
 
-    def test_error_is_reported_even_if_cleanup_cannot_list_folder(self):
-        """失敗時の後片付けで保存先の一覧取得が失敗しても(権限・ネットワークドライブの切断等)、
-        finished_errorは必ず送る。送られないとUIがダウンロード中のまま固まる"""
-        with tempfile.TemporaryDirectory() as tmp:
-            real_listdir = os.listdir
-            state = {"downloading": False}
-
-            def failing_download(urls):
-                state["downloading"] = True
-                raise RuntimeError("unsupported format")
-
-            def listdir(path):
-                if state["downloading"]:
-                    raise PermissionError("access denied")
-                return real_listdir(path)
-
-            with patch("workers.os.listdir", side_effect=listdir):
-                errors, _ = self._run_with(tmp, failing_download)
-
-            self.assertEqual(errors, ["unsupported format"])
+    def test_error_is_reported_even_if_work_dir_cannot_be_removed(self):
+        """作業フォルダを消せなくても(ウイルス対策ソフトによるロック等)、finished_errorは必ず送る。
+        送られないとUIがダウンロード中のまま固まる"""
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("workers.shutil.rmtree"), \
+             patch("workers.log_debug") as log_mock:
+            errors, _ = self._run_with(tmp, RuntimeError("unsupported format"))
+        self.assertEqual(errors, ["unsupported format"])
+        self.assertTrue(any("作業フォルダを削除できませんでした" in c.args[0] for c in log_mock.call_args_list))
 
     def test_network_error_message_is_user_friendly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -734,26 +779,21 @@ class RunErrorHandlingTest(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("ネットワーク接続が切断されたため", errors[0])
 
-    def test_non_network_error_still_removes_leftover_part_file(self):
+    def test_non_network_error_still_removes_work_dir(self):
         """ネットワーク切断に限らず、失敗理由を問わず未完成ファイルを削除する"""
         with tempfile.TemporaryDirectory() as tmp:
             errors, _ = self._run_with(tmp, RuntimeError("unsupported format"))
-            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertEqual(os.listdir(tmp), [])
             self.assertEqual(errors, ["unsupported format"])
 
-    def test_non_network_error_message_is_unchanged(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            errors, _ = self._run_with(tmp, RuntimeError("unsupported format"))
-            self.assertEqual(errors, ["unsupported format"])
-
-    def test_cancelled_download_removes_leftover_part_file(self):
+    def test_cancelled_download_removes_work_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker = make_worker(out_dir=tmp)
             worker._is_cancelled = True
             errors, _ = self._run_with(
                 tmp, yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました"), worker=worker,
             )
-            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertEqual(os.listdir(tmp), [])
             self.assertEqual(errors, [CANCELLED])
 
     def test_cancellation_takes_priority_over_network_wording(self):
@@ -778,22 +818,16 @@ class RunErrorHandlingTest(unittest.TestCase):
             errors, _ = self._run_with(tmp, download, worker=worker)
             self.assertEqual(errors, [CANCELLED])
             download.assert_not_called()
+            self.assertEqual(os.listdir(tmp), [])
 
     def test_cancel_during_clip_trim_removes_untrimmed_file(self):
         """切り抜き中のキャンセルでは、要求範囲になっていない動画全体を完成品として残さない"""
         with tempfile.TemporaryDirectory() as tmp:
             worker = make_worker(out_dir=tmp, clip_start=10.0, clip_end=20.0)
-
-            def complete(urls):
-                final_path = os.path.join(tmp, f"{worker._unique_title}.mp4")
-                open(final_path, "w").close()
-                worker._final_filepath = final_path
-
             with patch("workers.trim_clip", side_effect=ClipCancelledError()):
-                errors, _ = self._run_with(tmp, complete, worker=worker)
+                errors, _ = self._run_with(tmp, lambda urls: write_final(worker), worker=worker)
             self.assertEqual(errors, [CANCELLED])
-            # (_run_withが置く"My Video.mp4.part"は別タイトルの残骸なので対象外)
-            self.assertFalse(os.path.exists(worker._final_filepath))
+            self.assertEqual(os.listdir(tmp), [])
 
     def test_failure_records_traceback_in_log(self):
         with tempfile.TemporaryDirectory() as tmp, patch("workers.log_debug") as log_mock:
@@ -802,48 +836,172 @@ class RunErrorHandlingTest(unittest.TestCase):
 
     def test_cancel_after_download_completes_keeps_final_file(self):
         """後処理中にキャンセルするとdownload()は例外を投げずに正常終了し、
-        完成した最終ファイルが出来ている。これをクリーンアップで消してはいけない
+        完成した最終ファイルが出来ている。これは消さずに保存先へ移す
         (未完成の中間ファイルだけを削除する)"""
         with tempfile.TemporaryDirectory() as tmp:
             worker = make_worker(out_dir=tmp)
-            final_path = os.path.join(tmp, "My Video.mp4")
 
             def complete_then_cancel(urls):
-                open(final_path, "w").close()
-                worker._final_filepath = final_path
+                write_final(worker)
                 worker._is_cancelled = True
 
             errors, logs = self._run_with(tmp, complete_then_cancel, worker=worker)
 
             self.assertEqual(errors, [CANCELLED])
-            self.assertIn("My Video.mp4", os.listdir(tmp))
-            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
             self.assertTrue(any("完成済みのファイルは残しました" in log for log in logs))
 
-    def test_cleanup_keeps_preexisting_file_with_other_extension(self):
-        """同じタイトルを別拡張子で再ダウンロードして失敗しても、開始前から
-        存在していた過去の完成ファイル(拡張子違い)は削除しない。
-        _resolve_unique_titleは拡張子が違えば衝突とみなさないため、
-        前方一致のクリーンアップが無関係なファイルを巻き込みうる"""
+    def test_postprocess_failure_is_a_complete_failure(self):
+        """本編は完成し、サムネイル埋め込み等の後処理だけが失敗した場合も、要求どおりの
+        ファイルにはなっていないため完全な失敗とみなし、保存先には何も残さない"""
         with tempfile.TemporaryDirectory() as tmp:
-            previous = os.path.join(tmp, "My Video.mp3")
-            open(previous, "w").close()
+            worker = make_worker(out_dir=tmp)
+
+            def complete_then_fail(urls):
+                write_final(worker)
+                raise RuntimeError("embed thumbnail failed")
+
+            errors, _ = self._run_with(tmp, complete_then_fail, worker=worker)
+
+            self.assertEqual(errors, ["embed thumbnail failed"])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_cancel_during_postprocess_discards_file(self):
+        """後処理の途中で止まった(例外で抜けた)場合も、要求どおりのファイルではないため残さない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+
+            def complete_then_cancel_midway(urls):
+                write_final(worker)
+                worker.cancel()
+                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+
+            errors, _ = self._run_with(tmp, complete_then_cancel_midway, worker=worker)
+
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_failure_never_touches_files_already_in_out_dir(self):
+        """保存先にもともとある同名のファイルは、完成品も未完成ファイルも消さない
+        (作業フォルダの外には一切触れない)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            names = ["My Video.mp3", "My Video.mp4", "My Video.mp4.part", "My Video.f137.mp4"]
+            for name in names:
+                open(os.path.join(tmp, name), "w").close()
 
             errors, _ = self._run_with(tmp, RuntimeError("unsupported format"))
 
             self.assertEqual(errors, ["unsupported format"])
-            self.assertTrue(os.path.isfile(previous))
-            self.assertNotIn("My Video.mp4.part", os.listdir(tmp))
+            self.assertEqual(sorted(os.listdir(tmp)), sorted(names))
 
-    def test_cleanup_still_removes_preexisting_part_file(self):
-        """開始前から残っていても、.part等の未完成ファイルは前回の失敗の残骸なので削除する"""
+
+class RunSuccessTest(unittest.TestCase):
+    def _run(self, worker, download_side_effect):
+        finished = []
+        worker.finished_ok.connect(finished.append)
+        errors, logs = run_worker(worker, download_side_effect)
+        self.saved_paths = finished
+        return bool(finished), errors, logs
+
+    def test_completed_file_is_moved_to_out_dir_and_work_dir_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            open(os.path.join(tmp, "My Video.f137.mp4"), "w").close()
-            open(os.path.join(tmp, "My Video.mp4.ytdl"), "w").close()
+            worker = make_worker(out_dir=tmp)
+            ok, errors, logs = self._run(worker, lambda urls: write_final(worker))
+            self.assertTrue(ok)
+            self.assertEqual(errors, [])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+            # 画面から選択表示できるよう、保存先のパスを通知する
+            self.assertEqual(self.saved_paths, [os.path.join(tmp, "My Video.mp4")])
+            self.assertTrue(any(log.startswith(f"保存先: {os.path.join(tmp, 'My Video.mp4')}") for log in logs))
 
-            self._run_with(tmp, RuntimeError("boom"))
+    def test_existing_file_with_same_name_gets_counter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "My Video.mp4"), "w").close()
+            worker = make_worker(out_dir=tmp)
+            ok, _, _ = self._run(worker, lambda urls: write_final(worker))
+            self.assertTrue(ok)
+            self.assertEqual(sorted(os.listdir(tmp)), ["My Video (1).mp4", "My Video.mp4"])
 
+    def test_file_is_found_without_postprocessor_report(self):
+        """後処理が1つも走らない形式では最終ファイルが報告されないため、作業フォルダから探す"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+
+            def complete(urls):
+                os.remove(os.path.join(worker._work_dir, "My Video.mp4.part"))
+                open(os.path.join(worker._work_dir, "My Video.mp4"), "w").close()
+
+            ok, _, _ = self._run(worker, complete)
+            self.assertTrue(ok)
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+
+    def test_failure_after_delivery_does_not_move_delivered_file_again(self):
+        """保存先へ移した後に失敗しても、移した完成品を "(1)" 付きへ移し直さない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            with patch("workers.format_size", side_effect=RuntimeError("boom")):
+                ok, errors, _ = self._run(worker, lambda urls: write_final(worker))
+            self.assertFalse(ok)
+            self.assertEqual(errors, ["boom"])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+
+    def test_missing_output_is_reported_as_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp)
+            ok, errors, _ = self._run(worker, lambda urls: None)
+            self.assertFalse(ok)
+            self.assertEqual(len(errors), 1)
             self.assertEqual(os.listdir(tmp), [])
+
+
+class ParallelSameTitleTest(unittest.TestCase):
+    """タイトルが同じ別々の動画を同じ保存先へ同時にダウンロードしても、互いのファイルを
+    上書き・削除しない。もう一方のダウンロード全体を、こちらのダウンロード中に実行して再現する"""
+
+    def test_both_succeed_with_distinct_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = make_worker(out_dir=tmp, url="https://example.com/watch?v=a")
+            second = make_worker(out_dir=tmp, url="https://example.com/watch?v=b")
+
+            def first_download(urls):
+                run_worker(second, lambda urls: write_final(second))
+                write_final(first)
+
+            errors, _ = run_worker(first, first_download)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(sorted(os.listdir(tmp)), ["My Video (1).mp4", "My Video.mp4"])
+
+    def test_failure_of_one_keeps_the_others_completed_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = make_worker(out_dir=tmp, url="https://example.com/watch?v=a")
+            second = make_worker(out_dir=tmp, url="https://example.com/watch?v=b")
+
+            def first_download(urls):
+                run_worker(second, lambda urls: write_final(second))
+                raise RuntimeError("network down")
+
+            errors, _ = run_worker(first, first_download)
+
+            self.assertEqual(errors, ["network down"])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+
+    def test_failure_of_one_keeps_the_others_work_in_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = make_worker(out_dir=tmp, url="https://example.com/watch?v=a")
+            second = make_worker(out_dir=tmp, url="https://example.com/watch?v=b")
+            observed = {}
+
+            def first_download(urls):
+                run_worker(second, RuntimeError("network down"))
+                observed["part"] = os.listdir(first._work_dir)
+                write_final(first)
+
+            errors, _ = run_worker(first, first_download)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(observed["part"], ["My Video.mp4.part"])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
 
 
 class FetchImageBytesTest(unittest.TestCase):
@@ -897,7 +1055,8 @@ class DownloadRequestTest(unittest.TestCase):
 class BaseYdlOptsTest(unittest.TestCase):
     def test_minimal(self):
         self.assertEqual(
-            _base_ydl_opts(), {"quiet": True, "no_warnings": True, "noplaylist": True, "color": "no_color"}
+            _base_ydl_opts(),
+            {"quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True, "color": "no_color"},
         )
 
     def test_optional_keys(self):
@@ -906,38 +1065,738 @@ class BaseYdlOptsTest(unittest.TestCase):
         self.assertEqual(opts["ffmpeg_location"], "C:/ffmpeg")
 
 
-class CancelDuringPostprocessKeepsFinalFileTest(unittest.TestCase):
-    """Review Focus 2: download()が例外なく戻った後にキャンセル済みだった場合
-    (後処理中のキャンセル)、完成済みファイルは残し.partだけを消す"""
+def _live_ydl_factory(normal_info, from_start_info=None, from_start_error=None):
+    """live_from_startの有無で結果を変えるYoutubeDLの代わり。生成時のoptsを記録する"""
+    created_opts = []
 
-    def test_keeps_final_and_removes_part(self):
+    def factory(opts):
+        created_opts.append(opts)
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        if opts.get("live_from_start"):
+            if from_start_error is not None:
+                ydl.extract_info.side_effect = from_start_error
+            else:
+                ydl.extract_info.return_value = from_start_info
+        else:
+            ydl.extract_info.return_value = normal_info
+        return ydl
+
+    return factory, created_opts
+
+
+class FormatListWorkerLiveTest(unittest.TestCase):
+    URL = "https://www.youtube.com/live/abc"
+
+    def _run(self, factory):
+        results, errors = [], []
+        worker = FormatListWorker(self.URL)
+        worker.finished_ok.connect(lambda *args: results.append(args))
+        worker.finished_error.connect(errors.append)
+        with patch("workers.get_ffmpeg_location", return_value=None), \
+             patch("workers.yt_dlp.YoutubeDL", side_effect=factory):
+            worker.run()
+        return results, errors
+
+    def test_normal_video_has_no_live_info_and_is_extracted_once(self):
+        factory, created = _live_ydl_factory({"title": "Video", "duration": 60, "formats": []})
+        results, _ = self._run(factory)
+        self.assertIsNone(results[0][4])
+        self.assertEqual(len(created), 1)
+
+    def test_live_that_can_be_recorded_from_start(self):
+        normal = {"title": "Stream 2026-10-02 19:06", "live_status": "is_live",
+                  "release_timestamp": 1790928042, "formats": []}
+        factory, created = _live_ydl_factory(normal, from_start_info={"title": "Stream", "formats": []})
+        results, _ = self._run(factory)
+        _, title, _, duration, live_info = results[0]
+        self.assertEqual(live_info, LiveInfo(started_at=1790928042, can_record_from_start=True))
+        self.assertEqual(title, "Stream")
+        self.assertIsNone(duration)
+        self.assertTrue(created[1]["live_from_start"])
+
+    def test_live_without_from_start_formats(self):
+        normal = {"title": "Stream 2026-10-02 19:06", "live_status": "is_live",
+                  "release_timestamp": 1790928042, "formats": []}
+        error = yt_dlp.utils.ExtractorError("--live-from-start is passed, but there are no formats")
+        factory, _ = _live_ydl_factory(normal, from_start_error=error)
+        results, errors = self._run(factory)
+        self.assertEqual(errors, [])
+        _, title, _, _, live_info = results[0]
+        self.assertEqual(live_info, LiveInfo(started_at=1790928042, can_record_from_start=False))
+        self.assertEqual(title, "Stream")
+
+    def test_upcoming_live_reports_japanese_message(self):
+        factory, _ = _live_ydl_factory({"title": "Soon", "live_status": "is_upcoming", "formats": []})
+        results, errors = self._run(factory)
+        self.assertEqual(results, [])
+        self.assertEqual(errors, [FormatListWorker.UPCOMING_LIVE_ERROR])
+
+    def test_yt_dlp_upcoming_error_is_replaced_with_japanese_message(self):
+        """配信開始前のライブでは、yt-dlpはinfoを返さずに英語のエラーを送出することが多い"""
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.__exit__.return_value = False
+        ydl.extract_info.side_effect = yt_dlp.utils.ExtractorError("This live event will begin in 3 hours.")
+        results, errors = self._run(lambda opts: ydl)
+        self.assertEqual(errors, [FormatListWorker.UPCOMING_LIVE_ERROR])
+
+
+class LiveFromStartProgressHookTest(unittest.TestCase):
+    def _worker(self, component_count=2, started_at=None):
+        worker = make_worker(live_mode="from_start")
+        worker._start_live_state({
+            "requested_formats": [{"format_id": "298"}, {"format_id": "140"}][:component_count],
+            "release_timestamp": started_at,
+        })
+        return worker
+
+    @staticmethod
+    def _hook_info(fmt_id, index, count, downloaded=1000):
+        return {
+            "status": "downloading",
+            "info_dict": {"format_id": fmt_id, "ext": "mp4", "vcodec": "avc1", "acodec": "none"},
+            "fragment_index": index,
+            "fragment_count": count,
+            "downloaded_bytes": downloaded,
+        }
+
+    def test_stop_raises_keyboard_interrupt_on_every_downloading_call(self):
+        """yt-dlpはKeyboardInterruptをライブの正常な終わりとして扱い、結合まで行う。
+        映像・音声の両スレッドを止めるため、1回きりではなく毎回送出する"""
+        worker = self._worker()
+        worker.cancel()
+        for fmt_id in ("298", "140", "298"):
+            with self.assertRaises(KeyboardInterrupt):
+                worker._progress_hook(self._hook_info(fmt_id, 10, 4000))
+
+    def test_stop_does_not_interrupt_finished_status(self):
+        """結合前の後始末(finished)の報告までは止めない"""
+        worker = self._worker()
+        worker.cancel()
+        worker._progress_hook({"status": "finished", "info_dict": {"format_id": "298"}, "filename": "x.mp4"})
+
+    def test_normal_download_cancel_raises_cancel_exception(self):
+        worker = make_worker()
+        worker.cancel()
+        with self.assertRaises(DownloadCancelledByUser):
+            worker._progress_hook({"status": "downloading"})
+
+    def test_catch_up_progress_follows_slowest_component(self):
+        worker = self._worker()
+        events = []
+        worker.progress.connect(lambda pct, text: events.append((pct, text)))
+        worker._progress_hook(self._hook_info("140", 3000, 4000))
+        worker._progress_hook(self._hook_info("298", 1000, 4000))
+        self.assertEqual(events[-1], (25.0, "さかのぼり取得中 25%"))
+
+    def test_after_catching_up_shows_recording_time_and_total_size(self):
+        worker = self._worker(component_count=1, started_at=1000.0)
+        events = []
+        worker.progress.connect(lambda pct, text: events.append((pct, text)))
+        with patch("workers.time.time", return_value=1000.0 + 754):
+            worker._progress_hook(self._hook_info("298", 4000, 4000, downloaded=345 * 1024 * 1024))
+        self.assertEqual(events[-1], (-1.0, "録画中 12:34 · 345.0MB"))
+
+    def test_finished_component_ends_live_state_once_with_saving_text(self):
+        worker = self._worker()
+        states, events = [], []
+        worker.live_state_changed.connect(states.append)
+        worker.progress.connect(lambda pct, text: events.append(text))
+        worker.cancel()
+        for fmt_id in ("298", "140"):
+            worker._progress_hook({"status": "finished", "info_dict": {"format_id": fmt_id}, "filename": "x"})
+        self.assertEqual(states, [False])
+        self.assertEqual(events, ["保存しています..."])
+
+    def test_stream_end_shows_ended_text(self):
+        worker = self._worker()
+        events = []
+        worker.progress.connect(lambda pct, text: events.append(text))
+        worker._progress_hook({"status": "finished", "info_dict": {"format_id": "298"}, "filename": "x"})
+        self.assertEqual(events, ["配信終了・保存しています..."])
+
+
+class LiveFromStartRunTest(unittest.TestCase):
+    def test_download_opts_request_live_from_start(self):
         with tempfile.TemporaryDirectory() as tmp:
-            worker = make_worker(out_dir=tmp)
-            final_path = os.path.join(tmp, "My Video.mp4")
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            worker._file_stem = "Stream"
+            worker._create_work_dir()
+            self.addCleanup(worker._discard_work_dir)
+            opts = worker._build_download_opts("mp4", None)
+        self.assertTrue(opts["live_from_start"])
+        self.assertNotIn("concurrent_fragment_downloads", opts)
 
-            def fake_download(urls):
-                open(final_path, "w").close()
-                open(os.path.join(tmp, "My Video.f137.mp4.part"), "w").close()
-                worker._final_filepath = final_path
-                worker.cancel()
+    def test_stopped_recording_is_saved_as_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            oks, states = [], []
+            worker.finished_ok.connect(oks.append)
+            worker.live_state_changed.connect(states.append)
 
-            def factory(opts):
-                ydl = MagicMock()
-                ydl.__enter__.return_value = ydl
-                ydl.__exit__.return_value = False
-                ydl.extract_info.return_value = {"title": "My Video", "ext": "mp4"}
-                ydl.download.side_effect = fake_download
-                return ydl
+            def download(urls):
+                write_final(worker)
+                worker.cancel()  # 録画中に停止ボタンが押された
+                return 0
 
-            errors = []
-            worker.finished_error.connect(errors.append)
-            worker.cancelled.connect(lambda: errors.append(CANCELLED))
-            with patch("workers.get_ffmpeg_location", return_value=None), \
-                 patch("workers.yt_dlp.YoutubeDL", side_effect=factory):
-                worker.run()
+            errors, _ = run_worker(worker, download)
 
-            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(errors, [])
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            self.assertEqual(states, [True, False])
             self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+
+    def test_stop_before_any_data_is_reported_as_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.cancel()  # .partしか無いうちに停止
+                return 0
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, ["録画できたデータがありません"])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_keyboard_interrupt_escaping_yt_dlp_is_reported_as_error(self):
+        """yt-dlpがKeyboardInterruptをライブの終わりとして扱わずにそのまま送出した場合も、
+        スレッドが例外で落ちず、失敗として知らせる"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            errors, _ = run_worker(worker, KeyboardInterrupt())
+            self.assertEqual(errors, ["録画できたデータがありません"])
+            self.assertEqual(os.listdir(tmp), [])
+
+
+class FakeLiveRecorder:
+    """LiveRecorderの代わり。生成時に指定された.tsへ書き、指定の終了コードを返す"""
+
+    data = b"ts-data"
+    returncode = 0
+    created: list = []
+
+    def __init__(self, ffmpeg_location, inputs, output_path, on_progress, should_stop):
+        self.output_path = output_path
+        self.on_progress = on_progress
+        FakeLiveRecorder.created.append(self)
+
+    def record(self):
+        from live_recorder import RecordingProgress
+        if self.data:
+            with open(self.output_path, "wb") as f:
+                f.write(self.data)
+        self.on_progress(RecordingProgress(seconds=754, size_bytes=345 * 1024 * 1024))
+        return self.returncode
+
+
+def fake_remux(ffmpeg_location, ts_path, output_path, extract_audio_codec):
+    with open(ts_path, "rb") as src, open(output_path, "wb") as dst:
+        dst.write(src.read())
+
+
+class LiveFromNowRunTest(unittest.TestCase):
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def _run(self, tmp, **request):
+        worker = make_worker(out_dir=tmp, live_mode="from_now", **request)
+        oks, states, progress = [], [], []
+        worker.finished_ok.connect(oks.append)
+        worker.live_state_changed.connect(states.append)
+        worker.progress.connect(lambda pct, text: progress.append((pct, text)))
+        # run_workerのprobe_infoには配信のURLが無いため、ffmpegへの入力の組み立ても差し替える
+        with patch("workers.LiveRecorder", FakeLiveRecorder), \
+             patch("workers.live_inputs", return_value=[]), \
+             patch("workers.remux_recording", side_effect=fake_remux) as remux_mock:
+            errors, logs = run_worker(worker, RuntimeError("yt-dlpのダウンロードは使わない"), write_part=False)
+        return oks, errors, logs, states, progress, remux_mock
+
+    def test_recording_is_remuxed_and_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, errors, _, states, progress, _ = self._run(tmp)
+            self.assertEqual(errors, [])
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            self.assertEqual(os.listdir(tmp), ["My Video.mp4"])
+            self.assertEqual(states, [True, False])
+            self.assertIn((-1.0, "録画中 12:34 · 345.0MB"), progress)
+            self.assertEqual(progress[-1], (-1.0, "配信終了・保存しています..."))
+
+    def test_audio_only_format_is_saved_as_m4a(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            postprocessors = [{"key": "FFmpegExtractAudio", "preferredcodec": "best"}]
+            oks, _, _, _, _, remux_mock = self._run(tmp, postprocessors=postprocessors)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.m4a")])
+            self.assertEqual(remux_mock.call_args.args[3], "best")
+
+    def test_ffmpeg_failure_still_saves_what_was_recorded(self):
+        """通信断等でffmpegが途中で止まっても、録画できた分には価値があるため保存する"""
+        FakeLiveRecorder.returncode = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, errors, logs, _, _, _ = self._run(tmp)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(oks), 1)
+            self.assertTrue(any("録画が途中で止まりました" in msg for msg in logs))
+
+    def test_nothing_recorded_is_reported_as_error(self):
+        FakeLiveRecorder.data = b""
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, errors, _, _, _, _ = self._run(tmp)
+            self.assertEqual(oks, [])
+            self.assertEqual(errors, ["録画できたデータがありません"])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_thumbnail_is_embedded_into_remuxed_file(self):
+        """今からの録画はyt-dlpの後処理を通らないため、サムネイルの埋め込みを別に行う"""
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(DownloadWorker, "_embed_live_thumbnail") as embed_mock:
+            oks, *_ = self._run(tmp)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            embed_mock.assert_called_once()
+            self.assertEqual(os.path.basename(embed_mock.call_args.args[1]), "My Video.mp4")
+
+    def test_stop_request_is_passed_to_recorder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            captured = {}
+
+            class CapturingRecorder(FakeLiveRecorder):
+                def __init__(self, ffmpeg_location, inputs, output_path, on_progress, should_stop):
+                    super().__init__(ffmpeg_location, inputs, output_path, on_progress, should_stop)
+                    captured["should_stop"] = should_stop
+
+            with patch("workers.LiveRecorder", CapturingRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=fake_remux):
+                run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertFalse(captured["should_stop"]())
+            worker.cancel()
+            self.assertTrue(captured["should_stop"]())
+
+
+class EmbedLiveThumbnailTest(unittest.TestCase):
+    PROBE_INFO = {
+        "title": "My Video",
+        "vcodec": "avc1.4d401f",
+        "acodec": "mp4a.40.2",
+        "thumbnail": "https://example.com/maxresdefault_live.webp",
+        "thumbnails": [{"url": "https://example.com/hqdefault_live.jpg", "width": 480, "height": 360}],
+    }
+
+    def _embed(self, tmp, name="My Video.mp4", fetch=None, pp_run=None):
+        worker = make_worker(out_dir=tmp, live_mode="from_now")
+        worker._work_dir = tmp
+        worker._file_stem = "My Video"
+        output_path = os.path.join(tmp, name)
+        open(output_path, "wb").close()
+        logs = []
+        worker.log.connect(logs.append)
+        pp = MagicMock()
+        pp.run.side_effect = pp_run or (lambda info: ([], info))
+        with patch("workers.fetch_image_bytes", side_effect=fetch or (lambda url, timeout: b"image")) as fetch_mock, \
+             patch("workers.EmbedThumbnailPP", return_value=pp):
+            worker._embed_live_thumbnail(self.PROBE_INFO, output_path, None)
+        return pp, fetch_mock, logs
+
+    def test_embeds_downloaded_thumbnail_into_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, _, logs = self._embed(tmp)
+            info = pp.run.call_args.args[0]
+            self.assertEqual(info["filepath"], os.path.join(tmp, "My Video.mp4"))
+            self.assertEqual(info["ext"], "mp4")
+            thumbnail_path = info["thumbnails"][-1]["filepath"]
+            self.assertEqual(thumbnail_path, os.path.join(tmp, "My Video.webp"))
+            with open(thumbnail_path, "rb") as f:
+                self.assertEqual(f.read(), b"image")
+            self.assertEqual(logs, [])
+
+    def test_falls_back_to_next_candidate(self):
+        def fetch(url, timeout):
+            if url.endswith(".webp"):
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            return b"jpg"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, _, _ = self._embed(tmp, fetch=fetch)
+            info = pp.run.call_args.args[0]
+            self.assertEqual(info["thumbnails"][-1]["filepath"], os.path.join(tmp, "My Video.jpg"))
+
+    def test_fetch_failure_keeps_recording_without_thumbnail(self):
+        def fetch(url, timeout):
+            raise urllib.error.URLError("offline")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, _, logs = self._embed(tmp, fetch=fetch)
+            pp.run.assert_not_called()
+            self.assertTrue(any("サムネイルを取得できなかった" in msg for msg in logs))
+
+    def test_embed_failure_is_logged_not_raised(self):
+        def pp_run(info):
+            raise yt_dlp.utils.PostProcessingError("embed failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, logs = self._embed(tmp, pp_run=pp_run)
+            self.assertTrue(any("embed failed" in msg for msg in logs))
+
+    def test_ts_fallback_is_not_embedded(self):
+        """入れ替えに失敗して.tsのまま保存する場合、.tsには埋め込めないため取得もしない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, fetch_mock, _ = self._embed(tmp, name="My Video.ts")
+            fetch_mock.assert_not_called()
+            pp.run.assert_not_called()
+
+
+class LiveRangeInFileNameTest(unittest.TestCase):
+    """配信の最初から最後までを録画できなかった場合、ファイル名に録画した範囲(配信開始からの時刻)を付ける"""
+
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def _run_from_now(self, tmp, cancel=False):
+        worker = make_worker(out_dir=tmp, live_mode="from_now")
+        oks = []
+        worker.finished_ok.connect(oks.append)
+
+        class StoppableRecorder(FakeLiveRecorder):
+            def record(self):
+                if cancel:
+                    worker.cancel()
+                return super().record()
+
+        # 配信開始(941)の59秒後(1000)に録画を始め、14秒録画した
+        with patch("workers.LiveRecorder", StoppableRecorder), \
+             patch("workers.live_inputs", return_value=[]), \
+             patch("workers.remux_recording", side_effect=fake_remux), \
+             patch("workers.time.time", return_value=1000.0), \
+             patch.object(DownloadWorker, "_recorded_duration", return_value=14.2):
+            errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False,
+                                   probe_info={"release_timestamp": 941})
+        self.assertEqual(errors, [])
+        return oks
+
+    def test_from_now_stopped_has_start_and_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks = self._run_from_now(tmp, cancel=True)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [0_59-1_13].mp4")])
+            self.assertEqual(os.listdir(tmp), ["My Video [0_59-1_13].mp4"])
+
+    def test_from_now_interrupted_by_ffmpeg_failure_has_end(self):
+        FakeLiveRecorder.returncode = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            oks = self._run_from_now(tmp)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [0_59-1_13].mp4")])
+
+    def test_from_now_until_stream_end_has_start_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks = self._run_from_now(tmp)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [0_59-].mp4")])
+
+    def _run_from_start(self, tmp, cancel):
+        worker = make_worker(out_dir=tmp, live_mode="from_start")
+        oks = []
+        worker.finished_ok.connect(oks.append)
+
+        def download(urls):
+            write_final(worker)
+            if cancel:
+                worker.cancel()
+            return 0
+
+        with patch.object(DownloadWorker, "_recorded_duration", return_value=73.0) as duration_mock:
+            errors, _ = run_worker(worker, download, probe_info={"release_timestamp": 941})
+        self.assertEqual(errors, [])
+        return oks, duration_mock
+
+    def test_from_start_stopped_has_end_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, _ = self._run_from_start(tmp, cancel=True)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video [-1_13].mp4")])
+
+    def test_from_start_until_stream_end_keeps_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oks, duration_mock = self._run_from_start(tmp, cancel=False)
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.mp4")])
+            duration_mock.assert_not_called()
+
+
+class LiveFromNowFormatFallbackTest(unittest.TestCase):
+    """今から録画するライブのHLSは映像のみ・音声のみ(音声はext=mp4でacodec不明)に分かれており、
+    「動画 (最高画質 mp4)」の指定(ba[ext=m4a]や最後の"/b")のどれにも一致しない"""
+
+    def _probe_format(self, live_mode):
+        created = []
+
+        def factory(opts):
+            created.append(opts)
+            ydl = MagicMock()
+            ydl.__enter__.return_value = ydl
+            ydl.__exit__.return_value = False
+            ydl.extract_info.return_value = {"title": "Stream"}
+            return ydl
+
+        worker = make_worker(format_spec="bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b", live_mode=live_mode)
+        with patch("workers.yt_dlp.YoutubeDL", side_effect=factory):
+            worker._probe()
+        return created[0]["format"]
+
+    def test_from_now_falls_back_to_separate_video_and_audio(self):
+        self.assertEqual(self._probe_format("from_now"), "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b/bv*+ba")
+
+    def test_normal_video_spec_is_unchanged(self):
+        self.assertEqual(self._probe_format(None), "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b")
+
+
+class LiveReviewFixesTest(unittest.TestCase):
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def test_remux_failure_keeps_the_recording_as_ts(self):
+        """何時間もの録画を、入れ替え(mp4等)の失敗で失わない。録画した.tsのまま保存する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            oks = []
+            worker.finished_ok.connect(oks.append)
+            with patch("workers.LiveRecorder", FakeLiveRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=RuntimeError("Unknown encoder 'libmp3lame'")):
+                errors, logs = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(errors, [])
+            self.assertEqual(oks, [os.path.join(tmp, "My Video.ts")])
+            self.assertEqual(os.listdir(tmp), ["My Video.ts"])
+            self.assertTrue(any("libmp3lame" in msg for msg in logs))
+
+    def test_stop_before_first_fragment_reports_no_data(self):
+        """最初の区切りが取れる前に停止すると、yt-dlpは英語のエラー(The downloaded file is empty)を送出する"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.cancel()
+                raise yt_dlp.utils.DownloadError("ERROR: The downloaded file is empty")
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, ["録画できたデータがありません"])
+
+    def test_stop_during_probe_reports_no_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            worker.cancel()
+            errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(errors, ["録画できたデータがありません"])
+
+
+
+class LiveDiscardTest(unittest.TestCase):
+    """停止時に「破棄」を選んだ場合は、録画した分を結合・変換せずに消し、キャンセルとして知らせる"""
+
+    def setUp(self):
+        FakeLiveRecorder.data = b"ts-data"
+        FakeLiveRecorder.returncode = 0
+        FakeLiveRecorder.created = []
+
+    def test_discard_raises_cancel_exception_instead_of_keyboard_interrupt(self):
+        """KeyboardInterruptだとyt-dlpは結合まで行うため、中止として止める"""
+        worker = LiveFromStartProgressHookTest._worker(self)
+        worker.discard()
+        for fmt_id in ("298", "140"):
+            with self.assertRaises(DownloadCancelledByUser):
+                worker._progress_hook(LiveFromStartProgressHookTest._hook_info(fmt_id, 10, 4000))
+
+    def test_discard_shows_discarding_text(self):
+        worker = LiveFromStartProgressHookTest._worker(self)
+        events = []
+        worker.progress.connect(lambda pct, text: events.append(text))
+        worker.discard()
+        worker._progress_hook({"status": "finished", "info_dict": {"format_id": "298"}, "filename": "x"})
+        self.assertEqual(events, ["破棄しています..."])
+
+    def test_from_start_discard_during_download_is_cancelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.discard()
+                raise yt_dlp.utils.DownloadError("ユーザーによりキャンセルされました")
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_start_discard_after_merge_does_not_keep_file(self):
+        """結合が済んだ後に破棄を選んだ場合も、保存先には残さない"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+            oks = []
+            worker.finished_ok.connect(oks.append)
+
+            def download(urls):
+                write_final(worker)
+                worker.discard()
+                return 0
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(oks, [])
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_start_discard_with_escaping_keyboard_interrupt_is_cancelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_start")
+
+            def download(urls):
+                worker.discard()
+                raise KeyboardInterrupt
+
+            errors, _ = run_worker(worker, download)
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_now_discard_skips_remux_and_removes_recording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            oks = []
+            worker.finished_ok.connect(oks.append)
+
+            class DiscardingRecorder(FakeLiveRecorder):
+                def record(self):
+                    returncode = super().record()
+                    worker.discard()
+                    return returncode
+
+            with patch("workers.LiveRecorder", DiscardingRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=fake_remux) as remux_mock:
+                errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(oks, [])
+            self.assertEqual(errors, [CANCELLED])
+            remux_mock.assert_not_called()
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_from_now_discard_stops_the_recorder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            captured = {}
+
+            class CapturingRecorder(FakeLiveRecorder):
+                def __init__(self, ffmpeg_location, inputs, output_path, on_progress, should_stop):
+                    super().__init__(ffmpeg_location, inputs, output_path, on_progress, should_stop)
+                    captured["should_stop"] = should_stop
+
+            with patch("workers.LiveRecorder", CapturingRecorder), \
+                 patch("workers.live_inputs", return_value=[]), \
+                 patch("workers.remux_recording", side_effect=fake_remux):
+                run_worker(worker, RuntimeError("unused"), write_part=False)
+            worker.discard()
+            self.assertTrue(captured["should_stop"]())
+
+    def test_discard_during_probe_is_cancelled_not_no_data_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = make_worker(out_dir=tmp, live_mode="from_now")
+            worker.discard()
+            errors, _ = run_worker(worker, RuntimeError("unused"), write_part=False)
+            self.assertEqual(errors, [CANCELLED])
+
+
+
+class FragmentedDownloadCancelTest(unittest.TestCase):
+    """断片(DASHのセグメント等)に分かれた形式では、yt-dlpは2番目以降の断片のDownloadErrorを
+    「その断片だけ取れなかった」として握りつぶし、次の断片へ進む。キャンセルが残り全ての断片に
+    接続し終えるまで効かなかったため、本物の断片ダウンロード処理を通して止まることを確かめる"""
+
+    def _run_fragments(self, worker, stop, stop_at=2, fragment_count=10):
+        from yt_dlp.downloader.dash import DashSegmentsFD
+
+        ydl = yt_dlp.YoutubeDL({"quiet": True, "noprogress": True})
+        self.addCleanup(ydl.close)
+        fd = DashSegmentsFD(ydl, ydl.params)
+        # YoutubeDL.dl()と同じく、ダウンロード処理へ進捗フックを登録する
+        fd.add_progress_hook(worker._progress_hook)
+        calls = []
+
+        def download_fragment(ctx, frag_url, info_dict, headers=None, request_data=None):
+            calls.append(frag_url)
+            if len(calls) == stop_at:
+                stop()
+            fd._hook_progress({"status": "downloading", "downloaded_bytes": 1, "filename": "x"}, info_dict)
+            return True
+
+        fd._download_fragment = download_fragment
+        fd._read_fragment = lambda ctx: b"data"
+        fd._append_fragment = lambda ctx, content: None
+        fragments = [{"url": f"frag{i}", "frag_index": i + 1, "index": i} for i in range(fragment_count)]
+        ctx = {"dest_stream": io.BytesIO(), "tmpfilename": "x", "fragment_index": 0}
+        raised = None
+        try:
+            fd.download_and_append_fragments(ctx, fragments, {"http_headers": {}}, is_fatal=lambda idx: idx == 0)
+        except BaseException as e:  # noqa: BLE001 - 何が送出されたかを確かめる
+            raised = e
+        return calls, raised
+
+    def test_cancel_stops_at_the_current_fragment(self):
+        worker = make_worker()
+        calls, raised = self._run_fragments(worker, worker.cancel)
+        self.assertEqual(len(calls), 2)
+        self.assertIsInstance(raised, DownloadCancelledByUser)
+
+    def test_live_discard_stops_at_the_current_fragment(self):
+        worker = make_worker(live_mode="from_start")
+        worker._start_live_state({"requested_formats": [{"format_id": "298"}]})
+        calls, raised = self._run_fragments(worker, worker.discard)
+        self.assertEqual(len(calls), 2)
+        self.assertIsInstance(raised, DownloadCancelledByUser)
+
+
+
+class CancelReleasesOpenFilesTest(unittest.TestCase):
+    """キャンセルで中断したyt-dlpは、書き込み中のファイル(結合前の.part)を閉じずに、
+    例外のトレースバックとの循環参照に残す。Windowsでは開いたままのファイルを削除できず、
+    作業フォルダが保存先に残っていた"""
+
+    def _run_cancel_holding_file(self, tmp, make_error):
+        """make_errorは送出する例外を作る関数。yt-dlpと同じく例外は送出のたびに作り、
+        テストが例外(とそのトレースバック)を掴み続けないようにする"""
+        worker = make_worker(out_dir=tmp)
+        handles = []
+
+        def download(urls):
+            stream = open(os.path.join(worker._work_dir, "My Video.f299.mp4.part"), "wb")  # noqa: SIM115
+            ctx = {"dest_stream": stream}
+            ctx["self"] = ctx  # yt-dlpの内部と同じく、循環参照でのみ生き残るようにする
+            handles.append(weakref.ref(stream))
+            del stream
+            worker.cancel()
+            raise make_error()
+
+        real_rmtree = shutil.rmtree
+
+        def windows_like_rmtree(path, ignore_errors=False):
+            # Windowsと同じく、開いたままのファイルがあれば削除できない
+            if any(ref() is not None and not ref().closed for ref in handles):
+                return
+            real_rmtree(path, ignore_errors=ignore_errors)
+
+        with patch("workers.shutil.rmtree", side_effect=windows_like_rmtree):
+            errors, _ = run_worker(worker, download, write_part=False)
+        return errors
+
+    def test_cancel_removes_work_dir_even_if_yt_dlp_left_file_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors = self._run_cancel_holding_file(tmp, lambda: DownloadCancelledByUser("ユーザーによりキャンセルされました"))
+            self.assertEqual(errors, [CANCELLED])
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_failure_removes_work_dir_even_if_yt_dlp_left_file_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors = self._run_cancel_holding_file(tmp, lambda: yt_dlp.utils.DownloadError("ERROR: network"))
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(os.listdir(tmp), [])
 
 
 if __name__ == "__main__":

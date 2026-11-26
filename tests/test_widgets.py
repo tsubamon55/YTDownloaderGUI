@@ -311,5 +311,130 @@ class DrawColumnsTest(unittest.TestCase):
         self.assertEqual([call.args[2] for call in painter.drawText.call_args_list], ["a", "b"])
 
 
+class DownloadTaskSpinnerTest(unittest.TestCase):
+    def setUp(self):
+        self.task = widgets.DownloadTaskWidget("title")
+        self.addCleanup(self.task.deleteLater)
+
+    def test_spinner_runs_while_downloading(self):
+        self.assertTrue(self.task.spinner.isVisibleTo(self.task))
+        self.assertTrue(self.task.spinner._timer.isActive())
+
+    def test_spinner_keeps_running_while_cancelling(self):
+        """キャンセルは区切りが来るまで効かないため、止まるまでは回し続ける"""
+        self.task.set_cancelling()
+        self.assertTrue(self.task.spinner._timer.isActive())
+
+    def test_spinner_stops_when_finished(self):
+        for saved_path in ("C:/out/title.mp4", None):
+            task = widgets.DownloadTaskWidget("title")
+            self.addCleanup(task.deleteLater)
+            task.mark_finished("done", saved_path=saved_path)
+            self.assertFalse(task.spinner.isVisibleTo(task))
+            self.assertFalse(task.spinner._timer.isActive())
+
+
+class DownloadTaskLiveTest(unittest.TestCase):
+    def setUp(self):
+        self.task = widgets.DownloadTaskWidget("title")
+        self.addCleanup(self.task.deleteLater)
+
+    def test_live_shows_badge_and_stop_button(self):
+        self.task.set_live(True)
+        self.assertFalse(self.task.live_badge.isHidden())
+        self.assertEqual(self.task.live_badge.text(), "● LIVE")
+        self.assertEqual(self.task.action_btn.text(), "停止")
+
+    def test_normal_task_has_no_badge(self):
+        self.assertTrue(self.task.live_badge.isHidden())
+        self.assertEqual(self.task.action_btn.text(), "キャンセル")
+
+    def test_stop_button_requests_stop_instead_of_cancel(self):
+        self.task.set_live(True)
+        stops, cancels = [], []
+        self.task.stop_requested.connect(lambda: stops.append(True))
+        self.task.cancel_requested.connect(lambda: cancels.append(True))
+        self.task.action_btn.click()
+        self.assertEqual((stops, cancels), ([True], []))
+
+    def test_negative_percent_makes_bar_indeterminate(self):
+        self.task.set_progress(-1.0, "録画中 0:05")
+        self.assertEqual(self.task.progress_bar.maximum(), 0)
+        self.assertEqual(self.task.status_label.text(), "録画中 0:05")
+
+    def test_percent_after_indeterminate_restores_range(self):
+        self.task.set_progress(-1.0, "録画中 0:05")
+        self.task.set_progress(37.0, "さかのぼり取得中 37%")
+        self.assertEqual((self.task.progress_bar.maximum(), self.task.progress_bar.value()), (100, 37))
+
+    def test_stopping_live_shows_saving(self):
+        self.task.set_live(True)
+        self.task.set_cancelling()
+        self.assertEqual(self.task.status_label.text(), "保存しています...")
+        self.assertFalse(self.task.action_btn.isEnabled())
+
+    def test_discarding_live_shows_discarding(self):
+        self.task.set_live(True)
+        self.task.set_cancelling(discarding=True)
+        self.assertEqual(self.task.status_label.text(), "破棄しています...")
+        self.assertFalse(self.task.action_btn.isEnabled())
+
+    def test_finished_after_indeterminate_shows_full_bar(self):
+        self.task.set_live(True)
+        self.task.set_progress(-1.0, "保存しています...")
+        self.task.mark_finished("完了", saved_path="/out/x.mp4")
+        self.assertEqual((self.task.progress_bar.maximum(), self.task.progress_bar.value()), (100, 100))
+        self.assertEqual(self.task.action_btn.text(), "閉じる")
+        self.assertFalse(self.task.live_badge.isHidden())
+
+    def test_failed_after_indeterminate_stops_animation(self):
+        self.task.set_progress(-1.0, "録画中 0:05")
+        self.task.mark_finished("失敗しました")
+        self.assertEqual(self.task.progress_bar.maximum(), 100)
+
+
+class MarqueeProgressBarTest(unittest.TestCase):
+    """割合が無い間の流れる線。スタイルシートの既定ではバーの半分の長さで回り込むため、自前で描く"""
+
+    def _bar(self, width):
+        bar = widgets.MarqueeProgressBar("#d93025")
+        self.addCleanup(bar.deleteLater)
+        bar.setFixedSize(width, 6)
+        return bar
+
+    def test_segment_is_quarter_of_width(self):
+        self.assertEqual(self._bar(300).segment_rect(0).width(), 75)
+
+    def test_narrow_bar_keeps_minimum_segment(self):
+        self.assertEqual(self._bar(60).segment_rect(0).width(), widgets.MarqueeProgressBar.MIN_SEGMENT_WIDTH)
+
+    def test_segment_enters_from_left_and_leaves_to_right_without_wrapping(self):
+        bar = self._bar(300)
+        self.assertEqual(bar.segment_rect(0).right(), 0)
+        self.assertAlmostEqual(bar.segment_rect(bar.CYCLE_MS // 2).center().x(), 150)
+        self.assertAlmostEqual(bar.segment_rect(bar.CYCLE_MS - 1).left(), 300, delta=1)
+
+    def test_animates_only_while_visible_and_busy(self):
+        bar = self._bar(300)
+        bar.setRange(0, 0)
+        self.assertFalse(bar._timer.isActive())
+        bar.show()
+        self.assertTrue(bar._timer.isActive())
+        bar.setRange(0, 100)
+        self.assertFalse(bar._timer.isActive())
+        bar.setRange(0, 0)
+        bar.hide()
+        self.assertFalse(bar._timer.isActive())
+
+    def test_task_finished_stops_animation(self):
+        task = widgets.DownloadTaskWidget("title")
+        self.addCleanup(task.deleteLater)
+        task.show()
+        task.set_progress(-1.0, "録画中 0:05")
+        self.assertTrue(task.progress_bar._timer.isActive())
+        task.mark_finished("完了", saved_path="/out/x.mp4")
+        self.assertFalse(task.progress_bar._timer.isActive())
+
+
 if __name__ == "__main__":
     unittest.main()

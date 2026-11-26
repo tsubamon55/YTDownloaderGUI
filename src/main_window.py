@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from PyQt6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer
 from PyQt6.QtGui import QCloseEvent, QMouseEvent, QPixmap
@@ -22,7 +22,7 @@ from clip_range import (
     resolve_clip_range,
 )
 from config import CONFIG
-from folder_opener import open_folder
+from folder_opener import open_folder, reveal_file
 from format_engine import (
     FormatSelection,
     compute_auto_format_note,
@@ -41,7 +41,16 @@ from formats import (
     has_video,
     is_codec_container_mismatch,
 )
-from main_window_ui import IDLE_STATUS_TEXT, Ui_MainWindow, toggle_button_text
+from live import LiveInfo, LiveMode
+from main_window_ui import (
+    DOWNLOAD_BUTTON_TEXT,
+    DOWNLOAD_PANEL_WIDTH,
+    IDLE_STATUS_TEXT,
+    RECORD_BUTTON_TEXT,
+    THUMBNAIL_SIZE,
+    Ui_MainWindow,
+    toggle_button_text,
+)
 from paths import FFMPEG_EXECUTABLE_NAME, get_downloads_folder, get_ffmpeg_location, log_debug
 from storyboard import StoryboardTile, select_storyboard_format, storyboard_tile_for_time
 from updater import (
@@ -51,7 +60,7 @@ from updater import (
     download_dir,
     get_current_version,
 )
-from widgets import HandleName, ScrubPreviewPopup
+from widgets import DownloadTaskWidget, HandleName, ScrubPreviewPopup
 from workers import DownloadRequest, DownloadWorker, FormatListWorker, StoryboardFragmentWorker
 
 
@@ -80,7 +89,10 @@ class MainWindow(Ui_MainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        self.download_worker: DownloadWorker | None = None
+        # 並列に走っているダウンロードと、画面右上の一覧でそれぞれを表示しているウィジェット
+        self._download_tasks: dict[DownloadWorker, DownloadTaskWidget] = {}
+        # 録画中のタスク。一覧の先頭側にまとめて並べ、通常のダウンロードはその下に積む
+        self._recording_task_widgets: list[DownloadTaskWidget] = []
         # 結果を反映する対象の取得ワーカー。URL変更・再取得で差し替わる(古い結果は捨てる)
         self.format_worker: FormatListWorker | None = None
         # 差し替え済みも含め、まだ走っている取得ワーカー(終了時に待つ対象)
@@ -92,10 +104,15 @@ class MainWindow(Ui_MainWindow):
         self._pending_update_sha256 = ""
         # 適用待ちの間に表示している「適用中」ダイアログ。終了が取り消された場合に閉じる
         self._update_progress_dialog: QProgressDialog | None = None
-        self.last_output_dir: str | None = None
+        # 終了の確認で「はい」を選んだ後か(録画の保存を待ってから閉じ直すときに、確認を出し直さないため)
+        self._close_confirmed = False
+        # 終了時に録画の保存を待っている間に出す「保存しています」ダイアログ
+        self._saving_dialog: QProgressDialog | None = None
         self.info_ready = False
         self.available_formats: list[Format] = []
         self.video_duration: float | None = None
+        # 表示中の動画が配信中のライブなら、その情報(さかのぼれるか等)。通常の動画ではNone
+        self.live_info: LiveInfo | None = None
         self.storyboard_format: Format | None = None
         self._storyboard_cache: dict[str, QPixmap] = {}
         self._storyboard_workers: set[StoryboardFragmentWorker] = set()
@@ -103,11 +120,19 @@ class MainWindow(Ui_MainWindow):
         # 動画が切り替わるたびに増やす番号。取得中に動画が変わった古いストーリーボードの結果を
         # 新しい動画のキャッシュに混ぜないよう、取得開始時の番号と照らし合わせる
         self._storyboard_generation = 0
+        # 手動設定を開く前のウィンドウ幅。手動設定はフォーマットの列幅の分だけウィンドウを広げるため、
+        # 自動設定に戻したときにこの幅へ戻す
+        self._width_before_manual: int | None = None
 
         self._info_fetch_timer = QTimer(self)
         self._info_fetch_timer.setSingleShot(True)
         self._info_fetch_timer.setInterval(CONFIG.info_fetch_debounce_ms)
         self._info_fetch_timer.timeout.connect(lambda: self.fetch_formats(auto=True))
+
+        # ライブの「配信開始から」の経過時間を1秒ごとに更新する(ライブを表示している間だけ動かす)
+        self._live_elapsed_timer = QTimer(self)
+        self._live_elapsed_timer.setInterval(1000)
+        self._live_elapsed_timer.timeout.connect(self._update_live_elapsed)
 
         # 他のダイアログの表示中に届いたアップデートの提案(version, download_url, asset_name, sha256)と、
         # それを閉じられた後に改めて出すためのタイマー
@@ -160,8 +185,6 @@ class MainWindow(Ui_MainWindow):
         self.audio_format_combo.currentIndexChanged.connect(self.on_manual_selection_changed)
         self.browse_btn.clicked.connect(self.browse_folder)
         self.download_btn.clicked.connect(self.start_download)
-        self.cancel_btn.clicked.connect(self.cancel_download)
-        self.open_folder_btn.clicked.connect(self.open_output_folder)
         self.log_toggle_btn.toggled.connect(self.on_log_toggle)
         self.detail_toggle_btn.toggled.connect(self.on_detail_toggled)
         self.clip_range_slider.rangeChanged.connect(self.on_clip_slider_changed)
@@ -215,10 +238,9 @@ class MainWindow(Ui_MainWindow):
         self.format_worker = None
         self.spinner.stop()
         # URLが削除・変更・別のものに貼り替えられた場合、直前の動画に対する選択
-        # (フォーマット・mp3変換・クリップ範囲・進捗バー等)が次の動画にそのまま
+        # (フォーマット・mp3変換・クリップ範囲等)が次の動画にそのまま
         # 引き継がれてしまわないよう、都度すべての入力内容をリセットする
         self._clear_video_info()
-        self.progress_bar.reset()
         self.status_label.setText(IDLE_STATUS_TEXT)
 
         if _looks_like_url(text):
@@ -228,6 +250,7 @@ class MainWindow(Ui_MainWindow):
         """表示中の動画の情報(タイトル・サムネイル・フォーマット・クリップ範囲)を破棄し、
         ダウンロードできない状態に戻す"""
         self.info_ready = False
+        self._show_live_info(None)
         self.download_btn.setEnabled(False)
         self.title_label.setText("")
         self.thumbnail_label.clear()
@@ -275,8 +298,14 @@ class MainWindow(Ui_MainWindow):
         self.auto_format_container.setVisible(not checked)
         # auto_format_container が非表示の間は代わりにスペーサーへ伸縮を持たせる
         self.format_row.setStretch(1, 1 if checked else 0)
+        if checked and self._width_before_manual is None:
+            self._width_before_manual = self.width()
         self.manual_container.setVisible(checked)
         self._sync_window_height()
+        if not checked and self._width_before_manual is not None:
+            # 手動設定の列幅に合わせて広がった分を戻す(_sync_window_heightで最小サイズは解除済み)
+            self.resize(self._width_before_manual, self.height())
+            self._width_before_manual = None
         has_items = self.video_format_combo.count() > 0
         self.video_format_combo.setEnabled(checked and has_items)
         self.audio_format_combo.setEnabled(checked and has_items)
@@ -311,8 +340,8 @@ class MainWindow(Ui_MainWindow):
         self.format_worker = worker
         self._format_workers.add(worker)
         worker.finished_ok.connect(
-            lambda formats, title, thumb, duration, w=worker: self.on_formats_fetched(
-                formats, title, thumb, duration, w, auto
+            lambda formats, title, thumb, duration, live_info, w=worker: self.on_formats_fetched(
+                formats, title, thumb, duration, w, auto, live_info
             )
         )
         worker.finished_error.connect(
@@ -328,6 +357,7 @@ class MainWindow(Ui_MainWindow):
         duration: float | None,
         worker: FormatListWorker,
         auto: bool = False,
+        live_info: LiveInfo | None = None,
     ) -> None:
         self._release_format_worker(worker)
         if worker is not self.format_worker:
@@ -352,7 +382,11 @@ class MainWindow(Ui_MainWindow):
             if pixmap.loadFromData(thumbnail_bytes):
                 self.thumbnail_label.setPixmap(self._fit_thumbnail_pixmap(pixmap))
 
-        self.status_label.setText(f"動画{video_count}件・音声{audio_count}件を検出しました")
+        self._show_live_info(live_info)
+        if live_info is not None:
+            self.status_label.setText("配信中のライブを検出しました")
+        else:
+            self.status_label.setText(f"動画{video_count}件・音声{audio_count}件を検出しました")
         self.spinner.stop()
         self.info_ready = True
         self.download_btn.setEnabled(True)
@@ -424,6 +458,58 @@ class MainWindow(Ui_MainWindow):
         else:
             self.status_label.setText("フォーマット取得に失敗しました")
             dialogs.critical(self, "フォーマット取得エラー", message)
+
+    def _show_live_info(self, live_info: LiveInfo | None) -> None:
+        """配信中のライブかどうかに合わせて、LIVE見出し・録画開始位置の行・ボタンの文言を切り替える。
+
+        手動設定(フォーマットIDがさかのぼり用と今から用で異なる)と切り抜き範囲(長さが決まらない)は
+        ライブでは使えないため、無効表示ではなく隠す。通常の動画に戻ったら元に戻す"""
+        was_live = self.live_info is not None
+        self.live_info = live_info
+        is_live = live_info is not None
+        if is_live:
+            self.manual_toggle_btn.setChecked(False)
+            self.detail_toggle_btn.setChecked(False)
+        self.manual_toggle_btn.setVisible(not is_live)
+        self.detail_toggle_btn.setVisible(not is_live)
+        self.live_header.setVisible(is_live)
+        self.live_start_container.setVisible(is_live)
+        can_go_back = live_info is not None and live_info.can_record_from_start
+        self.live_from_start_radio.setVisible(can_go_back)
+        self.live_from_now_radio.setVisible(can_go_back)
+        self.live_unavailable_label.setVisible(is_live and not can_go_back)
+        self.live_from_start_radio.setChecked(True)
+        self.download_btn.setText(RECORD_BUTTON_TEXT if is_live else DOWNLOAD_BUTTON_TEXT)
+        # LIVE見出しの分だけタイトルを詰め、サムネイルの高さに収める
+        title_height = THUMBNAIL_SIZE.height()
+        if is_live:
+            title_height -= self.live_header.maximumHeight() + 2
+        self.title_label.setMaximumHeight(title_height)
+        if is_live:
+            self._update_live_elapsed()
+            self._live_elapsed_timer.start()
+        else:
+            self._live_elapsed_timer.stop()
+        if is_live != was_live:
+            # URLを打ち替えるたびにウィンドウの高さを合わせ直さないよう、ライブと通常の動画が切り替わる時だけにする
+            self._sync_window_height()
+
+    def _update_live_elapsed(self) -> None:
+        started_at = self.live_info.started_at if self.live_info is not None else None
+        if started_at is None:
+            self.live_elapsed_label.setText("")
+            self.live_from_start_radio.setText("配信の最初から")
+            return
+        elapsed = format_clip_time(max(0.0, time.time() - started_at))
+        self.live_elapsed_label.setText(f"配信開始から {elapsed}")
+        self.live_from_start_radio.setText(f"配信の最初から（{elapsed} さかのぼる）")
+
+    def _selected_live_mode(self) -> LiveMode | None:
+        if self.live_info is None:
+            return None
+        if self.live_info.can_record_from_start and self.live_from_start_radio.isChecked():
+            return "from_start"
+        return "from_now"
 
     def _update_clip_slider_range(self) -> None:
         """動画の長さが判明した時点で、スライダーの範囲を0〜動画の長さに合わせる。
@@ -602,9 +688,17 @@ class MainWindow(Ui_MainWindow):
             self.out_edit.setText(folder)
             self.settings.setValue("last_output_dir", folder)
 
-    def open_output_folder(self) -> None:
-        if self.last_output_dir and os.path.isdir(self.last_output_dir):
-            open_folder(self.last_output_dir)
+    def _reveal_saved_file(self, path: str) -> None:
+        """保存したファイルを選択した状態でフォルダを開く。完了後に移動・削除されていれば、
+        フォルダだけが残っていればそれを開き、それも無ければ知らせる"""
+        if os.path.isfile(path):
+            reveal_file(path)
+            return
+        folder = os.path.dirname(path)
+        if os.path.isdir(folder):
+            open_folder(folder)
+            return
+        dialogs.information(self, "フォルダを開く", f"保存したファイルが見つかりません:\n{path}")
 
     def _check_for_updates(self) -> None:
         worker = UpdateCheckWorker()
@@ -628,7 +722,7 @@ class MainWindow(Ui_MainWindow):
     def on_update_available(self, version: str, download_url: str, asset_name: str, sha256: str) -> None:
         if not download_url or not asset_name or not sha256:
             return
-        if self.download_worker is not None and self.download_worker.isRunning():
+        if self._running_downloads():
             # 更新の適用にはアプリの終了が必要なため、動画のダウンロード中には提案しない
             # (次回起動時に改めて確認される)
             log_debug(f"on_update_available: ダウンロード中のため {version} への更新提案を見送りました")
@@ -732,15 +826,6 @@ class MainWindow(Ui_MainWindow):
         progress.close()
         progress.deleteLater()
 
-    def set_inputs_enabled(self, enabled: bool) -> None:
-        for widget in self.input_widgets:
-            widget.setEnabled(enabled)
-        if enabled:
-            self.on_manual_toggled(self.manual_toggle_btn.isChecked())
-            # video_format_combo等と同様、動画の長さが判明していない間は無効のままにしたいため、
-            # 一括enable後に補正する(値は変更せず有効/無効のみ再判定する)
-            self.detail_container.setEnabled(bool(self.video_duration and self.video_duration > 0))
-
     def append_log(self, msg: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{timestamp}] {msg}")
@@ -797,23 +882,104 @@ class MainWindow(Ui_MainWindow):
             # 始めると、適用時に中止するかどうかを迫られることになる
             dialogs.information(self, "アップデート中", "アップデートのダウンロード中は動画をダウンロードできません。")
             return
+        if self._is_downloading_url(self.url_edit.text().strip()):
+            # 同じ動画を続けて開始するのはボタンの押し間違いであることが多いため、二重に保存せず知らせる
+            # (別々の作業フォルダで処理するので、同時に走らせてもファイルが壊れることはない)
+            dialogs.information(self, "ダウンロード中", "この動画は既にダウンロード中です。")
+            return
         request = self._build_download_request()
         if request is None or not self._prepare_output_dir(request.out_dir):
             return
 
-        self._set_busy(True)
-        self.download_btn.setEnabled(False)
-        self.open_folder_btn.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.status_label.setText("ダウンロード中...")
+        title = self.title_label.text() or request.url
+        worker = DownloadWorker(request)
+        task = DownloadTaskWidget(title, self.thumbnail_label.pixmap())
+        is_recording = request.live_mode is not None
+        task.set_live(is_recording)
+        self._download_tasks[worker] = task
+        self._add_task_widget(task, recording=is_recording)
 
-        self.download_worker = DownloadWorker(request)
-        self.download_worker.progress.connect(self.on_progress)
-        self.download_worker.log.connect(self.append_log)
-        self.download_worker.finished_ok.connect(self.on_finished_ok)
-        self.download_worker.finished_error.connect(self.on_finished_error)
-        self.download_worker.cancelled.connect(self.on_cancelled)
-        self.download_worker.start()
+        worker.progress.connect(task.set_progress)
+        # 複数のダウンロードのログが混ざるため、どの動画のものか分かるように添える
+        worker.log.connect(lambda msg, t=title: self.append_log(f"[{t}] {msg}"))
+        worker.finished_ok.connect(lambda saved_path, w=worker: self.on_download_finished_ok(w, saved_path))
+        worker.finished_error.connect(lambda message, w=worker: self.on_download_error(w, message))
+        worker.cancelled.connect(lambda w=worker: self.on_download_cancelled(w))
+        worker.live_state_changed.connect(lambda live, t=task: self._on_live_state_changed(t, live))
+        task.cancel_requested.connect(lambda w=worker: self.cancel_download(w))
+        task.stop_requested.connect(lambda w=worker: self.request_stop_recording(w))
+        task.dismiss_requested.connect(lambda t=task: self._remove_task_widget(t))
+        task.reveal_requested.connect(self._reveal_saved_file)
+        worker.start()
+
+        # 続けて次の動画を入力できるよう入力欄を空にする(textChangedを通じて
+        # フォーマット選択・クリップ範囲等もまとめて初期化される)
+        self.url_edit.clear()
+        # 手動設定のフォーマットは動画ごとに選び直すものなので、既定の自動設定に戻す
+        # (手動設定の列幅に合わせて広がったウィンドウ幅も、on_manual_toggledで元に戻る)
+        self.manual_toggle_btn.setChecked(False)
+        self.status_label.setText("ダウンロードを開始しました")
+
+    def _is_downloading_url(self, url: str) -> bool:
+        return any(worker.request.url == url for worker in self._running_downloads())
+
+    def _running_downloads(self) -> list[DownloadWorker]:
+        return [worker for worker in self._download_tasks if worker.isRunning()]
+
+    @staticmethod
+    def _is_recording(worker: DownloadWorker) -> bool:
+        return worker.request.live_mode is not None
+
+    def _add_task_widget(self, task: DownloadTaskWidget, recording: bool = False) -> None:
+        """新しいものほど上に表示する。録画中のものは通常のダウンロードより上に置き、
+        通常のダウンロードが何件増えてもスクロールしないうちから見えるようにする"""
+        if recording:
+            self.download_list_layout.insertWidget(0, task)
+            self._recording_task_widgets.append(task)
+        else:
+            self.download_list_layout.insertWidget(len(self._recording_task_widgets), task)
+        self._set_download_panel_visible(True)
+
+    def _move_below_recordings(self, task: DownloadTaskWidget) -> None:
+        """録画が終わったタスクを、録画中のものの下(通常の一覧の先頭)へ移す(録画中でなければ何もしない)"""
+        if task not in self._recording_task_widgets:
+            return
+        self._recording_task_widgets.remove(task)
+        self.download_list_layout.removeWidget(task)
+        self.download_list_layout.insertWidget(len(self._recording_task_widgets), task)
+
+    def _on_live_state_changed(self, task: DownloadTaskWidget, live: bool) -> None:
+        if not live:
+            self._move_below_recordings(task)
+
+    def _remove_task_widget(self, task: DownloadTaskWidget) -> None:
+        self._move_below_recordings(task)
+        self.download_list_layout.removeWidget(task)
+        task.deleteLater()
+        # 末尾の伸縮用スペーサーだけが残ったら一覧を隠す
+        if self.download_list_layout.count() <= 1:
+            self._set_download_panel_visible(False)
+
+    def _set_download_panel_visible(self, visible: bool) -> None:
+        """一覧の表示/非表示に合わせて、左側の入力欄の幅が変わらないようウィンドウ幅を増減する"""
+        if self.download_panel.isHidden() != visible:
+            return
+        # 表示した瞬間に、Qtが「左側の最小幅+一覧」までウィンドウを自動で広げることがある
+        # (ライブの「配信の最初から（H:MM:SS さかのぼる）」等で左側の最小幅が広い場合)。
+        # その分を二重に足さないよう、表示前の幅を基準にする
+        width_before = self.width()
+        self.download_panel.setVisible(visible)
+        central = self.centralWidget()
+        assert central is not None
+        layout = central.layout()
+        assert layout is not None
+        delta = DOWNLOAD_PANEL_WIDTH + layout.spacing()
+        if not visible:
+            delta = -delta
+        self.resize(width_before + delta, self.height())
+        # 手動設定を開いている間に一覧が出入りした場合も、自動設定に戻したときの幅を一覧の分だけ合わせる
+        if self._width_before_manual is not None:
+            self._width_before_manual += delta
 
     def _build_download_request(self) -> DownloadRequest | None:
         """入力内容を検証・確認してダウンロード要求を組み立てる。入力エラーや
@@ -847,6 +1013,8 @@ class MainWindow(Ui_MainWindow):
             exclude_mismatched=not self.manual_toggle_btn.isChecked(),
             clip_start=clip_start,
             clip_end=clip_end,
+            live_mode=self._selected_live_mode(),
+            embed_thumbnail=not self.no_thumbnail_checkbox.isChecked(),
         )
 
     def _check_required_inputs(self, url: str, out_dir: str) -> bool:
@@ -931,23 +1099,49 @@ class MainWindow(Ui_MainWindow):
                 self, "入力エラー", f"保存先フォルダを作成できませんでした:\n{out_dir}\n\n{e}"
             )
             return False
-        self.last_output_dir = out_dir
         self.settings.setValue("last_output_dir", out_dir)
         return True
 
-    def _set_busy(self, busy: bool) -> None:
-        """ダウンロード中/待機中で切り替わる入力欄・キャンセルボタン・スピナーをまとめて設定する"""
-        self.set_inputs_enabled(not busy)
-        self.cancel_btn.setEnabled(busy)
-        if busy:
-            self.spinner.start()
-        else:
-            self.spinner.stop()
+    def cancel_download(self, worker: DownloadWorker) -> None:
+        worker.cancel()
+        task = self._download_tasks.get(worker)
+        if task is not None:
+            task.set_cancelling()
 
-    def cancel_download(self) -> None:
-        if self.download_worker is not None:
-            self.download_worker.cancel()
-            self.status_label.setText("キャンセル中...")
+    def request_stop_recording(self, worker: DownloadWorker) -> None:
+        """今からの録画は止めると取り直せないため、押し間違いでないか確かめ、録画した分を
+        保存するか破棄するかを選んでもらってから止める"""
+        action = self._ask_recording_stop_action()
+        if action == "save":
+            self.cancel_download(worker)
+        elif action == "discard":
+            worker.discard()
+            task = self._download_tasks.get(worker)
+            if task is not None:
+                task.set_cancelling(discarding=True)
+
+    def _ask_recording_stop_action(self) -> Literal["save", "discard"] | None:
+        """録画の停止で、保存・破棄・キャンセル(録画を続ける)のどれかを選んでもらう。
+        押し間違いで録画が止まらないよう、Enter・Esc・×はいずれもキャンセルになる"""
+        box = QMessageBox(self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("録画の停止")
+        box.setText("録画を停止します。録画した分を保存しますか?")
+        save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton("破棄", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        box.deleteLater()
+        if clicked is save_btn:
+            return "save"
+        if clicked is discard_btn:
+            return "discard"
+        return None
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
         """終了時に、走っているワーカースレッドを止めて終了を待つ。
@@ -955,14 +1149,20 @@ class MainWindow(Ui_MainWindow):
         待たずに閉じるとQThreadがrun()(ネットワークダウンロード中やffmpegの切り抜き処理中)
         のままインタプリタ終了処理に入り、"QThread: Destroyed while thread is still running"
         を招く。yt-dlp/ffmpegが中途半端に打ち切られ、DownloadWorker側の後片付けも走らないため
-        .part等の未完成ファイルが保存先に残ってしまう。
+        未完成ファイルの入った作業フォルダが保存先に残ってしまう。
         """
         assert event is not None
-        if self.download_worker is not None and self.download_worker.isRunning():
+        if self._saving_dialog is not None:
+            # 録画の保存を待っている間に、もう一度閉じようとした。保存が終われば自動で閉じる
+            event.ignore()
+            return
+
+        running_downloads = self._running_downloads()
+        if running_downloads and not self._close_confirmed:
             reply = dialogs.question(
                 self,
                 "ダウンロード中",
-                "ダウンロードが進行中です。中止して終了しますか?",
+                self._close_confirmation_text(running_downloads),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -978,8 +1178,20 @@ class MainWindow(Ui_MainWindow):
                     )
                 event.ignore()
                 return
-            self.download_worker.cancel()
-            self.status_label.setText("キャンセル中...")
+            self._close_confirmed = True
+            # 確認ダイアログを出している間に終わったものがあり得るため、改めて数え直す
+            # (終わった録画を待とうとすると、保存待ちのまま二度と閉じられなくなる)
+            running_downloads = self._running_downloads()
+        for download in running_downloads:
+            self.cancel_download(download)
+
+        if any(self._is_recording(w) for w in running_downloads):
+            # 録画の保存(結合・再格納)は長い録画では数分かかることがあり、待ち時間に上限を設けると
+            # 録画を失う。UIスレッドで待つと「保存しています」の表示も描画されないため、終了はいったん
+            # 取り消し、録画が全部終わったところで改めて閉じる(_close_after_recordings)
+            self._show_saving_dialog()
+            event.ignore()
+            return
 
         if self.update_download_worker is not None:
             self.update_download_worker.cancel()
@@ -1020,10 +1232,51 @@ class MainWindow(Ui_MainWindow):
                 )
         event.accept()
 
+    def _close_confirmation_text(self, running_downloads: list[DownloadWorker]) -> str:
+        recordings = sum(1 for w in running_downloads if self._is_recording(w))
+        downloads = len(running_downloads) - recordings
+        parts = []
+        if recordings:
+            parts.append(f"録画中の{recordings}件を停止・保存し")
+        if downloads:
+            parts.append(f"ダウンロード中の{downloads}件を中止し")
+        return "、".join(parts) + "て終了しますか?"
+
+    def _show_saving_dialog(self) -> None:
+        dialog = QProgressDialog("録画を保存しています。保存が終わると自動的に終了します...", None, 0, 0, self)
+        dialog.setWindowTitle("終了")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        # Esc・閉じるボタンで隠されると、操作を続けた後に保存が終わったところで突然アプリが終了してしまうため、
+        # 保存が終わるまで出し続ける
+        dialog.canceled.connect(self._keep_saving_dialog_shown)
+        dialog.rejected.connect(self._keep_saving_dialog_shown)
+        dialog.show()
+        self._saving_dialog = dialog
+
+    def _keep_saving_dialog_shown(self) -> None:
+        # 隠す処理が終わってから表示し直す
+        QTimer.singleShot(0, self._reshow_saving_dialog)
+
+    def _reshow_saving_dialog(self) -> None:
+        if self._saving_dialog is not None:
+            self._saving_dialog.show()
+
+    def _close_after_recordings(self) -> None:
+        """終了の待ちの間に録画が全部終わったら、改めてウィンドウを閉じる"""
+        if self._saving_dialog is None:
+            return
+        if any(self._is_recording(w) for w in self._running_downloads()):
+            return
+        self._saving_dialog.close()
+        self._saving_dialog.deleteLater()
+        self._saving_dialog = None
+        self.close()
+
     def _running_workers(self) -> list[QThread]:
         """終了待ちの対象となる、現在走っているワーカースレッドを列挙する"""
         candidates = [
-            self.download_worker,
+            *self._download_tasks,
             self.format_worker,
             *self._format_workers,
             self.update_check_worker,
@@ -1034,44 +1287,39 @@ class MainWindow(Ui_MainWindow):
         unique = list(dict.fromkeys(w for w in candidates if w is not None))
         return [w for w in unique if w.isRunning()]
 
-    def on_progress(self, percent: float, text: str) -> None:
-        self.progress_bar.setValue(int(percent))
-        self.status_label.setText(text)
+    def _release_download_worker(self, worker: DownloadWorker) -> DownloadTaskWidget | None:
+        """終わったダウンロードワーカーを手放し、その表示を返す。完了の通知はrun()が
+        戻る直前に届くため、参照を手放す前に終了を待つ(走行中のQThreadが破棄されるとプロセスごと落ちる)。
+        録画の表示は、終わり方によらず録画中のまとまりから外す"""
+        worker.wait()
+        task = self._download_tasks.pop(worker, None)
+        if task is not None:
+            self._move_below_recordings(task)
+        return task
 
-    def _release_download_worker(self) -> None:
-        """終わったダウンロードワーカーを手放す。完了の通知はrun()が戻る直前に届くため、
-        参照を手放す前に終了を待つ(走行中のQThreadが破棄されるとプロセスごと落ちる)"""
-        worker = self.download_worker
-        self.download_worker = None
-        if worker is not None:
-            worker.wait()
+    def on_download_finished_ok(self, worker: DownloadWorker, saved_path: str) -> None:
+        """並列に何本も完了するとウィンドウが増え続けるため、フォルダは自動では開かず、
+        一覧の「フォルダを開く」から開いてもらう"""
+        task = self._release_download_worker(worker)
+        if task is not None:
+            task.mark_finished("完了", saved_path=saved_path)
+        self._close_after_recordings()
 
-    def on_finished_ok(self) -> None:
-        self._release_download_worker()
-        # url_edit.clear()がtextChangedを発火させ、on_url_changed内のリセット処理で
-        # フォーマット選択・mp3変換・クリップ範囲・進捗バー等の入力内容が一括で初期化される
-        self.url_edit.clear()
-        self._set_busy(False)
-        self.download_btn.setEnabled(False)
-        self.open_folder_btn.setEnabled(True)
-        self.progress_bar.reset()
-        self.status_label.setText("完了")
-        self.open_output_folder()
+    def on_download_error(self, worker: DownloadWorker, message: str) -> None:
+        task = self._release_download_worker(worker)
+        if task is not None:
+            task.mark_finished("失敗しました")
+        if not self._close_confirmed:
+            # 並列に走っている中のどれが失敗したのか分かるよう、タイトルを添える。終了の待ちの間は、
+            # モーダルのダイアログで終了が止まらないよう出さない(理由はログに残っている)
+            title = task.title_label.text() if task is not None else worker.request.url
+            dialogs.critical(self, "ダウンロード失敗", f"{title}\n\n{message}")
+        self._close_after_recordings()
 
-    def on_finished_error(self, message: str) -> None:
-        self._finish_without_success("失敗しました")
-        dialogs.critical(self, "ダウンロード失敗", message)
-
-    def on_cancelled(self) -> None:
-        """ユーザーが自分で止めた場合は失敗ではないため、エラーのダイアログは出さない"""
-        self._finish_without_success("キャンセルしました")
-
-    def _finish_without_success(self, status: str) -> None:
-        self._release_download_worker()
-        self.status_label.setText(status)
-        self._set_busy(False)
-        self.download_btn.setEnabled(self.info_ready)
-        # 失敗・キャンセルでも、後処理だけ失敗した完成品や開始前からのファイルを確かめられるよう、
-        # 保存先を開けるようにしておく
-        self.open_folder_btn.setEnabled(self.last_output_dir is not None)
-        self.progress_bar.reset()
+    def on_download_cancelled(self, worker: DownloadWorker) -> None:
+        """ユーザーが自分で止めた場合は失敗ではないため、エラーのダイアログは出さない。
+        結果を確かめる必要もないので、一覧からもそのまま取り除く(止まるまでは「キャンセル中...」のまま残る)"""
+        task = self._release_download_worker(worker)
+        if task is not None:
+            self._remove_task_widget(task)
+        self._close_after_recordings()

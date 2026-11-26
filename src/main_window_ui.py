@@ -15,8 +15,9 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
+    QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -28,6 +29,8 @@ from theme import (
     ACCENT_DISABLED_COLOR,
     ACCENT_HOVER_COLOR,
     ACCENT_PRESSED_COLOR,
+    LINK_BUTTON_STYLE,
+    LIVE_COLOR,
     MUTED_TEXT_COLOR,
     ON_ACCENT_DISABLED_TEXT_COLOR,
     ON_ACCENT_TEXT_COLOR,
@@ -40,17 +43,17 @@ IDLE_STATUS_TEXT = "待機中"
 
 APP_TITLE = "YouTube 動画ダウンローダー"
 
+DOWNLOAD_BUTTON_TEXT = "ダウンロード開始"
+# 配信中のライブを表示している間のダウンロードボタンの文言
+RECORD_BUTTON_TEXT = "録画開始"
+
 THUMBNAIL_SIZE = QSize(120, 68)
 
-LINK_BUTTON_STYLE = f"""
-QPushButton {{
-    color: {ACCENT_COLOR};
-    border: none;
-    padding: 2px 4px;
-    background: transparent;
-}}
-QPushButton:hover {{ text-decoration: underline; }}
-"""
+# ウィンドウの既定の幅。ダウンロード一覧を表示するとその分だけ広がるため、入力欄側は控えめにする
+DEFAULT_WINDOW_WIDTH = 560
+
+# 画面右上に並べるダウンロード一覧の幅
+DOWNLOAD_PANEL_WIDTH = 240
 
 
 def window_title(version: str | None) -> str:
@@ -83,6 +86,7 @@ class Ui_MainWindow(QMainWindow):
     merge_note_label: QLabel
     mp3_checkbox: QCheckBox
     mp3_label: QLabel
+    no_thumbnail_checkbox: QCheckBox
     detail_toggle_btn: QPushButton
     detail_container: QWidget
     clip_start_edit: QLineEdit
@@ -92,14 +96,19 @@ class Ui_MainWindow(QMainWindow):
     out_edit: QLineEdit
     browse_btn: QPushButton
     download_btn: QPushButton
-    cancel_btn: QPushButton
-    open_folder_btn: QPushButton
-    progress_bar: QProgressBar
     spinner: SpinnerWidget
     status_label: QLabel
     log_toggle_btn: QPushButton
     log_view: QPlainTextEdit
-    input_widgets: list[QWidget]
+    live_header: QWidget
+    live_badge_label: QLabel
+    live_elapsed_label: QLabel
+    live_start_container: QWidget
+    live_from_start_radio: QRadioButton
+    live_from_now_radio: QRadioButton
+    live_unavailable_label: QLabel
+    download_panel: QWidget
+    download_list_layout: QVBoxLayout
 
     @staticmethod
     def _make_toggle_button(text: str, fixed_size: bool = True) -> QPushButton:
@@ -121,13 +130,16 @@ class Ui_MainWindow(QMainWindow):
 
     def setup_ui(self, saved_out_dir: str, version: str | None = None) -> None:
         self.setWindowTitle(window_title(version))
-        self.resize(760, 420)
+        self.resize(DEFAULT_WINDOW_WIDTH, 420)
 
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(16, 14, 16, 14)
+        root_layout = QHBoxLayout(central)
+        root_layout.setContentsMargins(16, 14, 16, 14)
+        root_layout.setSpacing(12)
+        layout = QVBoxLayout()
         layout.setSpacing(8)
+        root_layout.addLayout(layout, stretch=1)
 
         # --- URL入力 ---
         url_row = QHBoxLayout()
@@ -156,14 +168,38 @@ class Ui_MainWindow(QMainWindow):
         # さらに引き伸ばさない(二重に拡縮すると、高DPI画面でぼやける)
         self.thumbnail_label.setStyleSheet(f"background-color: {PLACEHOLDER_BACKGROUND}; border-radius: 3px;")
         preview_row.addWidget(self.thumbnail_label)
+        # タイトルの上に、配信中のライブのときだけLIVE見出し(バッジ・配信開始からの経過時間)を出す。
+        # 上下の伸縮で、見出しの有無にかかわらずタイトルを縦方向の中央に置く
+        text_column = QWidget(preview_container)
+        text_layout = QVBoxLayout(text_column)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+        text_layout.addStretch(1)
+        self.live_header = QWidget()
+        live_header_layout = QHBoxLayout(self.live_header)
+        live_header_layout.setContentsMargins(0, 0, 0, 0)
+        live_header_layout.setSpacing(8)
+        self.live_badge_label = QLabel("● LIVE")
+        self.live_badge_label.setStyleSheet(f"color: {LIVE_COLOR}; font-weight: bold;")
+        live_header_layout.addWidget(self.live_badge_label)
+        self.live_elapsed_label = QLabel("")
+        self.live_elapsed_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.live_elapsed_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        live_header_layout.addWidget(self.live_elapsed_label)
+        live_header_layout.addStretch(1)
+        self.live_header.setFixedHeight(self.live_badge_label.sizeHint().height())
+        self.live_header.setVisible(False)
+        text_layout.addWidget(self.live_header)
         # 動画タイトルは外部由来の文字列のため、"<b>"等がHTMLとして描画されないようにする
         # (他の内容が変わるラベルも同様。dialogs参照)
-        self.title_label = QLabel("", preview_container)
+        self.title_label = QLabel("")
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setWordWrap(True)
         self.title_label.setMaximumHeight(THUMBNAIL_SIZE.height())
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        preview_row.addWidget(self.title_label, stretch=1)
+        text_layout.addWidget(self.title_label)
+        text_layout.addStretch(1)
+        preview_row.addWidget(text_column, stretch=1)
         layout.addWidget(preview_container)
 
         # --- フォーマット選択 ---
@@ -193,6 +229,25 @@ class Ui_MainWindow(QMainWindow):
         self.auto_format_note_label.setStyleSheet(f"color: {WARNING_TEXT_COLOR};")
         self.auto_format_note_label.setVisible(False)
         layout.addWidget(self.auto_format_note_label)
+
+        # --- 録画開始位置(配信中のライブのときだけ) ---
+        # 選択肢が2つだけのため、コンボではなく両方が常に見えるラジオボタンにする
+        self.live_start_container = QWidget()
+        live_start_layout = QHBoxLayout(self.live_start_container)
+        live_start_layout.setContentsMargins(0, 0, 0, 0)
+        live_start_layout.addWidget(QLabel("録画開始位置:"))
+        self.live_from_start_radio = QRadioButton("配信の最初から")
+        self.live_from_start_radio.setChecked(True)
+        live_start_layout.addWidget(self.live_from_start_radio)
+        self.live_from_now_radio = QRadioButton("今から")
+        live_start_layout.addWidget(self.live_from_now_radio)
+        # さかのぼれない配信では、選べない選択肢を並べる代わりにこの一文だけを出す
+        self.live_unavailable_label = QLabel("今から録画します（この配信はさかのぼって保存できません）")
+        self.live_unavailable_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        live_start_layout.addWidget(self.live_unavailable_label)
+        live_start_layout.addStretch(1)
+        self.live_start_container.setVisible(False)
+        layout.addWidget(self.live_start_container)
 
         self.manual_container = QWidget()
         manual_layout = QVBoxLayout(self.manual_container)
@@ -317,8 +372,11 @@ class Ui_MainWindow(QMainWindow):
         self.detail_container.setVisible(False)
 
         # --- ダウンロード ---
+        self.no_thumbnail_checkbox = QCheckBox("サムネイルを含めない")
+        layout.addWidget(self.no_thumbnail_checkbox)
+
         btn_row = QHBoxLayout()
-        self.download_btn = QPushButton("ダウンロード開始")
+        self.download_btn = QPushButton(DOWNLOAD_BUTTON_TEXT)
         self.download_btn.setMinimumHeight(40)
         download_font = self.download_btn.font()
         download_font.setBold(True)
@@ -341,23 +399,13 @@ class Ui_MainWindow(QMainWindow):
             """
         )
         self.download_btn.setEnabled(False)
+        # 保存したファイルは、画面右上の一覧の各表示にある「フォルダを開く」から開く
         btn_row.addWidget(self.download_btn, stretch=1)
-        self.cancel_btn = QPushButton("キャンセル")
-        self.cancel_btn.setEnabled(False)
-        btn_row.addWidget(self.cancel_btn)
-        self.open_folder_btn = QPushButton("フォルダを開く")
-        self.open_folder_btn.setEnabled(False)
-        btn_row.addWidget(self.open_folder_btn)
         layout.addLayout(btn_row)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        layout.addWidget(self.progress_bar)
 
         status_row = QHBoxLayout()
         self.spinner = SpinnerWidget()
         status_row.addWidget(self.spinner)
-        # 進捗表示にはyt-dlpが返す速度等の文字列が入る
         self.status_label = QLabel(IDLE_STATUS_TEXT)
         self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         status_row.addWidget(self.status_label)
@@ -371,17 +419,31 @@ class Ui_MainWindow(QMainWindow):
         self.log_view.setVisible(False)
         layout.addWidget(self.log_view)
 
-        self.input_widgets = [
-            self.url_edit,
-            self.paste_btn,
-            self.out_edit,
-            self.browse_btn,
-            self.format_combo,
-            self.manual_toggle_btn,
-            self.video_format_combo,
-            self.audio_format_combo,
-            self.mp3_checkbox,
-            self.mp3_label,
-            self.detail_toggle_btn,
-            self.detail_container,
-        ]
+        root_layout.addWidget(self._build_download_panel())
+
+    def _build_download_panel(self) -> QWidget:
+        """ダウンロード開始ごとに1件ずつ積まれる一覧(画面右上)。1件もない間は隠しておく"""
+        self.download_panel = QWidget()
+        self.download_panel.setFixedWidth(DOWNLOAD_PANEL_WIDTH)
+        # 一覧の件数でウィンドウが縦に伸びないよう、高さは左側の入力欄に合わせて決まるようにする
+        self.download_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
+        panel_layout = QVBoxLayout(self.download_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(4)
+        panel_layout.addWidget(QLabel("ダウンロード"))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        list_container = QWidget()
+        self.download_list_layout = QVBoxLayout(list_container)
+        self.download_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.download_list_layout.setSpacing(6)
+        # 新しいものを上に積み、残りの余白は下に寄せる
+        self.download_list_layout.addStretch(1)
+        scroll.setWidget(list_container)
+        panel_layout.addWidget(scroll, stretch=1)
+
+        self.download_panel.setVisible(False)
+        return self.download_panel

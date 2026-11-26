@@ -1,7 +1,9 @@
 """保存先フォルダをOSのファイルマネージャで開く。Windowsでは、同じフォルダを
-既に開いているエクスプローラーのウィンドウがあれば新しく開かずに前面へ出す"""
+既に開いているエクスプローラーのウィンドウがあれば新しく開かずに前面へ出す。
+保存したファイルを選択した状態でフォルダを開くこともできる(reveal_file)"""
 
 import os
+import subprocess
 import sys
 from typing import Any
 
@@ -52,3 +54,22 @@ def open_folder(path: str) -> None:
     # Qtの薄いラッパー経由でOS標準のファイルマネージャ(Finder/Nautilus等)を開く。
     # Windows以外では、既存ウィンドウの再利用のような最適化は行わず素直に開くだけにする
     QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
+def reveal_file(path: str) -> None:
+    """pathのファイルを選択した状態で、それがあるフォルダをファイルマネージャで開く。
+    同じフォルダに多くのファイルがあっても、どれが今回保存したものかすぐ分かるようにする。
+    選択表示に対応しないOS(Linux等)や起動に失敗した場合は、フォルダを開くだけにする"""
+    path = os.path.normpath(path)
+    try:
+        if sys.platform == "win32":
+            # explorerは引数を独自に解釈し、"/select,"の後ろのパスを引用符で囲む必要があるため
+            # (空白を含むパス対策)、引数のリストではなく1つの文字列で渡す
+            subprocess.Popen(f'explorer /select,"{path}"')
+            return
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+            return
+    except OSError as e:
+        log_debug(f"reveal_file: ファイルを選択した状態で開けませんでした ({e!r})")
+    open_folder(os.path.dirname(path))

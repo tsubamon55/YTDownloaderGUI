@@ -3,14 +3,43 @@
 from collections.abc import Iterable
 from typing import Literal
 
-from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFocusEvent, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QElapsedTimer,
+    QModelIndex,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QFocusEvent,
+    QHideEvent,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPaintEvent,
+    QPen,
+    QPixmap,
+    QShowEvent,
+)
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFrame,
+    QHBoxLayout,
     QLabel,
+    QProgressBar,
+    QPushButton,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionComboBox,
+    QStyleOptionProgressBar,
     QStyleOptionViewItem,
     QStylePainter,
     QVBoxLayout,
@@ -25,13 +54,20 @@ from formats import (
     FORMAT_MISMATCH_ROLE,
     FORMAT_ROW_HEIGHT,
 )
+from live import LIVE_DISCARDING_TEXT, LIVE_SAVING_TEXT
 from theme import (
     ACCENT_COLOR,
     DISABLED_CONTROL_RGB,
+    LINK_BUTTON_STYLE,
+    LIVE_COLOR,
+    LIVE_PROGRESS_BAR_STYLE,
+    MUTED_TEXT_COLOR,
     NEUTRAL_RGB,
+    PLACEHOLDER_BACKGROUND,
     POPUP_BACKGROUND_COLOR,
     POPUP_IMAGE_BACKGROUND,
     POPUP_TEXT_COLOR,
+    TASK_BORDER_COLOR,
 )
 
 # RangeSliderの2つのハンドル(開始側/終了側)
@@ -150,6 +186,85 @@ class SpinnerWidget(QWidget):
         radius = self._diameter / 2 - 2
         rect = QRect(int(-radius), int(-radius), int(radius * 2), int(radius * 2))
         painter.drawArc(rect, 0, 270 * 16)
+        painter.end()
+
+
+class MarqueeProgressBar(QProgressBar):
+    """割合が無い間(setRange(0, 0))、短い線が左から右へ流れ続ける進捗バー。
+
+    スタイルシートで色を付けたQProgressBarは、割合が無い間の線をバーの幅の半分の長さで描き、
+    右端からはみ出した分を左端に回り込ませるため、ほとんどバー全体が埋まって見える。
+    そこで溝はスタイルシートのまま描かせ、線だけをOSの一般的な表示(幅の1/4程度の線が、
+    左端から入り右端へ抜けていく)に倣って自前で描く"""
+
+    SEGMENT_RATIO = 0.25
+    # 狭い一覧でも動いていることが分かる最短の長さ
+    MIN_SEGMENT_WIDTH = 24
+    # 線が左端から右端を抜けるまでの時間
+    CYCLE_MS = 1600
+    _FRAME_MS = 16
+
+    def __init__(self, color: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._easing = QEasingCurve(QEasingCurve.Type.InOutSine)
+        # 描画の遅れで速さが変わらないよう、位置はコマ数ではなく経過時間から求める
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._FRAME_MS)
+        self._timer.timeout.connect(self.update)
+
+    def is_busy(self) -> bool:
+        return self.minimum() == 0 and self.maximum() == 0
+
+    def setRange(self, minimum: int, maximum: int) -> None:
+        super().setRange(minimum, maximum)
+        self._update_timer()
+
+    def showEvent(self, event: QShowEvent | None) -> None:
+        super().showEvent(event)
+        self._update_timer()
+
+    def hideEvent(self, event: QHideEvent | None) -> None:
+        super().hideEvent(event)
+        self._update_timer()
+
+    def _update_timer(self) -> None:
+        """見えていて割合が無い間だけ動かす(終わった項目・隠れた項目で描き続けない)"""
+        if self.is_busy() and self.isVisible():
+            if not self._timer.isActive():
+                self._clock.start()
+                self._timer.start()
+        else:
+            self._timer.stop()
+
+    def segment_rect(self, elapsed_ms: int) -> QRectF:
+        """経過時間での線の位置。左端の外から入り、右端の外へ抜ける"""
+        width = self.width()
+        segment = max(width * self.SEGMENT_RATIO, min(self.MIN_SEGMENT_WIDTH, width))
+        progress = self._easing.valueForProgress((elapsed_ms % self.CYCLE_MS) / self.CYCLE_MS)
+        x = -segment + (width + segment) * progress
+        return QRectF(x, 0, segment, self.height())
+
+    def paintEvent(self, event: QPaintEvent | None) -> None:
+        if not self.is_busy():
+            super().paintEvent(event)
+            return
+        painter = QStylePainter(self)
+        # 溝だけをスタイル(スタイルシート)に描かせるため、割合0のバーとして描く
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+        option.minimum, option.maximum, option.progress = 0, 100, 0
+        painter.drawControl(QStyle.ControlElement.CE_ProgressBar, option)
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        radius = self.height() / 2
+        groove = QPainterPath()
+        groove.addRoundedRect(QRectF(self.rect()), radius, radius)
+        painter.setClipPath(groove)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._color)
+        painter.drawRoundedRect(self.segment_rect(self._clock.elapsed()), radius, radius)
         painter.end()
 
 
@@ -438,3 +553,172 @@ class RangeSlider(QWidget):
             radius = self._HANDLE_RADIUS + 2 if emphasized else self._HANDLE_RADIUS
             painter.drawEllipse(QPointF(x, mid_y), radius, radius)
         painter.end()
+
+
+class DownloadTaskWidget(QFrame):
+    """並列ダウンロードの1件分(サムネイル・タイトル・進捗バー・状態・キャンセル/閉じるボタン)を表示する。
+
+    走行中はボタンがキャンセル、終わった後は一覧から取り除く「閉じる」として働く。
+    完了した場合は、保存したファイルを選択した状態でフォルダを開く「フォルダを開く」も出す。
+    ライブの録画中(set_live)は赤いLIVEバッジを出し、ボタンはキャンセルではなく停止(それまでの分を保存)として働く"""
+
+    THUMBNAIL_SIZE = QSize(64, 36)
+
+    cancel_requested = pyqtSignal()
+    # ライブの録画の停止(それまでの分を保存する)。確認は受け取った側で行う
+    stop_requested = pyqtSignal()
+    dismiss_requested = pyqtSignal()
+    # 保存したファイルのパス
+    reveal_requested = pyqtSignal(str)
+
+    def __init__(self, title: str, thumbnail: QPixmap | None = None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._finished = False
+        self._saved_path: str | None = None
+        self._live = False
+        self.setObjectName("downloadTask")
+        self.setStyleSheet(
+            f"#downloadTask {{ border: 1px solid {TASK_BORDER_COLOR}; border-radius: 4px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 4)
+        layout.setSpacing(4)
+
+        # 折り返すQLabelはheightForWidthの計算がずれて縦に間延びするため、
+        # サムネイルの高さに固定したコンテナで包む(MainWindowの動画プレビューと同じ理由)
+        header = QWidget()
+        header.setFixedHeight(self.THUMBNAIL_SIZE.height())
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setFixedSize(self.THUMBNAIL_SIZE)
+        self.thumbnail_label.setStyleSheet(f"background-color: {PLACEHOLDER_BACKGROUND}; border-radius: 2px;")
+        if thumbnail is not None and not thumbnail.isNull():
+            self.thumbnail_label.setPixmap(self._fit_thumbnail(thumbnail))
+        header_layout.addWidget(self.thumbnail_label)
+        # 動画タイトルは外部由来の文字列のため、HTMLとして描画しない。高さをちょうど2行分にして
+        # 上詰めにし、3行目以降は行の途中で切れずに隠れるようにする(全文はツールチップで見せる)
+        self.title_label = QLabel(title)
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.title_label.setToolTip(title)
+        self.title_label.setWordWrap(True)
+        self.title_label.setMinimumWidth(1)
+        self.title_label.setMaximumHeight(self.title_label.fontMetrics().lineSpacing() * 2)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        header_layout.addWidget(self.title_label, stretch=1, alignment=Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(header)
+
+        # 割合が無いのはライブの録画中・保存中だけのため、流れる線はLIVEバッジと同じ赤にする
+        self.progress_bar = MarqueeProgressBar(LIVE_COLOR)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
+        layout.addWidget(self.progress_bar)
+
+        # 状態とボタンを同じ行に置き、狭い一覧でもタイトルの幅を削らないようにする
+        footer = QHBoxLayout()
+        footer.setSpacing(4)
+        # 速度や残り時間が変わらない間(情報取得・結合・切り抜き等)も止まっていないことが分かるよう、
+        # 終わるまで回し続ける
+        self.spinner = SpinnerWidget(diameter=14)
+        self.spinner.start()
+        footer.addWidget(self.spinner)
+        self.live_badge = QLabel("● LIVE")
+        self.live_badge.setStyleSheet(f"color: {LIVE_COLOR}; font-weight: bold;")
+        self.live_badge.setVisible(False)
+        footer.addWidget(self.live_badge)
+        # 進捗表示にはyt-dlpが返す速度等の文字列が入る
+        self.status_label = QLabel("開始待ち...")
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.status_label.setStyleSheet(f"color: {MUTED_TEXT_COLOR};")
+        self.status_label.setMinimumWidth(1)
+        footer.addWidget(self.status_label, stretch=1)
+        self.reveal_btn = QPushButton("フォルダを開く")
+        self.reveal_btn.setFlat(True)
+        self.reveal_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        self.reveal_btn.setVisible(False)
+        self.reveal_btn.clicked.connect(self._on_reveal_clicked)
+        footer.addWidget(self.reveal_btn)
+        self.action_btn = QPushButton("キャンセル")
+        self.action_btn.setFlat(True)
+        self.action_btn.setStyleSheet(LINK_BUTTON_STYLE)
+        self.action_btn.clicked.connect(self._on_action_clicked)
+        footer.addWidget(self.action_btn)
+        layout.addLayout(footer)
+
+    def _fit_thumbnail(self, pixmap: QPixmap) -> QPixmap:
+        """アスペクト比を保ったまま表示枠いっぱいに縮小し、はみ出た部分を中央基準で切り出す。
+        高DPI画面でぼやけないよう、元画像の画素密度のまま作る"""
+        ratio = pixmap.devicePixelRatio()
+        width = round(self.THUMBNAIL_SIZE.width() * ratio)
+        height = round(self.THUMBNAIL_SIZE.height() * ratio)
+        scaled = pixmap.scaled(
+            width, height, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+        )
+        fitted = scaled.copy((scaled.width() - width) // 2, (scaled.height() - height) // 2, width, height)
+        fitted.setDevicePixelRatio(ratio)
+        return fitted
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
+
+    @property
+    def is_live(self) -> bool:
+        return self._live
+
+    def set_live(self, live: bool) -> None:
+        """ライブの録画の表示(赤いLIVEバッジ・赤い進捗バー・「停止」ボタン)にする。
+        録画が終わって保存した後も、何の録画だったか分かるようバッジと色はそのまま残す"""
+        self._live = live
+        self.live_badge.setVisible(live)
+        self.progress_bar.setStyleSheet(LIVE_PROGRESS_BAR_STYLE if live else "")
+        if not self._finished:
+            self.action_btn.setText("停止" if live else "キャンセル")
+
+    def set_progress(self, percent: float, text: str) -> None:
+        """percentが負の値なら、割合が無い(ライブの録画中・保存中)ことを表し、進捗バーを動き続ける表示にする"""
+        if percent < 0:
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(int(percent))
+        self.status_label.setText(text)
+
+    def set_cancelling(self, discarding: bool = False) -> None:
+        """止まるまでの表示。discarding=Trueはライブの録画を保存せずに消す場合"""
+        self.action_btn.setEnabled(False)
+        if discarding:
+            text = LIVE_DISCARDING_TEXT
+        else:
+            text = LIVE_SAVING_TEXT if self._live else "キャンセル中..."
+        self.status_label.setText(text)
+
+    def mark_finished(self, status: str, saved_path: str | None = None) -> None:
+        """終了状態の表示に切り替え、ボタンを一覧から取り除く「閉じる」に変える。
+        saved_path(完了して保存したファイル)がある場合は「フォルダを開く」も出す"""
+        self._finished = True
+        self._saved_path = saved_path
+        self.spinner.stop()
+        # 録画中の動き続ける表示のまま終わらないよう、割合の表示に戻す
+        self.progress_bar.setRange(0, 100)
+        if saved_path is not None:
+            self.progress_bar.setValue(100)
+            self.reveal_btn.setVisible(True)
+        self.status_label.setText(status)
+        self.action_btn.setText("閉じる")
+        self.action_btn.setEnabled(True)
+
+    def _on_reveal_clicked(self) -> None:
+        if self._saved_path is not None:
+            self.reveal_requested.emit(self._saved_path)
+
+    def _on_action_clicked(self) -> None:
+        if self._finished:
+            self.dismiss_requested.emit()
+        elif self._live:
+            self.stop_requested.emit()
+        else:
+            self.cancel_requested.emit()

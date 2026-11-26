@@ -15,9 +15,30 @@ MUTED_TEXT_COLOR = "#808080"
 # スライダーの溝・無効時の色・一覧の非推奨行など、ライト/ダーク両方の背景に馴染む半透明のグレー
 NEUTRAL_RGB = (128, 128, 128)
 PLACEHOLDER_BACKGROUND = "rgba(128, 128, 128, 35)"
+# 並列ダウンロードの一覧で、1件ごとを区切る枠線
+TASK_BORDER_COLOR = "rgba(128, 128, 128, 90)"
 DISABLED_CONTROL_RGB = (160, 160, 160)
 
 # スライダーのドラッグ中に出すプレビューのポップアップ(背景を問わず読める暗い地に白文字)
 POPUP_BACKGROUND_COLOR = "#202124"
 POPUP_IMAGE_BACKGROUND = "rgba(255, 255, 255, 30)"
 POPUP_TEXT_COLOR = "#ffffff"
+
+# トグルや一覧内の操作に使う、リンク風の目立たないボタン
+LINK_BUTTON_STYLE = f"""
+QPushButton {{
+    color: {ACCENT_COLOR};
+    border: none;
+    padding: 2px 4px;
+    background: transparent;
+}}
+QPushButton:hover {{ text-decoration: underline; }}
+"""
+
+# 配信中のライブを表す赤(YouTubeのLIVE表示に近い色)。LIVEバッジと録画中の進捗バーに使う
+LIVE_COLOR = "#d93025"
+# 録画中の進捗バー。::chunkだけに色を付けるとスタイルシート描画に切り替わって溝が消えるため、溝も合わせて描く
+LIVE_PROGRESS_BAR_STYLE = f"""
+QProgressBar {{ border: none; border-radius: 3px; background-color: {PLACEHOLDER_BACKGROUND}; }}
+QProgressBar::chunk {{ border-radius: 3px; background-color: {LIVE_COLOR}; }}
+"""

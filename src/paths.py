@@ -72,6 +72,18 @@ def remove_file_quietly(path: str, context: str) -> bool:
     return True
 
 
+_FILE_ATTRIBUTE_HIDDEN = 0x2
+
+
+def hide_path_quietly(path: str) -> None:
+    """Windowsでpathに隠し属性を付ける(他のOSは名前の先頭の"."で隠れるため何もしない)。
+    見た目のための処理なので、失敗しても例外は投げずlog_debugへ記録するだけにする"""
+    if sys.platform != "win32":
+        return
+    if not ctypes.windll.kernel32.SetFileAttributesW(path, _FILE_ATTRIBUTE_HIDDEN):
+        log_debug(f"hide_path_quietly: {path} に隠し属性を付けられませんでした")
+
+
 class _GUID(ctypes.Structure):
     _fields_ = [
         ("Data1", ctypes.c_ulong),
