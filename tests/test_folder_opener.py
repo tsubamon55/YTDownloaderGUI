@@ -48,13 +48,14 @@ class RevealFileTest(unittest.TestCase):
         with patch.object(folder_opener.sys, "platform", "darwin"), \
              patch.object(folder_opener.subprocess, "Popen") as popen_mock:
             folder_opener.reveal_file("/tmp/out/My Video.mp4")
-        popen_mock.assert_called_once_with(["open", "-R", "/tmp/out/My Video.mp4"])
+        # reveal_fileはパスをOSの表記へ正規化する(Windowsでは区切りが\\になる)
+        popen_mock.assert_called_once_with(["open", "-R", os.path.normpath("/tmp/out/My Video.mp4")])
 
     def test_other_os_opens_containing_folder(self):
         with patch.object(folder_opener.sys, "platform", "linux"), \
              patch.object(folder_opener, "open_folder") as open_folder_mock:
             folder_opener.reveal_file("/tmp/out/My Video.mp4")
-        open_folder_mock.assert_called_once_with("/tmp/out")
+        open_folder_mock.assert_called_once_with(os.path.normpath("/tmp/out"))
 
     def test_falls_back_to_folder_when_launch_fails(self):
         with patch.object(folder_opener.sys, "platform", "darwin"), \
@@ -62,7 +63,7 @@ class RevealFileTest(unittest.TestCase):
              patch.object(folder_opener, "open_folder") as open_folder_mock, \
              patch.object(folder_opener, "log_debug"):
             folder_opener.reveal_file("/tmp/out/My Video.mp4")
-        open_folder_mock.assert_called_once_with("/tmp/out")
+        open_folder_mock.assert_called_once_with(os.path.normpath("/tmp/out"))
 
 
 if __name__ == "__main__":

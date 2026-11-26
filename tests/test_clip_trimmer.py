@@ -797,7 +797,8 @@ class FFmpegRunnerTest(unittest.TestCase):
         runner = clip_trimmer.FFmpegRunner(None)
         runner.executable = "ffmpeg"
         with tempfile.TemporaryDirectory() as tmp:
-            src = os.path.join(tmp, "a:b.mp4")
+            # ":"を含むファイル名はWindowsでは作れない(ドライブ指定と解釈される)ため、その場合は含めない
+            src = os.path.join(tmp, "a_b.mp4" if sys.platform == "win32" else "a:b.mp4")
             open(src, "w").close()
             with patch.object(runner, "_run", return_value=("", "line1\nInvalid argument\n", 1)) as run:
                 with self.assertRaisesRegex(RuntimeError, "Invalid argument"):
