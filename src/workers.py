@@ -111,6 +111,8 @@ class DownloadRequest:
     clip_end: float | None = None
     # ライブの録画の開始位置。Noneは通常の動画
     live_mode: LiveMode | None = None
+    # サムネイルをファイルへ埋め込むかどうか
+    embed_thumbnail: bool = True
 
     @property
     def has_clip(self) -> bool:
@@ -640,7 +642,12 @@ class DownloadWorker(QThread):
             if preferred and preferred != "best":
                 return preferred
         ext = probe_info.get("ext")
-        if ext == "webm" and probe_info.get("requested_formats") and probe_info.get("thumbnails"):
+        if (
+            ext == "webm"
+            and self.request.embed_thumbnail
+            and probe_info.get("requested_formats")
+            and probe_info.get("thumbnails")
+        ):
             # 映像+音声の結合時、サムネイル埋め込み(EmbedThumbnail)のためyt-dlpがwebmをmkvへ切り替える
             ext = "mkv"
         return ext
@@ -838,7 +845,7 @@ class DownloadWorker(QThread):
             # 区切りの並列取得(concurrent_fragment_downloads)は指定しない。並列にすると
             # 進捗フックからのKeyboardInterruptで止まらなくなり、取得も速くならなかった
             opts["live_from_start"] = True
-        if expected_ext in self.THUMBNAIL_EMBEDDABLE_EXTS:
+        if expected_ext in self.THUMBNAIL_EMBEDDABLE_EXTS and self.request.embed_thumbnail:
             opts["postprocessors"].append({"key": "EmbedThumbnail"})
         else:
             opts["writethumbnail"] = False
@@ -890,7 +897,8 @@ class DownloadWorker(QThread):
         else:
             remove_file_quietly(ts_path, "_record_live_from_now")
         self._final_filepath = output_path
-        self._embed_live_thumbnail(probe_info, output_path, ffmpeg_location)
+        if self.request.embed_thumbnail:
+            self._embed_live_thumbnail(probe_info, output_path, ffmpeg_location)
 
     def _embed_live_thumbnail(self, probe_info: Format, output_path: str, ffmpeg_location: str | None) -> None:
         """録画を入れ替えたファイルへ、通常のダウンロード(EmbedThumbnail)と同じくサムネイルを埋め込む。

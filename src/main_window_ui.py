@@ -86,6 +86,7 @@ class Ui_MainWindow(QMainWindow):
     merge_note_label: QLabel
     mp3_checkbox: QCheckBox
     mp3_label: QLabel
+    no_thumbnail_checkbox: QCheckBox
     detail_toggle_btn: QPushButton
     detail_container: QWidget
     clip_start_edit: QLineEdit
@@ -371,6 +372,9 @@ class Ui_MainWindow(QMainWindow):
         self.detail_container.setVisible(False)
 
         # --- ダウンロード ---
+        self.no_thumbnail_checkbox = QCheckBox("サムネイルを含めない")
+        layout.addWidget(self.no_thumbnail_checkbox)
+
         btn_row = QHBoxLayout()
         self.download_btn = QPushButton(DOWNLOAD_BUTTON_TEXT)
         self.download_btn.setMinimumHeight(40)

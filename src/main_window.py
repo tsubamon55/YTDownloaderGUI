@@ -1014,6 +1014,7 @@ class MainWindow(Ui_MainWindow):
             clip_start=clip_start,
             clip_end=clip_end,
             live_mode=self._selected_live_mode(),
+            embed_thumbnail=not self.no_thumbnail_checkbox.isChecked(),
         )
 
     def _check_required_inputs(self, url: str, out_dir: str) -> bool:
