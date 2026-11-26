@@ -973,6 +973,12 @@ class MainWindow(Ui_MainWindow):
         assert central is not None
         layout = central.layout()
         assert layout is not None
+        # 隠した直後はウィンドウの最小幅が古いまま(一覧の分を含む)で、次のresizeが目標より
+        # 1px広く丸められるため、先にレイアウトを確定して最小幅を更新しておく
+        layout.activate()
+        main_layout = self.layout()
+        if main_layout is not None:
+            main_layout.activate()
         delta = DOWNLOAD_PANEL_WIDTH + layout.spacing()
         if not visible:
             delta = -delta
